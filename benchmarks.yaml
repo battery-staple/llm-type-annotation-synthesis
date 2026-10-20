@@ -1,0 +1,8 @@
+benchmarks:
+  - id: "synthetic-id-swap"
+    repo_url: "eval-repos/synthetic-id-swap"
+    commit_hash: "4d49e20bb284ba1aabfd68bde775aa55bfb7c401"
+    parent_hash: "56aa665aa4fc4a95ffe48e7e1972b4d4328c61c3"
+    regression_test_class: "com.example.synthetic.TransferServiceTest"
+    regression_test_method: "testTransferDebitsSourceAndCreditsDestination"
+    description: "Conflation of source and destination account identifiers in TransferService."

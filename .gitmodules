@@ -1,0 +1,3 @@
+[submodule "eval-repos/synthetic-id-swap"]
+	path = eval-repos/synthetic-id-swap
+	url = https://github.com/battery-staple/synthetic-id-swap.git
