@@ -1,3 +1,7 @@
 [submodule "eval-repos/synthetic-id-swap"]
 	path = eval-repos/synthetic-id-swap
 	url = https://github.com/battery-staple/synthetic-id-swap.git
+[submodule "eval-repos/cmsx"]
+	path = eval-repos/cmsx
+	url = https://gitlab.cs.cornell.edu/cmsx/cmsx.git
+	branch = master
