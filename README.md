@@ -42,7 +42,7 @@ Any contributor or autonomous agent working in this repository should adhere to 
           │
           ▼
    [Step 3: Synthesis]  ─── OpenCode agent generates custom-quals.jar + placement_guide.md
-                            (Qualifiers + Pure Validation/Coercion Guards)
+                            (Level 0 pure marker qualifiers; zero executable helper code)
           │
           ▼
    [Step 4: Placement]  ─── OpenCode agent applies annotations from placement_guide.md;
@@ -61,7 +61,7 @@ Any contributor or autonomous agent working in this repository should adhere to 
 
 ## 4. Repository & Documentation Guide
 
-- **`docs/design_plan.md`**: The conceptual pipeline design document. Covers the high-level stages, implementer freedom levels, 19-vector threat model and anti-cheat guards, experimentation matrix, metrics registry, and detailed sketches of future developments.
+- **`docs/design_plan.md`**: The conceptual pipeline design document. Covers the high-level stages, implementer freedom levels, active defense matrix and anti-cheat guards, experimentation matrix, metrics registry, and detailed sketches of future developments.
 - **`docs/implementation_plan.md`**: The concrete engineering specification. Covers programming language selection (Kotlin 1.9+ with JavaParser, plus decoupled Python analytics), SQLite DDL schema, OpenCode CLI watchdog harness, Gradle init script, directory layout, and CLI commands.
 - **`proposal/Project Proposal.md`**: The original CS 6158 course project proposal document.
 - **`eval-repos/`**: Directory housing target evaluation repositories:
