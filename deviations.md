@@ -83,12 +83,15 @@ the crawler) are not listed unless the code had to interpret the plan.
     waiting for EOF.
 16. **Seed/temperature are passed through environment variables.** The installed
     OpenCode CLI has no seed/temperature flags. They are still part of every CAS
-    key. Step caps are enforced by counting `step_start` events and terminating
-    the whole process tree.
+    key. The CLI does not read them, so generation is **not actually seeded**;
+    runs must be treated as non-deterministic despite deterministic cache keys.
+    Step caps are enforced by counting `step_start` events and terminating the
+    whole process tree.
 17. **Network isolation is best-effort, not enforced.** `unshare -n` is not
     permitted in this container, so `repair.internet_access=false` sets
-    `PIPELINE_AGENT_NO_NETWORK=1` and is stated in the prompts. It is not a hard
-    sandbox boundary. The blindness canary test asserts filesystem isolation and
+    `PIPELINE_AGENT_NO_NETWORK=1` in **synthesis only**; application and repair
+    do not set it, and the CLI has no known consumer. It is not a sandbox
+    boundary. The blindness canary test asserts filesystem isolation and
     documents this limitation.
 
 ## Synthesis / repair specifics
@@ -179,3 +182,16 @@ the crawler) are not listed unless the code had to interpret the plan.
     recurring "placement_guide.md is missing" and "No file changes were
     detected" failures. Both the agent runner and the generic process runner
     now set `PWD` explicitly. A regression test asserts it.
+
+## Known gaps not yet fixed
+
+34. **Repair is capped at four agent turns** (`MAX_AGENT_TURNS`), independent of
+    `agent.steps.repair` (a per-invocation step budget) and the checker-call
+    budget. This is an undocumented MVP choice.
+35. **`guardrails.mode: "disabled"` is accepted but inert.** Every stage runs
+    the AST/filesystem guards regardless, so a disabled-vs-enabled ablation
+    currently measures nothing.
+36. **CLI provenance is partly hardcoded.** `config_yaml`/`config_snapshot`
+    read `project_config.yaml` from the process working directory instead of
+    the `--config` path, and `verify-benchmark` delegates to `run` rather than
+    offering a triage-only check.
