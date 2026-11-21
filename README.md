@@ -62,20 +62,42 @@ Any contributor or autonomous agent working in this repository should adhere to 
 ## 4. Repository & Documentation Guide
 
 - **`docs/design_plan.md`**: The conceptual pipeline design document. Covers the high-level stages, implementer freedom levels, active defense matrix and anti-cheat guards, experimentation matrix, metrics registry, and detailed sketches of future developments.
-- **`docs/implementation_plan.md`**: The concrete engineering specification. Covers programming language selection (Kotlin 1.9+ with JavaParser, plus decoupled Python analytics), SQLite DDL schema, OpenCode CLI watchdog harness, Gradle init script, directory layout, and CLI commands.
+- **`docs/implementation_plan.md`**: The concrete engineering specification. Covers programming language selection (Kotlin 2.0 with JavaParser, plus decoupled Python analytics), SQLite DDL schema, OpenCode CLI watchdog harness, Gradle init script, directory layout, and CLI commands.
+- **`docs/critique_report.md`**: Independent review of an earlier design draft. Historical context; it does not describe the current plans.
+- **`docs/metrics_recommendations.md`**: Sixty proposed measurement and instrumentation additions.
+- **`docs/additional_future_improvements.md`**: A ranked research agenda of twenty-six additional experiments.
+- **`deviations.md`**: Places where the implementation intentionally differs from the engineering plan, including environment constraints and bug fixes.
 - **`proposal/Project Proposal.md`**: The original CS 6158 course project proposal document.
+- **`project_config.yaml`** and **`benchmarks.yaml`**: Runtime configuration and the curated benchmark manifest.
+- **`analysis/evaluate_metrics.py`**: Offline telemetry report over `data/pipeline.db`.
 - **`eval-repos/`**: Directory housing target evaluation repositories:
   - `eval-repos/synthetic-id-swap/`: A minimal synthetic Java project with a known ID-conflation bug for rapid local debugging.
-  - `eval-repos/cmsx/`: Cornell CMSX codebase for real-world evaluation.
+  - `eval-repos/cmsx/`: Cornell CMSX codebase (submodule present, but no curated benchmark entry yet).
 
 ---
 
 ## 5. Technology Stack & Prerequisites
 
-- **Host Environment**: Linux container / macOS with Docker or native JDK 17+.
-- **Pipeline Language**: Kotlin 1.9+ / 2.0 (JVM 17/21) built with Gradle.
-- **Agent Harness**: OpenCode CLI (`/usr/bin/opencode` v2.0.32).
-- **Type Checker**: Java Checker Framework (v3.42.0+).
+- **Host Environment**: Linux container / macOS. The pipeline requires a JDK 21 toolchain; target repositories compile at their own Java level (17 for the synthetic benchmark).
+- **Pipeline Language**: Kotlin 2.0.21 built with Gradle.
+- **Agent Harness**: OpenCode CLI (v2.2.5 in the current container).
+- **Type Checker**: Java Checker Framework 3.42.0, vendored under `vendor/checker-framework-3.42.0/` (not committed; install it there or update `project_config.yaml`).
 - **AST Parsing & Validation**: JavaParser (`com.github.javaparser:javaparser-core:3.26.1`).
 - **Storage & Inspection**: SQLite 3, Datasette (Python), Pandas / Jupyter.
-- **Default LLM**: Nemotron 3.5 Super VL Free (`nvidia/nemotron-3.5-super-vl-free`), configurable per stage.
+- **Default LLM**: `opencode/deepseek-v4.1-flash-free`, configurable per stage. In this container the `opencode-go/*` routes return `provider.no-route` from the standalone CLI, so the Console-routed model is used.
+
+## 6. Build and Run
+
+```bash
+./gradlew test                 # unit and guard tests
+./gradlew installDist          # builds build/install/pipeline/bin/pipeline
+
+./build/install/pipeline/bin/pipeline run \
+  --config project_config.yaml \
+  --benchmark synthetic-id-swap \
+  --seed 0
+
+python3 analysis/evaluate_metrics.py --db data/pipeline.db
+```
+
+Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build output) is gitignored. A fresh checkout needs the Checker Framework vendored before running.

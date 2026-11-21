@@ -1,0 +1,136 @@
+// Rendered per-run checker.init.gradle.
+// Every harness parameter is read from the environment, a -D system property, or a
+// -P project property. Bare Groovy identifiers are never used for run parameters.
+def required = { Project project, String key ->
+    def value = System.getenv(key)
+    if (value == null) value = System.getProperty(key)
+    if (value == null) value = project.findProperty(key)
+    if (value == null || value.toString().trim().isEmpty()) {
+        throw new GradleException("checker.init.gradle: missing required configuration '${key}'")
+    }
+    return value.toString()
+}
+
+def optional = { Project project, String key, String fallback ->
+    def value = System.getenv(key)
+    if (value == null) value = System.getProperty(key)
+    if (value == null) value = project.findProperty(key)
+    return (value == null || value.toString().trim().isEmpty()) ? fallback : value.toString()
+}
+
+allprojects { project ->
+    project.plugins.withId('java') {
+        project.afterEvaluate {
+            def cfHome = required(project, 'CHECKERFRAMEWORK_HOME')
+            def customQualJarPath = required(project, 'CUSTOM_QUAL_JAR_PATH')
+            def processorName = required(project, 'CF_PROCESSOR')
+            def quals = optional(project, 'CF_AQUALS', '')
+            def checkerCategory = required(project, 'CF_CHECKER_CATEGORY')
+            def guardrailsMode = optional(project, 'GUARDRAILS_MODE', 'lenient')
+            // Match the project's Java level. The harness supplies these from
+            // project_config.yaml (environment.source_compatibility/target_compatibility);
+            // the project's Java extension is the fallback when the env vars are absent.
+            def projectSourceCompat = String.valueOf(project.sourceCompatibility ?: org.gradle.api.JavaVersion.current())
+            def projectTargetCompat = String.valueOf(project.targetCompatibility ?: project.sourceCompatibility ?: org.gradle.api.JavaVersion.current())
+            def sourceCompat = optional(project, 'CF_SOURCE_COMPATIBILITY', projectSourceCompat)
+            def targetCompat = optional(project, 'CF_TARGET_COMPATIBILITY', projectTargetCompat)
+
+            def checkerJar = project.file(new File(cfHome, "checker/dist/checker.jar"))
+            def checkerQualJar = project.file(new File(cfHome, "checker/dist/checker-qual.jar"))
+            def customQualJar = project.file(customQualJarPath)
+
+            [checkerJar, checkerQualJar, customQualJar].each { artifact ->
+                if (!artifact.exists()) {
+                    throw new GradleException("checker.init.gradle: missing required artifact ${artifact}")
+                }
+            }
+            if (!(checkerCategory in ['custom_qualifier_hierarchy', 'builtin_checker'])) {
+                throw new GradleException("checker.init.gradle: invalid CF_CHECKER_CATEGORY '${checkerCategory}'")
+            }
+
+            // MVP explicitly rejects processors whose generated sources this post-pass
+            // does not model. A project using them must be excluded or extended.
+            def unsupportedGroups = ['org.projectlombok', 'org.mapstruct']
+            def declaredProcessors = project.configurations
+                .matching { it.name in ['annotationProcessor', 'compileOnly'] }
+                .collectMany { it.dependencies }
+                .collect { "${it.group}:${it.name}" }
+            def unsupported = declaredProcessors.find { dependency ->
+                unsupportedGroups.any { dependency.startsWith(it) }
+            }
+            if (unsupported != null) {
+                throw new GradleException(
+                    "checker.init.gradle: unsupported annotation processor ${unsupported}; " +
+                    "the dedicated checker post-pass does not process generated sources")
+            }
+
+            def javacPackages = ['api', 'code', 'comp', 'file', 'main', 'model',
+                                 'parser', 'processing', 'tree', 'util', 'jvm']
+            def jvmArgs = []
+            javacPackages.each { pkg ->
+                jvmArgs += "--add-exports=jdk.compiler/com.sun.tools.javac.${pkg}=ALL-UNNAMED".toString()
+                jvmArgs += "--add-opens=jdk.compiler/com.sun.tools.javac.${pkg}=ALL-UNNAMED".toString()
+            }
+
+            // Extra harness-provided classpath entries (colon-separated). Never the processor.
+            def extraCp = optional(project, 'CF_EXTRA_CLASSPATH', '')
+            def extraFiles = extraCp.split(java.io.File.pathSeparator).findAll { !it.trim().isEmpty() }
+                .collect { project.files(it) }
+                .inject(project.files()) { acc, f -> acc + f }
+
+            def main = project.sourceSets.main
+            project.tasks.register('checkerPass', JavaCompile) {
+                source = main.allJava
+                classpath = project.files(main.compileClasspath, checkerQualJar, customQualJar, extraFiles)
+                destinationDirectory.set(project.layout.buildDirectory.dir('checker-classes'))
+                sourceCompatibility = sourceCompat
+                targetCompatibility = targetCompat
+                options.fork = true
+                options.forkOptions.jvmArgs.addAll(jvmArgs)
+                options.annotationProcessorPath = project.files(checkerJar, customQualJar)
+
+                // Do not add -Aonelinemsg or -AshowPrefixInWarningMessages here. They are
+                // version-specific Checker Framework options and cause "unrecognized option"
+                // failures on some pinned releases; enable them only after verifying the
+                // exact checker version used by the harness.
+                def checkerArgs = [
+                    '-processor', processorName,
+                    '-Xmaxerrs', '10000',
+                    '-Xmaxwarns', '10000'
+                ]
+                if (checkerCategory == 'custom_qualifier_hierarchy') {
+                    if (quals.isEmpty()) {
+                        throw new GradleException(
+                            "checker.init.gradle: CF_AQUALS is required for custom_qualifier_hierarchy")
+                    }
+                    checkerArgs.add("-Aquals=${quals}".toString())
+                } else if (!quals.isEmpty()) {
+                    throw new GradleException(
+                        "checker.init.gradle: CF_AQUALS must be empty for builtin_checker; " +
+                        "-Aquals is only passed to custom qualifier hierarchies")
+                }
+                if (guardrailsMode == 'strict') {
+                    checkerArgs.addAll([
+                        '-AignoreRawTypeArguments=false',
+                        '-AinvariantArrays',
+                        '-AcheckPurityAnnotations',
+                        '-Alint=cast:unsafe'
+                    ])
+                }
+                options.compilerArgs.addAll(checkerArgs)
+            }
+
+            // Qualifier jars are compile/runtime visible so normal compilation and
+            // tests resolve qualifier imports. The processor is never attached to
+            // normal compileJava/test tasks; only the dedicated checkerPass above runs it.
+            project.sourceSets.main.compileClasspath += project.files(customQualJar, extraFiles)
+            project.sourceSets.test.compileClasspath += project.files(checkerQualJar, customQualJar, extraFiles)
+            project.sourceSets.test.runtimeClasspath += project.files(checkerQualJar, customQualJar, extraFiles)
+
+            // Tests receive the checker/custom qualifier classes but never the processor.
+            project.tasks.withType(Test).configureEach { testTask ->
+                testTask.classpath += project.files(checkerQualJar, customQualJar, extraFiles)
+            }
+        }
+    }
+}

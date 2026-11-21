@@ -1,1 +1,24 @@
 .DS_Store
+
+# Build output
+.gradle/
+build/
+
+# Python bytecode from analysis scripts
+__pycache__/
+*.pyc
+
+# Pipeline runtime state (regenerable, large, or machine-specific)
+.agent-libs/
+.cache/
+.worktrees/
+data/
+logs/
+eval-repos/*.git/
+
+# Vendored Checker Framework (install separately; see README/project_config.yaml)
+vendor/
+
+# Ad-hoc synthesis artifacts from manual runs
+placement_guide.md
+custom_quals_src/

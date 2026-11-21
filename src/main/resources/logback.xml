@@ -1,0 +1,65 @@
+<configuration scan="true" scanPeriod="30 seconds">
+    <!--
+        Defaults for the pipeline log directory and level. The launcher maps the
+        PIPELINE_LOG_DIR / PIPELINE_LOG_LEVEL environment variables onto system
+        properties of the same name before the first log statement, so setting
+        the environment (or -DPIPELINE_LOG_DIR=... / -DPIPELINE_LOG_LEVEL=...)
+        overrides these defaults. Plain property definitions are used because
+        shell-style ${VAR:-default} syntax is not supported by Logback.
+    -->
+    <property name="PIPELINE_LOG_DIR" value="logs" />
+    <property name="PIPELINE_LOG_LEVEL" value="INFO" />
+
+    <!-- Console Appender with Colorized MDC Formatting -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %highlight(%-5level) %cyan(%logger{36}) [%X{stage_name}][run:%X{run_id}][bench:%X{benchmark_id}][s:%X{sample_index}][turn:%X{turn_index}] - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Global Rolling JSON File Appender -->
+    <appender name="ROLLING_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${PIPELINE_LOG_DIR}/pipeline.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${PIPELINE_LOG_DIR}/pipeline-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>100MB</maxFileSize>
+            <maxHistory>30</maxHistory>
+            <totalSizeCap>10GB</totalSizeCap>
+        </rollingPolicy>
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <includeMdc>true</includeMdc>
+            <includeContext>true</includeContext>
+        </encoder>
+    </appender>
+
+    <!-- Per-run appender: one file per run_id, enabled when logging.per_run_file=true -->
+    <appender name="RUN_FILE" class="ch.qos.logback.classic.sift.SiftingAppender">
+        <discriminator class="ch.qos.logback.classic.sift.MDCBasedDiscriminator">
+            <key>run_id</key>
+            <defaultValue>unassigned</defaultValue>
+        </discriminator>
+        <sift>
+            <appender name="RUN_FILE-${run_id}" class="ch.qos.logback.core.FileAppender">
+                <file>${PIPELINE_LOG_DIR}/runs/${run_id}.log</file>
+                <append>false</append>
+                <encoder>
+                    <pattern>%d{ISO8601} [%thread] %-5level %logger{36} [%X{stage_name}][turn:%X{turn_index}][cas:%X{cas_key}] - %msg%n</pattern>
+                </encoder>
+            </appender>
+        </sift>
+    </appender>
+
+    <!-- Asynchronous Appender Wrapper to Prevent Pipeline Blocking -->
+    <appender name="ASYNC_FILE" class="ch.qos.logback.classic.AsyncAppender">
+        <appender-ref ref="ROLLING_FILE" />
+        <queueSize>4096</queueSize>
+        <discardingThreshold>0</discardingThreshold>
+        <neverBlock>true</neverBlock>
+    </appender>
+
+    <root level="${PIPELINE_LOG_LEVEL}">
+        <appender-ref ref="CONSOLE" />
+        <appender-ref ref="ASYNC_FILE" />
+        <appender-ref ref="RUN_FILE" />
+    </root>
+</configuration>

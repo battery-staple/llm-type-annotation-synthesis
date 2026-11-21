@@ -1,0 +1,79 @@
+project:
+  name: "synthetic-id-swap"
+  repo_url: "eval-repos/synthetic-id-swap"
+  root_dir: "eval-repos/synthetic-id-swap"
+  default_branch: "main"
+
+triage:
+  mode: "manifest"
+  manifest_file: "benchmarks.yaml"
+
+environment:
+  java_home: "/usr/lib/jvm/java-21-openjdk-arm64"
+  source_compatibility: "17"
+  target_compatibility: "17"
+  checker_framework_home: "vendor/checker-framework-3.42.0"
+  gradle_user_home: ""
+
+guardrails:
+  mode: "lenient"
+
+model:
+  # `opencode-go/*` routes are unavailable to the standalone CLI in this
+  # container (provider.no-route); the Console-routed free model is reachable.
+  default: "opencode/deepseek-v4.1-flash-free"
+  triage: "opencode/deepseek-v4.1-flash-free"
+  synthesis: "opencode/deepseek-v4.1-flash-free"
+  application: "opencode/deepseek-v4.1-flash-free"
+  repair: "opencode/deepseek-v4.1-flash-free"
+
+agent:
+  steps:
+    synthesis: 100
+    application: 200
+    repair: 300
+  timeout_ms: 900000
+  max_checker_invocations: 20
+
+sample:
+  seed: 0
+  temperature: 0.0
+
+synthesis:
+  freedom_level: "level0"
+  allowed_checkers: "all"
+
+checker:
+  processor: "org.checkerframework.common.subtyping.SubtypingChecker"
+  category: "custom_qualifier_hierarchy"
+  quals: []
+
+repair:
+  local_variable_annotations: "frozen"
+  internet_access: false
+
+prompt:
+  tell_non_triviality_error: false
+
+build:
+  tool: "gradle"
+  wrapper_executable: "./gradlew"
+  subproject: ""
+  compile_task: "compileJava"
+  test_task: "test"
+  checker_task: "checkerPass"
+  single_test_cmd: "./gradlew test --tests {test_class}.{test_method}"
+
+logging:
+  level: "INFO"
+  file: "logs/pipeline.log"
+  json_format: true
+  per_run_file: true
+
+cache:
+  stages_dir: ".cache/stages"
+  enabled: true
+
+verification:
+  scope: "full_suite"
+  baseline: "none"

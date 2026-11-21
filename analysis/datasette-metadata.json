@@ -1,0 +1,4 @@
+{
+  "title": "LLM Type Annotation Synthesis Pipeline",
+  "description": "Runs, trajectories, checker diagnostics, and evaluation verdicts."
+}
