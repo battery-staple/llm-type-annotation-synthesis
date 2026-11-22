@@ -961,6 +961,39 @@ def build_placement_diff(
     return result
 
 
+MAX_LIVE_READ_BYTES = 8 * 1024 * 1024
+
+
+def read_live_transcript(path: Path, after: int) -> dict[str, Any]:
+    """Return complete JSONL events written to ``path`` at or after byte ``after``.
+
+    Only whole lines (ending in a newline) are returned, so a line the pipeline
+    is mid-way through writing is picked up on a later poll. If the file is
+    shorter than ``after`` it was truncated or replaced; the read restarts at 0
+    and ``reset`` tells the client to discard what it had.
+    """
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return {"exists": False, "events": [], "next_offset": after, "reset": False}
+
+    reset = after > size
+    start = 0 if reset or after < 0 else after
+    with path.open("rb") as fh:
+        fh.seek(start)
+        chunk = fh.read(MAX_LIVE_READ_BYTES)
+    end = chunk.rfind(b"\n")
+    if end < 0:
+        return {"exists": True, "events": [], "next_offset": start, "reset": reset}
+    complete = chunk[: end + 1]
+    events = []
+    for line in complete.decode("utf-8", errors="replace").splitlines():
+        parsed = safe_json_loads(line)
+        if isinstance(parsed, dict):
+            events.append(parsed)
+    return {"exists": True, "events": events, "next_offset": start + len(complete), "reset": reset}
+
+
 def extract_key_config(config: dict[str, Any], run_row: dict[str, Any]) -> dict[str, Any]:
     model_cfg = config.get("model") or {}
     triage_cfg = config.get("triage") or {}
@@ -1282,6 +1315,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
     db_path: Path
     cache_dir: Path
     logs_dir: Path
+    transcripts_dir: Path
 
     def log_message(self, format: str, *args: Any) -> None:
         # Keep stdout clean unless debugging
@@ -1375,6 +1409,25 @@ class ViewerHandler(BaseHTTPRequestHandler):
                         self.send_json(payload)
                     return
 
+                if len(parts) == 4 and parts[1] == "steps" and parts[3] == "transcript":
+                    run_id, step_id = parts[0], parts[2]
+                    for ident in (run_id, step_id):
+                        if not ident or "/" in ident or "\\" in ident or ".." in ident:
+                            self.send_json({"error": "Invalid id"}, HTTPStatus.BAD_REQUEST)
+                            return
+                    try:
+                        after = int((query.get("after") or ["0"])[0])
+                    except ValueError:
+                        self.send_json({"error": "Invalid offset"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    base = self.transcripts_dir.resolve()
+                    target = (base / run_id / f"{step_id}.jsonl").resolve()
+                    if not target.is_relative_to(base):
+                        self.send_json({"error": "Invalid id"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    self.send_json(read_live_transcript(target, after))
+                    return
+
                 if len(parts) >= 4 and parts[1] == "steps" and parts[3] == "artifact":
                     run_id = parts[0]
                     step_id = parts[2]
@@ -1421,6 +1474,11 @@ def main() -> None:
     parser.add_argument("--db", default=str(REPO_ROOT / "data" / "pipeline.db"), help="Path to SQLite database")
     parser.add_argument("--cache-dir", default=str(REPO_ROOT / ".cache" / "stages"), help="Path to CAS stages directory")
     parser.add_argument("--logs-dir", default=str(REPO_ROOT / "logs" / "runs"), help="Path to per-run logs directory")
+    parser.add_argument(
+        "--transcripts-dir",
+        default=str(REPO_ROOT / "logs" / "transcripts"),
+        help="Path to live (in-progress) agent transcript streams",
+    )
     parser.add_argument("--bind", default=os.environ.get("VIEWER_BIND", "127.0.0.1"), help="Bind address")
     parser.add_argument("--port", type=int, default=int(os.environ.get("VIEWER_PORT", "8002")), help="Port number")
     args = parser.parse_args()
@@ -1432,6 +1490,7 @@ def main() -> None:
             "db_path": Path(args.db),
             "cache_dir": Path(args.cache_dir),
             "logs_dir": Path(args.logs_dir),
+            "transcripts_dir": Path(args.transcripts_dir),
         },
     )
 
@@ -1440,6 +1499,7 @@ def main() -> None:
     print(f"  DB:        {args.db}")
     print(f"  CAS cache: {args.cache_dir}")
     print(f"  Logs:      {args.logs_dir}")
+    print(f"  Live:      {args.transcripts_dir}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -24,6 +24,8 @@
     hideDiscardedInMatrix: false,
     placementDiffText: "",
     placementDiffRequest: 0,
+    // Provisional transcript streamed while a step runs (see syncLiveTranscript).
+    live: { runId: null, stepId: null, offset: 0, events: [], timer: null, busy: false, missing: 0 },
   };
 
   const $ = (id) => document.getElementById(id);
@@ -939,6 +941,7 @@
     const turnCount = Math.max(
       (step.agent_turns || []).length,
       (step.cas_transcript || []).length,
+      liveEventsFor(step).length,
       (step.agent_transcript || []).length
     );
     $("cntTranscript").textContent = turnCount ? String(turnCount) : "";
@@ -969,6 +972,102 @@
       case "tests": container.innerHTML = renderStageTests(step); break;
       case "guardrails": container.innerHTML = renderStageGuardrails(step); break;
     }
+    syncLiveTranscript(step);
+  }
+
+  // ---- Live transcript (in-progress steps) ----
+  const LIVE_POLL_MS = 2000;
+  const LIVE_MISSING_LIMIT = 3;
+
+  function liveEventsFor(step) {
+    const live = state.live;
+    return step && isStepRunning(step) && live.stepId === step.step_id ? live.events : [];
+  }
+
+  function stopLivePolling() {
+    const live = state.live;
+    if (live.timer) clearInterval(live.timer);
+    Object.assign(live, { runId: null, stepId: null, offset: 0, events: [], timer: null, busy: false, missing: 0 });
+  }
+
+  // Poll only while the selected step is running and its transcript tab is open.
+  function syncLiveTranscript(step) {
+    const live = state.live;
+    const wanted = state.activeStageTab === "transcript" && isStepRunning(step) && state.selectedRunId;
+    if (!wanted) {
+      if (live.stepId) stopLivePolling();
+      return;
+    }
+    if (live.stepId === step.step_id && live.timer) return;
+    stopLivePolling();
+    live.runId = state.selectedRunId;
+    live.stepId = step.step_id;
+    live.timer = setInterval(pollLiveTranscript, LIVE_POLL_MS);
+    pollLiveTranscript();
+  }
+
+  async function pollLiveTranscript() {
+    const live = state.live;
+    if (live.busy || !live.stepId) return;
+    const { runId, stepId } = live;
+    live.busy = true;
+    try {
+      const url = `/api/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/transcript?after=${live.offset}`;
+      const data = await apiGet(url);
+      if (live.stepId !== stepId) return; // selection changed mid-flight
+      if (data.reset) live.events = [];
+      live.offset = data.next_offset;
+      if (data.exists) {
+        live.missing = 0;
+      } else if (live.events.length > 0 && ++live.missing >= LIVE_MISSING_LIMIT) {
+        // The pipeline deletes the stream once the durable transcript is saved:
+        // the step finished, so reload and show the final transcript.
+        stopLivePolling();
+        await selectRun(state.selectedRunId, true);
+        return;
+      }
+      if (data.reset || data.events.length) {
+        live.events.push(...data.events);
+        renderLiveTranscript();
+      }
+    } catch {
+      // Ignore transient poll errors; the next tick retries.
+    } finally {
+      live.busy = false;
+    }
+  }
+
+  function renderLiveTranscript() {
+    const step = getSelectedStep();
+    const container = $("stageTabContent");
+    if (!step || !container || state.activeStageTab !== "transcript") return;
+
+    const tmp = document.createElement("div");
+    tmp.innerHTML = renderStageTranscript(step);
+    const fresh = tmp.querySelector("#turnsTimeline");
+    const timeline = container.querySelector("#turnsTimeline");
+    if (!fresh || !timeline) {
+      // First events: swap the "nothing recorded" placeholder for the full view.
+      container.innerHTML = tmp.innerHTML;
+      bindTranscriptHandlers(container);
+      $("cntTranscript").textContent = String(state.live.events.length);
+      return;
+    }
+
+    const scroller = document.scrollingElement || document.documentElement;
+    const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+    const openStates = [...timeline.querySelectorAll("details")].map((d) => d.open);
+    const hiddenBodies = [...timeline.querySelectorAll(".turn-body")].map((b) => b.classList.contains("hidden"));
+
+    timeline.innerHTML = fresh.innerHTML;
+    timeline.querySelectorAll("details").forEach((d, i) => { if (i < openStates.length) d.open = openStates[i]; });
+    timeline.querySelectorAll(".turn-body").forEach((b, i) => {
+      if (i < hiddenBodies.length) b.classList.toggle("hidden", hiddenBodies[i]);
+    });
+    bindTurnHeaders(container);
+    container.querySelector("#transcriptSearch")?.dispatchEvent(new Event("input"));
+    $("cntTranscript").textContent = String(state.live.events.length);
+    if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 
   function renderLatticeGraph(qualifiers) {
@@ -1476,7 +1575,10 @@
 
   // ---- Stage Tab: Transcript & Turns ----
   function buildInvocations(step) {
-    const casEvents = step.cas_transcript || [];
+    // The durable CAS transcript wins; while the step runs, fall back to the live stream.
+    const casEvents = (step.cas_transcript && step.cas_transcript.length)
+      ? step.cas_transcript
+      : liveEventsFor(step);
     const isPrompt = (ev) => ev && (ev.event_type === "initial_prompt" || ev.event_type === "prompt" || ev.event_type === "user_prompt");
 
     if (casEvents.length > 0) {
@@ -1798,13 +1900,17 @@
     `;
   }
 
-  function bindTranscriptHandlers(container) {
+  function bindTurnHeaders(container) {
     container.querySelectorAll(".turn-header").forEach((hdr) => {
       hdr.addEventListener("click", () => {
         const body = hdr.nextElementSibling;
         if (body) body.classList.toggle("hidden");
       });
     });
+  }
+
+  function bindTranscriptHandlers(container) {
+    bindTurnHeaders(container);
 
     const expandBtn = container.querySelector("#expandAllTurnsBtn");
     const collapseBtn = container.querySelector("#collapseAllTurnsBtn");

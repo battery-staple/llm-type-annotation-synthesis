@@ -21,6 +21,7 @@ import pipeline.ports.AgentRunResult
 import pipeline.ports.AgentRunner
 import pipeline.stages.AgentEventType
 import pipeline.stages.AgentTranscriptEvent
+import pipeline.util.TranscriptStream
 import pipeline.stages.TokenUsage
 import pipeline.util.Env
 
@@ -172,6 +173,8 @@ class CoroutineOpenCodeRunner(
             }
         }
 
+        val liveStream = TranscriptStream.current()
+
         suspend fun drainAvailable() {
             val batch: List<String> = synchronized(stdoutLines) {
                 if (parsed >= stdoutLines.size) emptyList()
@@ -191,6 +194,7 @@ class CoroutineOpenCodeRunner(
                         logProgress(indexed)
                         transcript.add(indexed)
                         onEvent?.invoke(indexed)
+                        liveStream?.append(indexed)
                     } else {
                         val indexed = if (event.turnIndex <= 0) event.copy(turnIndex = maxOf(turnIndex, 1)) else event
                         logProgress(indexed)
@@ -206,6 +210,7 @@ class CoroutineOpenCodeRunner(
                         } else {
                             transcript.add(indexed)
                             onEvent?.invoke(indexed)
+                            liveStream?.append(indexed)
                         }
                     }
                 }

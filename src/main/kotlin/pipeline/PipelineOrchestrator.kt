@@ -1,6 +1,7 @@
 package pipeline
 
 import java.io.File
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.delay
@@ -22,6 +23,8 @@ import pipeline.util.Env
 import pipeline.util.Git
 import pipeline.util.Hashing
 import pipeline.util.PipelineJson
+import pipeline.util.TranscriptStream
+import pipeline.util.TranscriptStreams
 
 private val logger = KotlinLogging.logger {}
 
@@ -59,8 +62,15 @@ class PipelineOrchestrator(
      * is skipped. `null` (or [StageName.VERIFICATION]) runs the full pipeline.
      * Discards and halts still take precedence over the stop point.
      */
-    private val stopAfter: StageName? = null
+    private val stopAfter: StageName? = null,
+    /** Where live (in-progress) agent transcripts are streamed for the run viewer. */
+    private val transcriptStreamRoot: File = TranscriptStreams.defaultRoot(),
+    private val transcriptStreamMaxAge: Duration = Duration.ofDays(14)
 ) {
+    init {
+        TranscriptStreams.sweep(transcriptStreamRoot, transcriptStreamMaxAge)
+    }
+
     suspend fun crawlAndRun(target: pipeline.config.CrawlerRepoTarget, sampleSeed: Int): List<PipelineRunOutcome> {
         val autoTriage = automatedTriage
             ?: throw IllegalStateException("AutomatedTriageStage is required for crawler mode")
@@ -423,8 +433,9 @@ class PipelineOrchestrator(
                     success = false, startedAt = started
                 )
             )
+            val liveTranscript = TranscriptStreams.forStep(transcriptStreamRoot, ctx.runId.value, stepId)
             val outcome = withContext(
-                MDCContext(
+                liveTranscript + MDCContext(
                     mapOf(
                         "run_id" to ctx.runId.value,
                         "benchmark_id" to "",
@@ -458,6 +469,8 @@ class PipelineOrchestrator(
                             startedAt = started, completedAt = Instant.now().toString()
                         )
                     )
+                    // Durable transcript is now in the published bundle; drop the live copy.
+                    liveTranscript.delete()
                     logger.info { "Stage ${stage.stageName.identifier} succeeded (attempt $attempt) key=${outcome.casKey}" }
                     return relocateArtifacts(outcome.data, publishedDir)
                 }
@@ -493,6 +506,7 @@ class PipelineOrchestrator(
                             startedAt = started, completedAt = Instant.now().toString()
                         )
                     )
+                    if (outcome.transcript.isNotEmpty()) liveTranscript.delete()
                     logger.warn(outcome.error) {
                         "Transient failure in ${stage.stageName.identifier} (attempt $attempt/$maxTransientAttempts)"
                     }
