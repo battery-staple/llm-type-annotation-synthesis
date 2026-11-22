@@ -292,12 +292,20 @@ the crawler) are not listed unless the code had to interpret the plan.
 50. **Deterministic stages do not include sample identity in cache keys.**
     `CacheKeys.compute` previously mixed `sample_seed`/`sample_temperature`
     into every stage's key, so ingestion, triage, and verification produced a
-    separate bundle per seed even though their outputs are byte-identical.
+    separate bundle per seed even though their typed outputs do not depend on
+    it. (`isDeterministic` means seed-independent, not bit-for-bit
+    reproducible: these stages still run Git, Gradle, and tests, so a bundle
+    may contain run-scoped metadata such as JUnit timings.)
     `PipelineStage.isDeterministic` now controls this: ingestion, manifest
     triage, and verification omit sample identity, so their bundles are shared
     across seeds (ingestion still re-materializes the per-run worktree from the
     cached commit hashes). Synthesis, application, repair, and the deferred
     automated triage keep it, because their LLM output is sample-dependent.
+    Deterministic keys hash the whole `BuildSection` (tool, wrapper,
+    subproject, and all task names) instead of only the task a stage appears
+    to use; verification also hashes the custom-quals JAR and the project
+    checker settings consumed by the test init script. Previously a bundle
+    could be reused under a different build or checker configuration.
     Deterministic bundles also record `sample_index=0` /
     `sample_temperature=0.0` in their manifest, since a shared bundle is not
     owned by any one sample; per-run provenance remains in the `runs` and

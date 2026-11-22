@@ -25,8 +25,9 @@ import pipeline.util.PipelineJson
  * deterministic [StageResult.Discard] (`build_broken_unpatched`).
  *
  * The returned [IngestionWorktree] carries absolute worktree handles for the
- * orchestrator, but the CAS bundle only ever stores the commit hashes and a
- * repo-relative worktree path, never an absolute path.
+ * orchestrator, but the CAS bundle stores only the commit hashes: the
+ * worktree path is run-scoped and is re-materialized from those hashes on a
+ * cache hit, so it must not leak into the shared bundle.
  */
 class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<IngestionInput, IngestionWorktree> {
     override val stageName: StageName = StageName.INGESTION
@@ -43,10 +44,9 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
             "commit" to input.commitHash.hash,
             "parent" to input.parentHash.hash
         )
-        val configSlice = mapOf(
+        val configSlice = buildConfigSlice(ctx.build) + mapOf(
             "source_compatibility" to ctx.sourceCompatibility,
             "target_compatibility" to ctx.targetCompatibility,
-            "gradle_wrapper" to ctx.build.wrapperExecutable,
             "benchmark_id" to input.benchmarkId.canonical
         )
         return CacheKeys.compute(
@@ -156,16 +156,11 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
             sampleIndex = 0,
             sampleTemperature = 0.0
         )
-        val cwd = File(System.getProperty("user.dir"))
-        val relativeWorktree = runCatching {
-            cwd.canonicalFile.toPath().relativize(ctx.worktreeDir.canonicalFile.toPath()).toString()
-        }.getOrElse { ctx.worktreeDir.name }
         writer.writeJson(
             ArtifactNames.WORKTREE_INFO,
             buildJsonObject {
                 put("commit", JsonPrimitive(input.commitHash.hash))
                 put("parent", JsonPrimitive(input.parentHash.hash))
-                put("worktree", JsonPrimitive(relativeWorktree))
             }
         )
         val key = computeCacheKey(ctx, input)

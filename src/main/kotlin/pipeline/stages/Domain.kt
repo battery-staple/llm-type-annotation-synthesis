@@ -309,13 +309,15 @@ interface PipelineStage<in TIn, TOut> {
     val stageName: StageName
 
     /**
-     * True when [execute] is a pure function of the stage input, configuration,
-     * and stage code: no LLM sampling or other seed-dependent behaviour.
+     * True when [execute] does not depend on the sample seed or temperature:
+     * it performs no LLM sampling and reads no per-sample state. The cache key
+     * therefore omits sample identity, so one bundle is shared by every seed.
      *
-     * The orchestrator passes this through to [pipeline.cas.CacheKeys.compute],
-     * which omits sample identity from the cache key for deterministic stages
-     * so their bundles are shared across seeds. Sample-dependent stages must
-     * leave this false.
+     * This is deliberately narrower than "pure": deterministic stages still
+     * shell out to Git, Gradle, the Checker Framework, and the project's test
+     * suite, so their artifacts can carry run-scoped metadata (timestamps,
+     * JUnit durations) and flaky external failures can still change the
+     * outcome. Only the dependence on sampling identity is excluded.
      */
     val isDeterministic: Boolean get() = false
 

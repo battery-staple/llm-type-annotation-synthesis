@@ -57,8 +57,7 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
             "test_method" to input.regressionTest.testMethod,
             "test_patch" to patchHash
         )
-        val configSlice = mapOf(
-            "verification_test_task" to ctx.build.testTask,
+        val configSlice = buildConfigSlice(ctx.build) + mapOf(
             "verification_scope" to ctx.config.verification.scope.name.lowercase(),
             "production_roots" to ctx.productionRoots.sorted(),
             "test_roots" to ctx.testRoots.sorted()

@@ -13,12 +13,32 @@ import java.util.UUID
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonElement
+import pipeline.config.BuildSection
 import pipeline.db.AgentTurnRecord
 import pipeline.db.AnnotationPlacementRecord
 import pipeline.db.LlmInvocationRecord
 import pipeline.ports.AgentRunResult
 import pipeline.util.Git
 import pipeline.util.PipelineJson
+
+/**
+ * Every [BuildSection] field the build runner reads, for inclusion in a
+ * stage cache key.
+ *
+ * Hashing only the "obvious" task is not enough: `runTests` compiles first and
+ * derives `cleanTest` from `testTask`, `runChecker` honours `checkerTask`, and
+ * every task is project-qualified by `subproject`. A stage that shells out to
+ * the runner must key all of these or it can reuse a bundle produced by a
+ * different build configuration.
+ */
+internal fun buildConfigSlice(build: BuildSection): Map<String, Any?> = mapOf(
+    "build_tool" to build.tool,
+    "gradle_wrapper" to build.wrapperExecutable,
+    "build_subproject" to build.subproject,
+    "compile_task" to build.compileTask,
+    "test_task" to build.testTask,
+    "checker_task" to build.checkerTask,
+)
 
 object PromptTemplates {
     fun load(name: String): String {

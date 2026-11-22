@@ -50,6 +50,7 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             "repair_final_log" to contentHashOrMissing(input.repair.finalCheckerErrorsLog),
             "repair_remaining_errors" to input.repair.remainingTypeErrors,
             "processor" to input.lattice.processor,
+            "custom_quals_jar_sha" to contentHashOrMissing(input.lattice.customQualsJar),
             "quals" to input.lattice.qualifierClassNames.map { it.value }.sorted(),
             "checker_category" to input.lattice.checkerCategory.name.lowercase(),
             "sample_commit" to input.sample.commitHash.hash,
@@ -59,11 +60,16 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             "test_patch" to contentHashOrMissing(input.sample.testPatchFile),
             "verification_scope" to input.verificationScope.name.lowercase()
         )
-        val configSlice = mapOf(
+        val configSlice = buildConfigSlice(ctx.build) + mapOf(
             "verification_scope" to ctx.config.verification.scope.name.lowercase(),
             "verification_baseline" to ctx.config.verification.baseline,
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
-            "checker_task" to ctx.build.checkerTask,
+            // runTests receives the custom-quals jar, so its injected init
+            // script reads these project-level checker settings even though
+            // the dedicated checker pass uses the lattice's values.
+            "checker_processor" to ctx.config.checker.processor,
+            "checker_category" to ctx.config.checker.category.name.lowercase(),
+            "checker_quals" to ctx.config.checker.quals,
             "source_compatibility" to ctx.sourceCompatibility,
             "target_compatibility" to ctx.targetCompatibility
         )
@@ -258,7 +264,9 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             } else {
                 put("remaining_checker_errors", JsonPrimitive(remainingCheckerErrors))
             }
-            put("checker_run_id", JsonPrimitive(checkerRunId))
+            // checker_run_id is a per-execution telemetry key and is recorded
+            // in checker_runs; embedding it would put a random UUID in a
+            // bundle shared across seeds.
             put("checker_invoked", JsonPrimitive(checker.checkerInvoked))
             put("checker_success", JsonPrimitive(checker.success))
             put("checker_exit_code", JsonPrimitive(checker.exitCode))

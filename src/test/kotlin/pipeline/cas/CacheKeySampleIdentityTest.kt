@@ -61,9 +61,13 @@ class CacheKeySampleIdentityTest {
     private val benchmarkId = BenchmarkId("demo", "aaaaaaa")
     private val missingFile = File("/nonexistent/cache-key-test")
 
-    private fun context(sampleIndex: Int, temperature: Double = 0.7) = RunContext(
+    private fun context(
+        sampleIndex: Int,
+        temperature: Double = 0.7,
+        build: BuildSection = BuildSection()
+    ) = RunContext(
         config = ProjectConfig(),
-        build = BuildSection(),
+        build = build,
         sourceCompatibility = "17",
         targetCompatibility = "17",
         runId = RunId("run-$sampleIndex"),
@@ -118,14 +122,30 @@ class CacheKeySampleIdentityTest {
             error("javac port must not be used for cache-key computation")
     }
 
-    private fun lattice() = SynthesizedLattice(
-        customQualsJar = missingFile,
+    private fun lattice(jar: File = missingFile) = SynthesizedLattice(
+        customQualsJar = jar,
         placementGuideFile = missingFile,
         customQualsSrcDir = missingFile,
         qualifierClassNames = listOf(Fqcn("demo.qual.Demo")),
         qualifiersCount = 1,
         processor = "demo.qual.DemoChecker",
         checkerCategory = CheckerCategory.BUILTIN_CHECKER
+    )
+
+    private fun verificationInput(
+        lattice: SynthesizedLattice = lattice(),
+        scope: VerificationScope = VerificationScope.REGRESSION_ONLY
+    ) = VerificationInput(
+        sample = VerifiedSample(
+            benchmarkId, commit, parent,
+            TestCoordinate(Fqcn("demo.RegressionTest"), "testBug"),
+            missingFile
+        ),
+        repair = RepairResult(missingFile, missingFile, missingFile, missingFile, remainingTypeErrors = 0),
+        lattice = lattice,
+        annotationsPatch = missingFile,
+        worktreeDir = File("/nonexistent/verification"),
+        verificationScope = scope
     )
 
     private val noopLlmClient = object : pipeline.ports.SingleShotLlmClient {
@@ -177,23 +197,63 @@ class CacheKeySampleIdentityTest {
     @Test
     fun `verification key ignores sample identity`() {
         val stage = VerificationStage(noopRunner)
-        val input = VerificationInput(
-            sample = VerifiedSample(
-                benchmarkId, commit, parent,
-                TestCoordinate(Fqcn("demo.RegressionTest"), "testBug"),
-                missingFile
-            ),
-            repair = RepairResult(missingFile, missingFile, missingFile, missingFile, remainingTypeErrors = 0),
-            lattice = lattice(),
-            annotationsPatch = missingFile,
-            worktreeDir = File("/nonexistent/verification"),
-            verificationScope = VerificationScope.REGRESSION_ONLY
-        )
+        val input = verificationInput()
 
         assertEquals(
             stage.computeCacheKey(context(sampleIndex = 0), input),
             stage.computeCacheKey(context(sampleIndex = 5, temperature = 0.2), input)
         )
+    }
+
+    @Test
+    fun `verification key covers custom qualifier jar bytes`() {
+        val stage = VerificationStage(noopRunner)
+        val jarA = File.createTempFile("quals-a", ".jar").apply {
+            writeBytes(byteArrayOf(1, 2, 3))
+            deleteOnExit()
+        }
+        val jarB = File.createTempFile("quals-b", ".jar").apply {
+            writeBytes(byteArrayOf(1, 2, 4))
+            deleteOnExit()
+        }
+
+        assertNotEquals(
+            stage.computeCacheKey(context(sampleIndex = 0), verificationInput(lattice(jarA))),
+            stage.computeCacheKey(context(sampleIndex = 0), verificationInput(lattice(jarB)))
+        )
+    }
+
+    @Test
+    fun `deterministic keys cover every build setting the runner reads`() {
+        val ingestion = IngestionStage(noopRunner)
+        val triage = ManifestTriageStage(noopRunner)
+        val verification = VerificationStage(noopRunner)
+        val ingestionInput = IngestionInput(benchmarkId, "/nonexistent/repo", commit, parent)
+        val triageInput = ManifestTriageInput(
+            benchmarkId = benchmarkId,
+            worktree = IngestionWorktree(commit, parent, File("/nonexistent/worktree")),
+            regressionTest = TestCoordinate(Fqcn("demo.RegressionTest"), "testBug")
+        )
+        val verificationStageInput = verificationInput()
+
+        fun keys(build: BuildSection) = listOf(
+            ingestion.computeCacheKey(context(sampleIndex = 0, build = build), ingestionInput),
+            triage.computeCacheKey(context(sampleIndex = 0, build = build), triageInput),
+            verification.computeCacheKey(context(sampleIndex = 0, build = build), verificationStageInput)
+        )
+
+        val baseline = keys(BuildSection())
+        val variants = listOf(
+            BuildSection(tool = "maven"),
+            BuildSection(wrapperExecutable = "./gradlew-custom"),
+            BuildSection(subproject = "module"),
+            BuildSection(compileTask = "buildJava"),
+            BuildSection(testTask = "check"),
+            BuildSection(checkerTask = "customCheckerPass")
+        )
+        variants.forEach { variant ->
+            assertNotEquals(keys(variant), baseline, "build change must fork the key: $variant")
+        }
     }
 
     @Test
