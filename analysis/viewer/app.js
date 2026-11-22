@@ -293,6 +293,10 @@
     const verdict = run.verdict;
     const verificationStep = latestStep(run, "verification");
 
+    if (status === "triage_only" || run.outcome_kind === "triage_only") {
+      return { key: "triage_only", kind: "triage_only", label: "not evaluated (downstream limit)", cls: "badge-muted", reasonLabel: "verified, downstream limit reached", tooltip: "Triage verified this run, but a configured downstream limit prevented evaluation. This is not a failed verification." };
+    }
+
     if (status === "running") {
       return {
         key: "running",
@@ -303,7 +307,6 @@
         tooltip: "The run is still in progress; it has no evaluation outcome yet.",
       };
     }
-
     if (verificationStep && verdict) {
       return {
         key: verdict,
@@ -375,6 +378,8 @@
    */
   function deriveLifecycle(run) {
     const status = run.status || "unknown";
+
+    if (status === "triage_only") return { label: "verified · downstream limit", cls: "badge-muted", tooltip: "Triage verified the run; execution stopped at the configured downstream limit." };
 
     if (status === "running") {
       return {
@@ -645,6 +650,7 @@
       const passCount = outcomes.filter((o) => o.key === "full_success" || o.key === "partial_success_regression_only").length;
       const failCount = outcomes.filter((o) => o.kind === "evaluated" && o.key !== "full_success" && o.key !== "partial_success_regression_only").length;
       const skippedCount = outcomes.filter((o) => o.kind === "triage_skipped").length;
+      const triageOnlyCount = outcomes.filter((o) => o.kind === "triage_only").length;
       const incompleteCount = outcomes.filter((o) => ["failed", "interrupted", "stopped", "unknown"].includes(o.kind)).length;
       const runningCount = outcomes.filter((o) => o.kind === "running").length;
       const hasSelected = runs.some((r) => r.run_id === state.selectedRunId);
@@ -658,6 +664,7 @@
         passCount ? `<span class="badge badge-green">${passCount} pass</span>` : "",
         failCount ? `<span class="badge badge-red">${failCount} evaluated fail</span>` : "",
         skippedCount ? `<span class="badge badge-muted">${skippedCount} triage skip</span>` : "",
+        triageOnlyCount ? `<span class="badge badge-muted">${triageOnlyCount} triaged · not evaluated</span>` : "",
         incompleteCount ? `<span class="badge badge-yellow">${incompleteCount} incomplete</span>` : "",
         runningCount ? `<span class="badge badge-blue">${runningCount} running</span>` : "",
       ].filter(Boolean).join("");
@@ -805,6 +812,7 @@
       <span>Tokens: <strong>${esc(fmtNum(totalTokens))}</strong></span>
       <span>LLM Latency: <strong>${esc(fmtNum(totalLatency))} ms</strong></span>
       ${r.remaining_type_errors !== null && r.remaining_type_errors !== undefined ? `<span>Remaining Errors: <strong>${esc(r.remaining_type_errors)}</strong></span>` : ""}
+      ${(r.retry_events || []).length ? `<span>Retries: <strong>${(r.retry_events || []).filter((e) => e.will_retry).length}</strong> · final transient failures: <strong>${(r.retry_events || []).filter((e) => !e.will_retry).length}</strong></span>` : ""}
     `;
 
     const regTest = r.regression_test_class
@@ -2741,6 +2749,11 @@
       ? `<span class="badge badge-muted" style="margin-left:8px;">Batch: <code>${esc(state.selectedBatchId.slice(0, 8))}</code> <button id="clearBatchFilterBtn" class="btn btn-sm" style="margin-left:4px;padding:0 5px;" title="Show all batches">&times;</button></span>`
       : "";
 
+    const telemetry = state.telemetry || { db_operations: [], retries: [], recent_retries: [], notes: [] };
+    const telemetryHtml = `<div class="grid-2 telemetry-grid">
+      <div class="card"><h3>Database operation performance</h3>${telemetry.db_operations.length ? `<table class="data-table"><thead><tr><th>Operation</th><th>Calls</th><th>Failures</th><th>Avg ms</th><th>Max ms</th></tr></thead><tbody>${telemetry.db_operations.map((x) => `<tr><td>${esc(x.operation)}</td><td>${esc(fmtNum(x.calls))}</td><td>${esc(fmtNum(x.failures))}</td><td>${esc(Number(x.avg_duration_ms || 0).toFixed(2))}</td><td>${esc(Number(x.max_duration_ms || 0).toFixed(2))}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No DB operation telemetry${telemetry.notes.length ? ` · ${esc(telemetry.notes.join(" "))}` : ""}</p>`}</div>
+      <div class="card"><h3>Retry telemetry</h3>${telemetry.retries.length ? `<table class="data-table"><thead><tr><th>Stage</th><th>Error class</th><th>Attempts</th><th>Retries</th><th>Final failures</th></tr></thead><tbody>${telemetry.retries.map((x) => `<tr><td>${esc(x.stage)}</td><td>${esc(x.error_class)}</td><td>${esc(fmtNum(x.attempts))}</td><td>${esc(fmtNum(x.retries))}</td><td>${esc(fmtNum(x.attempts - x.retries))}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No retry telemetry${telemetry.notes.length ? ` · ${esc(telemetry.notes.join(" "))}` : ""}</p>`}${telemetry.recent_retries.length ? `<h4>Recent retry events</h4><table class="data-table"><thead><tr><th>Stage</th><th>Error class</th><th>Attempt</th><th>Disposition</th><th>Delay ms</th><th>Last message</th></tr></thead><tbody>${telemetry.recent_retries.map((x) => `<tr><td>${esc(x.stage)}</td><td>${esc(x.error_class)}</td><td>${esc(x.attempt_number)}</td><td>${x.will_retry ? "retry" : "final failure"}</td><td>${esc(fmtNum(x.delay_ms))}</td><td>${esc(x.error_message)}</td></tr>`).join("")}</tbody></table>` : ""}</div>
+    </div>`;
     el.innerHTML = `
       <div class="matrix-toolbar">
         <div>
@@ -2756,6 +2769,7 @@
         </div>
       </div>
       <div class="card" style="overflow-x:auto;">${tableHtml}</div>
+      ${telemetryHtml}
     `;
 
     const clearBatchBtn = $("clearBatchFilterBtn");
@@ -2853,6 +2867,7 @@
     $("placementDiffCopyBtn").addEventListener("click", () => copyText(state.placementDiffText || "", $("placementDiffCopyBtn")));
 
     setupAutoRefresh();
+    apiGet("/api/telemetry").then((data) => { state.telemetry = data; if (state.viewMode === "matrix") renderMatrixView(); }).catch(() => {});
     loadRuns(false).catch((err) => {
       $("runsCount").textContent = `Error: ${err.message}`;
     });

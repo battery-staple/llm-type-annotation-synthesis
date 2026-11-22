@@ -1055,6 +1055,7 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
                     r.completed_at,
                     r.config_snapshot,
                     v.verdict,
+                    v.outcome_kind,
                     v.remaining_type_errors,
                     v.unit_tests_passed,
                     v.reg_test_passed,
@@ -1141,6 +1142,7 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
             SELECT
                 r.*,
                 v.verdict,
+                v.outcome_kind,
                 v.remaining_type_errors,
                 v.unit_tests_passed,
                 v.reg_test_passed,
@@ -1295,6 +1297,15 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
         run["log_size_bytes"] = log_file.stat().st_size if log_file.is_file() else 0
         mark_in_progress(steps, run.get("status"))
         run["steps"] = steps
+        try:
+            run["retry_events"] = rows_to_dicts(conn.execute(
+                """SELECT stage, error_class, attempt_number, max_attempts, will_retry,
+                          delay_ms, error_message, created_at
+                   FROM retry_events WHERE run_id = ? ORDER BY created_at, attempt_number""",
+                (run_id,),
+            ).fetchall())
+        except sqlite3.Error:
+            run["retry_events"] = []
         return run
 
 
@@ -1373,6 +1384,27 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
             if path == "/api/runs":
                 self.send_json({"runs": fetch_runs_list(self.db_path)})
+                return
+
+            if path == "/api/telemetry":
+                with connect_db(self.db_path) as conn:
+                    payload = {"db_operations": [], "retries": [], "recent_retries": [], "notes": []}
+                    for key, sql in (
+                        ("db_operations", "SELECT operation, calls, failures, avg_duration_ms, max_duration_ms FROM v_db_operation_summary ORDER BY avg_duration_ms DESC"),
+                        ("retries", "SELECT stage, error_class, attempts, retries FROM v_retry_summary ORDER BY attempts DESC"),
+                    ):
+                        try:
+                            payload[key] = rows_to_dicts(conn.execute(sql).fetchall())
+                        except sqlite3.Error:
+                            payload["notes"].append(f"{key.replace('_', ' ')} unavailable (database may predate telemetry views).")
+                    try:
+                        payload["recent_retries"] = rows_to_dicts(conn.execute(
+                            """SELECT stage, error_class, attempt_number, will_retry, delay_ms, error_message
+                               FROM retry_events ORDER BY created_at DESC LIMIT 20"""
+                        ).fetchall())
+                    except sqlite3.Error:
+                        payload["notes"].append("retry event details unavailable (retry_events table missing).")
+                self.send_json(payload)
                 return
 
             if path.startswith("/api/runs/"):
