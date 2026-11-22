@@ -100,6 +100,9 @@ internal object TriageVerifier {
             log.info { "Triage ${req.benchmarkId}: compiling unpatched C-1 sandbox" }
             val c1Build = buildRunner.compile(c1Sandbox)
             if (!c1Build.success) {
+                if (c1Build.timedOut) return StageResult.TransientFailure(
+                    RuntimeException("C-1 compile timed out: ${c1Build.output.take(2000)}"), 0, emptyList()
+                )
                 ctx.database.updateCommit(
                     CommitTriageUpdate(
                         commitHash = req.worktree.commitHash.hash,
@@ -128,6 +131,9 @@ internal object TriageVerifier {
             log.info { "Triage ${req.benchmarkId}: running T_reg on C-1 (expecting runtime failure)" }
             val c1Result = buildRunner.runTests(c1Sandbox, testFilter = req.regressionTest)
             recordTriageTestTelemetry(ctx, req, c1Result, suiteKind = "regression_test", xmlPath = null)
+            if (c1Result.timedOut) return StageResult.TransientFailure(
+                RuntimeException("C-1 regression test timed out: ${c1Result.output.take(2000)}"), 0, emptyList()
+            )
             if (c1Result.compileFailed) {
                 return discardFromVerification(
                     ctx, req, patchBytes, DiscardReason.TEST_COMPILATION_FAILURE,
@@ -165,6 +171,9 @@ internal object TriageVerifier {
             }
             val cResult = buildRunner.runTests(cSandbox, testFilter = req.regressionTest)
             recordTriageTestTelemetry(ctx, req, cResult, suiteKind = "regression_test", xmlPath = null)
+            if (cResult.timedOut) return StageResult.TransientFailure(
+                RuntimeException("C regression test timed out: ${cResult.output.take(2000)}"), 0, emptyList()
+            )
             val cPassed = cResult.outcomes.any { it.status == TestStatus.PASSED }
             val cFailed = cResult.outcomes.any { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
             val cStatus = when {

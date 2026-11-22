@@ -1,12 +1,33 @@
 package pipeline.stages
 
 import java.nio.file.Files
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
 import pipeline.util.Git
+import pipeline.ports.CheckerResult
 
 class RepairStageTest {
+
+    @Test
+    fun `zero checker errors do not establish convergence when checker did not complete`() {
+        val diagnostics = File.createTempFile("incomplete-checker", ".log")
+        try {
+            val incomplete = CheckerResult(false, 1, true, 0, 0, emptyList(), diagnostics)
+            assertEquals(0, incomplete.errorCount)
+            assertFalse(checkerCompletedSuccessfully(incomplete))
+            assertFalse(checkerCompletedSuccessfully(
+                CheckerResult(false, 1, false, 0, 0, emptyList(), diagnostics)
+            ))
+            assertTrue(checkerCompletedSuccessfully(
+                CheckerResult(true, 0, true, 0, 0, emptyList(), diagnostics)
+            ))
+        } finally {
+            diagnostics.delete()
+        }
+    }
 
     @Test
     fun `annotated baseline commit disables configured signing`() {

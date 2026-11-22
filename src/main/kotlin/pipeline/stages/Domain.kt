@@ -272,6 +272,7 @@ data class RunContext(
     // test_roots). Defaults preserve the legacy src/main + src/test layout.
     val productionRoots: List<String> = SourceRoots.DEFAULT_PRODUCTION_ROOTS,
     val testRoots: List<String> = SourceRoots.DEFAULT_TEST_ROOTS,
+    val contaminationScope: String = runId.value,
     // Set per stage attempt by the orchestrator. Orchestrator-only data.
     val stepId: String = "",
     val stepNumber: Int = 0,
@@ -341,7 +342,7 @@ class StageHaltException(message: String, cause: Throwable? = null) : RuntimeExc
 
 // --- Typed Stage Inputs and Outputs ---
 
-data class IngestionInput(val benchmarkId: BenchmarkId, val repoUrl: String, val commitHash: CommitHash, val parentHash: CommitHash)
+data class IngestionInput(val benchmarkId: BenchmarkId, val repoUrl: String, val commitHash: CommitHash, val parentHash: CommitHash, val mirror: File? = null)
 data class IngestionWorktree(
     val commitHash: CommitHash,
     val parentHash: CommitHash,

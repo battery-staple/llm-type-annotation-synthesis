@@ -61,6 +61,8 @@ class SynthesisStage(
             "checker_category" to checkerCategoryName(ctx.config.checker.category),
             "checker_quals" to ctx.config.checker.quals,
             "agent_steps_synthesis" to ctx.config.agent.steps.synthesis,
+            "agent_timeout_ms" to ctx.config.agent.timeoutMs,
+            "internet_access" to ctx.config.repair.internetAccess,
         )
         return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template, includeSampleIdentity = !isDeterministic)
     }

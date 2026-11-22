@@ -18,12 +18,12 @@ import pipeline.db.EvaluationRunRecord
 import pipeline.db.StepTrajectoryRecord
 import pipeline.ports.DatabasePort
 import pipeline.stages.*
+import pipeline.stages.BenchmarkCheckoutGuard
 import pipeline.util.CommitMetadata
 import pipeline.util.Env
 import pipeline.util.Git
 import pipeline.util.Hashing
 import pipeline.util.PipelineJson
-import pipeline.util.TranscriptStream
 import pipeline.util.TranscriptStreams
 
 private val logger = KotlinLogging.logger {}
@@ -38,7 +38,8 @@ data class PipelineRunOutcome(
      * a success, but no verdict was evaluated, so [result] is an
      * incomplete/verification-missing summary.
      */
-    val stoppedAfter: StageName? = null
+    val stoppedAfter: StageName? = null,
+    val limitSkipped: Boolean = false
 )
 
 /**
@@ -46,17 +47,17 @@ data class PipelineRunOutcome(
  * own step_id, and successful bundles are published atomically to the Merkle CAS.
  */
 class PipelineOrchestrator(
-    private val ingestion: IngestionStage,
-    private val triage: ManifestTriageStage,
-    private val synthesis: SynthesisStage,
-    private val application: ApplicationStage,
-    private val repair: RepairStage,
-    private val verification: VerificationStage,
+    private val ingestion: PipelineStage<IngestionInput, IngestionWorktree>,
+    private val triage: PipelineStage<ManifestTriageInput, VerifiedSample>,
+    private val synthesis: PipelineStage<SynthesisInput, SynthesizedLattice>,
+    private val application: PipelineStage<ApplicationInput, AnnotatedRepo>,
+    private val repair: PipelineStage<RepairInput, RepairResult>,
+    private val verification: PipelineStage<VerificationInput, VerificationResult>,
     private val cas: CasEngine,
     private val database: DatabasePort,
     private val config: ProjectConfig,
     private val maxTransientAttempts: Int = 3,
-    private val automatedTriage: AutomatedTriageStage? = null,
+    private val automatedTriage: PipelineStage<AutomatedTriageInput, VerifiedSample>? = null,
     /**
      * When set, the run stops once this stage succeeds and every later stage
      * is skipped. `null` (or [StageName.VERIFICATION]) runs the full pipeline.
@@ -84,25 +85,19 @@ class PipelineOrchestrator(
             "HEAD"
         }
         val commits = Git.listCommits(mirror, startRef, config.triage.depth)
-        val limit = config.triage.limit
         val batchId = UUID.randomUUID().toString()
-        val outcomes = mutableListOf<PipelineRunOutcome>()
-        var verifiedCount = 0
-
-        for (meta in commits) {
-            if (limit != null && verifiedCount >= limit) {
-                logger.info { "Crawler reached verified commit limit=$limit; stopping" }
-                break
-            }
-            // A root commit has no parent, hence no C-1 to triage against.
-            val firstParent = meta.parents.firstOrNull()
-            if (firstParent == null) {
-                logger.info { "Crawler: skipping root commit ${meta.hash.take(8)} (no parent)" }
-                continue
-            }
+        BenchmarkCheckoutGuard.reset(File(target.repoUrl), batchId)
+        // Root commits have no C-1 and are excluded before scheduling.
+        commits.filter { it.parents.isEmpty() }.forEach { meta ->
+            logger.info { "Crawler: skipping root commit ${meta.hash.take(8)} (no parent)" }
+        }
+        val schedulable = crawlerTriageCandidates(commits)
+        val gate = DownstreamGate.limited(config.triage.limit)
+        val entries = schedulable.map { meta ->
+            val firstParent = meta.parents.first()
             val commitHash = CommitHash(meta.hash)
             val parentHash = CommitHash(firstParent)
-            val commitEntry = BenchmarkEntry(
+            BenchmarkEntry(
                 benchmarkId = BenchmarkId.of(target.benchmarkId.canonical, commitHash),
                 repoUrl = target.repoUrl,
                 commitHash = commitHash,
@@ -116,19 +111,24 @@ class PipelineOrchestrator(
                 targetCompatibility = target.targetCompatibility,
                 productionRoots = target.productionRoots,
                 testRoots = target.testRoots
-            )
-            val outcome = runSingleSampleCrawler(commitEntry, meta, sampleSeed, autoTriage, batchId)
-            outcomes += outcome
-            if (countsAsVerified(outcome)) {
-                verifiedCount++
-            }
+            ) to meta
         }
-        return outcomes
+        val results = BatchScheduler(config.triage.jobs).run(entries) { (entry, meta) ->
+            runSingleSampleCrawler(entry, meta, sampleSeed, autoTriage, batchId, mirror, gate)
+        }
+        return results.map { item -> when (item) {
+            is BatchItem.Completed -> item.value
+            is BatchItem.Failed -> {
+                logger.error(item.error) { "Crawler commit task failed" }
+                val id = RunId(UUID.randomUUID().toString())
+                PipelineRunOutcome(id, incompleteResult(id, item.error.message ?: "commit task failed"), haltMessage = item.error.message)
+            }
+        } }
     }
 
     suspend fun runSingleSample(entry: BenchmarkEntry, sampleSeed: Int): PipelineRunOutcome {
         val (runId, worktreeBase, baseCtx) = initRunContext(entry, sampleSeed)
-        return withRunHandling(runId) {
+        val outcome = withRunHandling(runId) {
             val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
                 ?: return@withRunHandling finishDiscarded(runId, "triage preconditions failed during ingestion")
             stopIfDue(runId, StageName.INGESTION)?.let { return@withRunHandling it }
@@ -139,17 +139,21 @@ class PipelineOrchestrator(
 
             runDownstreamStages(runId, entry, sample, baseCtx, worktreeBase)
         }
+        cleanupCompletedRun(outcome, entry, worktreeBase)
+        return outcome
     }
 
     private suspend fun runSingleSampleCrawler(
         entry: BenchmarkEntry,
         meta: CommitMetadata,
         sampleSeed: Int,
-        autoTriage: AutomatedTriageStage,
-        batchId: String
+        autoTriage: PipelineStage<AutomatedTriageInput, VerifiedSample>,
+        batchId: String,
+        mirror: File,
+        gate: DownstreamGate
     ): PipelineRunOutcome {
         val (runId, worktreeBase, baseCtx) = initRunContext(entry, sampleSeed, batchId)
-        return withRunHandling(runId) {
+        val outcome = withRunHandling(runId) {
             if (meta.parents.size != 1) {
                 database.updateCommit(
                     CommitTriageUpdate(
@@ -160,7 +164,7 @@ class PipelineOrchestrator(
                 )
                 return@withRunHandling finishDiscarded(runId, "merge commit (${meta.parents.size} parents) skipped")
             }
-            val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
+            val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash, mirror))
                 ?: return@withRunHandling finishDiscarded(runId, "triage preconditions failed during ingestion")
             stopIfDue(runId, StageName.INGESTION)?.let { return@withRunHandling it }
             val sample = stageOrDiscard(
@@ -169,8 +173,44 @@ class PipelineOrchestrator(
             ) ?: return@withRunHandling finishDiscarded(runId, "automated triage discarded the sample")
 
             val verifiedEntry = entry.copy(regressionTest = sample.regressionTest)
-            runDownstreamStages(runId, verifiedEntry, sample, baseCtx, worktreeBase)
+            runDownstreamStages(runId, verifiedEntry, sample, baseCtx, worktreeBase, mirror, gate)
         }
+        cleanupCompletedRun(outcome, entry, worktreeBase, mirror)
+        return outcome
+    }
+
+    private fun cleanupCompletedRun(
+        outcome: PipelineRunOutcome,
+        entry: BenchmarkEntry,
+        worktreeBase: File,
+        resolvedMirror: File? = null
+    ) {
+        if (outcome.haltMessage != null || outcome.discarded || outcome.stoppedAfter != null) return
+        if (!outcome.limitSkipped && outcome.result.verdict == EvalVerdict.VERIFICATION_MISSING) return
+        runCatching {
+            val mirror = resolvedMirror ?: run {
+                val name = File(entry.repoUrl).name.removeSuffix(".git")
+                Git.mirrorPath(config.paths.evalRepos(), name).takeIf { it.exists() }
+            }
+            var worktreesUnregistered = true
+            listOf("ingestion", "application", "repair", "verification").forEach { name ->
+                val worktree = worktreeBase.resolve(name)
+                if (worktree.exists() && mirror == null) {
+                    worktreesUnregistered = false
+                    logger.warn { "Cannot unregister ${worktree.path}; no existing Git mirror is available" }
+                } else if (worktree.exists()) {
+                    runCatching { Git.removeWorktree(mirror!!, worktree) }
+                        .onFailure {
+                            worktreesUnregistered = false
+                            logger.warn(it) { "Could not unregister run worktree ${worktree.path}" }
+                        }
+                }
+            }
+            if (worktreesUnregistered) RuntimeCleanup.deleteTree(worktreeBase)
+            val scratchRoot = Env.get("PIPELINE_SCRATCH_DIR")?.let(::File)
+                ?: File(System.getProperty("java.io.tmpdir"), "pipeline-scratch")
+            RuntimeCleanup.deleteTree(scratchRoot.resolve("run_${outcome.runId}"))
+        }.onFailure { logger.warn(it) { "Best-effort cleanup failed for run ${outcome.runId}" } }
     }
 
     private suspend fun withRunHandling(
@@ -205,6 +245,7 @@ class PipelineOrchestrator(
         scratchRoot.mkdirs()
         val scratchBase = scratchRoot.resolve("run_$runId").apply { mkdirs() }
         val repoDir = File(entry.repoUrl)
+        if (batchId == null) BenchmarkCheckoutGuard.reset(repoDir, runId.value)
         val metadata = runCatching { Git.metadata(resolveMetadataRepo(entry), entry.commitHash.hash) }
             .getOrElse { CommitMetadata("", emptyList(), "", "") }
 
@@ -245,7 +286,8 @@ class PipelineOrchestrator(
             agentWorkspaceDir = scratchBase,
             database = database,
             productionRoots = entry.productionRoots,
-            testRoots = entry.testRoots
+            testRoots = entry.testRoots,
+            contaminationScope = batchId ?: runId.value
         )
         return Triple(runId, worktreeBase, baseCtx)
     }
@@ -255,12 +297,24 @@ class PipelineOrchestrator(
         entry: BenchmarkEntry,
         sample: VerifiedSample,
         baseCtx: RunContext,
-        worktreeBase: File
+        worktreeBase: File,
+        resolvedMirror: File? = null,
+        downstreamGate: DownstreamGate = DownstreamGate.AllowAll
     ): PipelineRunOutcome {
         // Triage is the first boundary: every downstream stage starts from a
         // verified sample, so a stop requested here must also skip the
         // production-diff work below.
         stopIfDue(runId, StageName.TRIAGE)?.let { return it }
+
+        if (!downstreamGate.admit()) {
+            database.finishRun(runId, "triage_only")
+            logger.info { "Run $runId triage succeeded; downstream limit reached" }
+            return PipelineRunOutcome(
+                runId = runId,
+                result = incompleteResult(runId, "verified sample retained after downstream limit"),
+                limitSkipped = true
+            )
+        }
 
         val productionDiff = productionDiff(entry)
         val lattice = requireStage(
@@ -270,7 +324,7 @@ class PipelineOrchestrator(
         stopIfDue(runId, StageName.SYNTHESIS)?.let { return it }
 
         val applicationWorktree = worktreeBase.resolve("application")
-        materializeC1(entry, applicationWorktree)
+        materializeC1(entry, applicationWorktree, resolvedMirror)
         val annotated = requireStage(
             baseCtx, 4, application,
             ApplicationInput(ApplicationTarget(sample.parentHash, applicationWorktree), lattice)
@@ -278,7 +332,7 @@ class PipelineOrchestrator(
         stopIfDue(runId, StageName.APPLICATION)?.let { return it }
 
         val repairWorktree = worktreeBase.resolve("repair")
-        materializeC1(entry, repairWorktree)
+        materializeC1(entry, repairWorktree, resolvedMirror)
         val patchCheck = Git.checkPatch(repairWorktree, annotated.annotationsPatch)
         if (patchCheck.exitCode != 0) {
             throw StageHaltException("annotations.patch does not apply cleanly to clean C-1: ${patchCheck.output.take(2000)}")
@@ -299,7 +353,7 @@ class PipelineOrchestrator(
         stopIfDue(runId, StageName.REPAIR)?.let { return it }
 
         val verificationWorktree = worktreeBase.resolve("verification")
-        materializeC1(entry, verificationWorktree)
+        materializeC1(entry, verificationWorktree, resolvedMirror)
         val result = requireStage(
             baseCtx, 6, verification,
             VerificationInput(
@@ -553,15 +607,15 @@ class PipelineOrchestrator(
     private fun restoreIngestionWorktree(input: IngestionInput, destination: File): IngestionWorktree {
         val evalRepos = config.paths.evalRepos()
         val repoName = File(input.repoUrl).name.removeSuffix(".git")
-        val mirror = Git.ensureMirror(input.repoUrl, evalRepos, repoName)
+        val mirror = input.mirror ?: Git.ensureMirror(input.repoUrl, evalRepos, repoName)
         Git.addWorktree(mirror, destination, input.parentHash.hash)
         return IngestionWorktree(input.commitHash, input.parentHash, destination, mirror)
     }
 
-    private fun materializeC1(entry: BenchmarkEntry, destination: File) {
+    private fun materializeC1(entry: BenchmarkEntry, destination: File, resolvedMirror: File? = null) {
         val evalRepos = config.paths.evalRepos()
         val repoName = File(entry.repoUrl).name.removeSuffix(".git")
-        val mirror = Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
+        val mirror = resolvedMirror ?: Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
         Git.addWorktree(mirror, destination, entry.parentHash.hash)
     }
 

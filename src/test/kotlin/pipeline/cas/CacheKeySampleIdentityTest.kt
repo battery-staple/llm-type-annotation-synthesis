@@ -64,9 +64,10 @@ class CacheKeySampleIdentityTest {
     private fun context(
         sampleIndex: Int,
         temperature: Double = 0.7,
-        build: BuildSection = BuildSection()
+        build: BuildSection = BuildSection(),
+        config: ProjectConfig = ProjectConfig()
     ) = RunContext(
-        config = ProjectConfig(),
+        config = config,
         build = build,
         sourceCompatibility = "17",
         targetCompatibility = "17",
@@ -254,6 +255,23 @@ class CacheKeySampleIdentityTest {
         variants.forEach { variant ->
             assertNotEquals(keys(variant), baseline, "build change must fork the key: $variant")
         }
+    }
+
+    @Test
+    fun `runner timeouts fork stage cache keys`() {
+        val input = IngestionInput(benchmarkId, "/nonexistent/repo", commit, parent)
+        val stage = IngestionStage(noopRunner)
+        val defaultKey = stage.computeCacheKey(context(0), input)
+        val changedTimeout = ProjectConfig().copy(agent = ProjectConfig().agent.copy(timeoutMs = 900_000))
+        assertNotEquals(defaultKey, stage.computeCacheKey(context(0, config = changedTimeout), input))
+
+        val synthesis = SynthesisStage(noopAgent, noopJavac)
+        val bugInput = SynthesisInput(BugContext(benchmarkId, commit, parent, "", "demo bug"))
+        val internetEnabled = ProjectConfig().copy(repair = ProjectConfig().repair.copy(internetAccess = true))
+        assertNotEquals(
+            synthesis.computeCacheKey(context(0), bugInput),
+            synthesis.computeCacheKey(context(0, config = internetEnabled), bugInput)
+        )
     }
 
     @Test

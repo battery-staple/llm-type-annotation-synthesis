@@ -34,6 +34,9 @@
 
     <!-- Per-run appender: one file per run_id, enabled when logging.per_run_file=true -->
     <appender name="RUN_FILE" class="ch.qos.logback.classic.sift.SiftingAppender">
+        <!-- Per-run files are best-effort when more run IDs than this cap are active. -->
+        <maxAppenderCount>64</maxAppenderCount>
+        <timeout>600000</timeout>
         <discriminator class="ch.qos.logback.classic.sift.MDCBasedDiscriminator">
             <key>run_id</key>
             <defaultValue>unassigned</defaultValue>

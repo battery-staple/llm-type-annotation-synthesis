@@ -34,6 +34,7 @@ internal data class OpenCodeReasoning(
 object OpenCodeDb {
     private val log = KotlinLogging.logger {}
     private val json = Json { ignoreUnknownKeys = true }
+    private val registeredForExit = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private val copiedTables = listOf(
         "account",
@@ -45,9 +46,22 @@ object OpenCodeDb {
     )
 
     fun prepare(target: File = defaultTarget()): File? {
-        val global = locateGlobalDb()
+        registerForExit(target)
+        return prepare(locateGlobalDb(), target)
+    }
+
+    private fun registerForExit(target: File) {
+        val base = target.absoluteFile
+        if (!registeredForExit.add(base.path)) return
+        Runtime.getRuntime().addShutdownHook(Thread({
+            listOf(base, File(base.path + "-wal"), File(base.path + "-shm"), File(base.path + "-journal"))
+                .forEach { runCatching { it.delete() } }
+        }, "opencode-db-cleanup-${base.name}"))
+    }
+
+    internal fun prepare(global: File?, target: File): File? {
         if (global == null) {
-            log.warn { "OpenCode global DB not found; agents will use the shared OpenCode DB" }
+            log.warn { "OpenCode global DB not found; agents will use private empty databases" }
             return null
         }
         if (target.exists() && !target.delete()) {
@@ -57,16 +71,39 @@ object OpenCodeDb {
         Class.forName("org.sqlite.JDBC")
 
         return runCatching {
+            DriverManager.getConnection("jdbc:sqlite:${global.absolutePath}").use { source ->
+                source.createStatement().use { it.execute("PRAGMA busy_timeout=10000") }
+            }
             DriverManager.getConnection("jdbc:sqlite:${target.absolutePath}").use { db ->
+                db.createStatement().use { it.execute("PRAGMA busy_timeout=10000") }
                 copySchema(global, db)
                 copyRows(global, db)
             }
             log.info { "Prepared isolated OpenCode DB at ${target.absolutePath}" }
             target
         }.getOrElse { error ->
-            log.warn(error) { "Could not seed isolated OpenCode DB; falling back to the shared DB" }
-            null
+            throw IllegalStateException("Could not seed isolated OpenCode DB from ${global.absolutePath}", error)
         }
+    }
+
+    /** Creates a private, transactionally consistent per-invocation copy of the seeded DB. */
+    fun cloneForInvocation(seed: File?, target: File): File {
+        target.parentFile?.mkdirs()
+        Class.forName("org.sqlite.JDBC")
+        if (seed?.isFile == true) {
+            val escaped = target.absolutePath.replace("'", "''")
+            DriverManager.getConnection("jdbc:sqlite:${seed.absolutePath}").use { source ->
+                source.createStatement().use {
+                    it.execute("PRAGMA busy_timeout=10000")
+                    it.execute("VACUUM INTO '$escaped'")
+                }
+            }
+        } else {
+            DriverManager.getConnection("jdbc:sqlite:${target.absolutePath}").use { db ->
+                db.createStatement().use { it.execute("PRAGMA busy_timeout=10000") }
+            }
+        }
+        return target
     }
 
     /**
@@ -248,6 +285,7 @@ object OpenCodeDb {
 
     private fun copySchema(global: File, db: Connection) {
         DriverManager.getConnection("jdbc:sqlite:${global.absolutePath}").use { source ->
+            source.createStatement().use { it.execute("PRAGMA busy_timeout=10000") }
             val statements = source.createStatement().use { statement ->
                 statement.executeQuery(
                     """SELECT sql FROM sqlite_master
@@ -265,7 +303,11 @@ object OpenCodeDb {
 
     private fun copyRows(global: File, db: Connection) {
         val escaped = global.absolutePath.replace("'", "''")
-        db.createStatement().use { it.execute("ATTACH DATABASE '$escaped' AS source") }
+        db.createStatement().use {
+            it.execute("PRAGMA busy_timeout=10000")
+            it.execute("ATTACH DATABASE '$escaped' AS source")
+            it.execute("PRAGMA source.busy_timeout=10000")
+        }
         try {
             copiedTables.forEach { table ->
                 val columns = db.createStatement().use { statement ->

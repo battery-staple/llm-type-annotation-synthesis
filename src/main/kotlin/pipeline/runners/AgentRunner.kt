@@ -97,17 +97,24 @@ class CoroutineOpenCodeRunner(
         // here: concurrent runs, subagents, and SIGKILL during terminateTree()
         // can corrupt the user's session database.
         env.remove("OPENCODE_DB")
-        val ownedDbPath: String? = if (databasePath != null) {
-            env["OPENCODE_DB"] = databasePath
-            null
-        } else {
-            Files.createTempFile(
-                "opencode-pipeline-${UUID.randomUUID()}-",
-                ".db"
-            ).toAbsolutePath().toString().also { env["OPENCODE_DB"] = it }
+        val ownedDbPath = Files.createTempFile(
+            "opencode-pipeline-${UUID.randomUUID()}-", ".db"
+        ).toAbsolutePath().toString()
+        runCatching { File(ownedDbPath).delete() }
+        try {
+            OpenCodeDb.cloneForInvocation(databasePath?.let(::File), File(ownedDbPath))
+        } catch (t: Throwable) {
+            deleteIsolatedDb(ownedDbPath)
+            throw IllegalStateException("Could not seed private OpenCode database", t)
         }
+        env["OPENCODE_DB"] = ownedDbPath
 
-        val process = builder.start()
+        val process = try {
+            builder.start()
+        } catch (t: Throwable) {
+            deleteIsolatedDb(ownedDbPath)
+            throw t
+        }
         // No interactive stdin: the CLI must see EOF or it may wait indefinitely.
         runCatching { process.outputStream.close() }
         val stdoutLines = Collections.synchronizedList(mutableListOf<String>())

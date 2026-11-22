@@ -62,10 +62,12 @@ class ApplicationStage(
         val configSlice = mapOf(
             "model_application" to ctx.config.model.applicationModel,
             "agent_steps_application" to ctx.config.agent.steps.application,
+            "agent_timeout_ms" to ctx.config.agent.timeoutMs,
             "tell_non_triviality_error" to ctx.config.prompt.tellNonTrivialityError,
             "checker_processor" to ctx.config.checker.processor,
             "checker_category" to checkerCategoryName(ctx.config.checker.category),
             "checker_quals" to ctx.config.checker.quals,
+            "build_timeout_ms" to ctx.config.agent.timeoutMs,
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
             "production_roots" to ctx.productionRoots.sorted(),
             "test_roots" to ctx.testRoots.sorted(),
@@ -251,6 +253,7 @@ class ApplicationStage(
                 checker.errorCount,
                 checker.warningCount,
                 checker.diagnosticsLog.absolutePath,
+                checker.timedOut,
             )
             checkerDiagnostics += checker.diagnostics.map { diagnostic ->
                 CheckerDiagnosticRecord(

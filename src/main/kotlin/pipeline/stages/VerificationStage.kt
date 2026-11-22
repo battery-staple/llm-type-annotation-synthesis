@@ -60,7 +60,7 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             "test_patch" to contentHashOrMissing(input.sample.testPatchFile),
             "verification_scope" to input.verificationScope.name.lowercase()
         )
-        val configSlice = buildConfigSlice(ctx.build) + mapOf(
+        val configSlice = buildConfigSlice(ctx.build) + buildTimeoutConfig(ctx) + mapOf(
             "verification_scope" to ctx.config.verification.scope.name.lowercase(),
             "verification_baseline" to ctx.config.verification.baseline,
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
@@ -125,6 +125,9 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         val checkerLogArtifact = writer.copyIn(ArtifactNames.FINAL_CHECKER_ERRORS, checker.diagnosticsLog)
         val checkerRunId = TelemetryIds.id()
         recordCheckerTelemetry(ctx, input, checker, checkerRunId, checkerLogArtifact.absolutePath)
+        if (checker.timedOut) return StageResult.TransientFailure(
+            RuntimeException("Verification checker timed out"), 0, emptyList()
+        )
 
         val checkerMissing = !checker.checkerInvoked || !checker.success
         val remainingCheckerErrors: Int? = if (checkerMissing) null else checker.errorCount
@@ -158,6 +161,9 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
                 xmlArtifactName = regXmlName,
                 isRegressionRun = true
             )
+            if (result.timedOut) return StageResult.TransientFailure(
+                RuntimeException("Verification regression test timed out"), 0, emptyList()
+            )
             log.info { "Verification: T_reg passed=$regPassed evidenceMissing=$regEvidenceMissing outcomes=${result.outcomes.size}" }
         } else {
             // Record the missing-evidence run shape with zero counts for forensics.
@@ -173,6 +179,10 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         if (input.verificationScope == VerificationScope.FULL_SUITE) {
             log.info { "Verification: running pre-existing suite" }
             val suiteResult = buildRunner.runTests(worktree, testFilter = null, customQualsJar = input.lattice.customQualsJar)
+            if (suiteResult.timedOut) {
+                recordTestTelemetry(ctx, input, suiteResult, "pre_existing_suite", null)
+                return StageResult.TransientFailure(RuntimeException("Verification suite timed out"), 0, emptyList())
+            }
             // JUnit XML reports the display name, not the Java method name. The
             // filtered regression run above tells us which display name belongs
             // to the regression test, so exclude that exact outcome from the
@@ -403,7 +413,8 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             checkerInvoked = checker.checkerInvoked,
             errorCount = checker.errorCount,
             warningCount = checker.warningCount,
-            diagnosticsLogPath = diagnosticsLogPath
+            diagnosticsLogPath = diagnosticsLogPath,
+            timedOut = checker.timedOut
         )
         val checkerName = input.lattice.processor.substringAfterLast('.')
         val diagnostics = checker.diagnostics.map { diagnostic ->

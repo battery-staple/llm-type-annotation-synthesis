@@ -107,6 +107,14 @@ class StopAfterTest {
     }
 
     @Test
+    fun `limit-skipped verified run has triage-only lifecycle`() {
+        val outcome = outcome(limitSkipped = true)
+        assertEquals("triage_only", lifecycleStatus(outcome))
+        assertTrue(outcome.limitSkipped)
+        assertEquals(EvalVerdict.VERIFICATION_MISSING, outcome.result.verdict)
+    }
+
+    @Test
     fun `stopped run skips verdict evaluation`() {
         val outcome = stoppedOutcome(StageName.TRIAGE)
 
@@ -126,7 +134,8 @@ class StopAfterTest {
     private fun outcome(
         discarded: Boolean = false,
         haltMessage: String? = null,
-        stoppedAfter: StageName? = null
+        stoppedAfter: StageName? = null,
+        limitSkipped: Boolean = false
     ) = PipelineRunOutcome(
         runId = RunId("run-stop-after-test"),
         result = VerificationResult(
@@ -140,6 +149,7 @@ class StopAfterTest {
         ),
         discarded = discarded,
         haltMessage = haltMessage,
-        stoppedAfter = stoppedAfter
+        stoppedAfter = stoppedAfter,
+        limitSkipped = limitSkipped
     )
 }

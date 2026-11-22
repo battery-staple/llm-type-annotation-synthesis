@@ -61,7 +61,8 @@ class GradleBuildRunner(
         return BuildResult(
             success = result.exitCode == 0 && !result.timedOut,
             exitCode = result.exitCode,
-            output = result.output
+            output = result.output,
+            timedOut = result.timedOut
         )
     }
 
@@ -176,7 +177,8 @@ class GradleBuildRunner(
             errorCount = errorCount,
             warningCount = warningCount,
             diagnostics = diagnostics,
-            diagnosticsLog = diagnosticsLog
+            diagnosticsLog = diagnosticsLog,
+            timedOut = result.timedOut
         )
     }
 

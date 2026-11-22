@@ -164,8 +164,8 @@ object TelemetryProjector {
         c.prepareStatement(
             """INSERT OR REPLACE INTO checker_runs
                (checker_run_id, run_id, step_id, stage, attempt_number, processor, checker_category,
-                quals, exit_code, success, checker_invoked, error_count, warning_count, diagnostics_log_path)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+                quals, exit_code, success, checker_invoked, error_count, warning_count, diagnostics_log_path, timed_out)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
         ).use { s ->
             s.setString(1, r.checkerRunId)
             s.setString(2, r.runId.value)
@@ -181,6 +181,7 @@ object TelemetryProjector {
             s.setInt(12, r.errorCount)
             s.setInt(13, r.warningCount)
             s.setString(14, r.diagnosticsLogPath)
+            s.setInt(15, if (r.timedOut) 1 else 0)
             s.executeUpdate()
         }
     }

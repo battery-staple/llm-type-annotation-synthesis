@@ -22,8 +22,14 @@ data class TriageSection(
     @SerialName("repos_file") val reposFile: String = "repos.yaml",
     val depth: Int = 20,
     val limit: Int? = null,
+    val jobs: Int = 1,
     @SerialName("bugfix_threshold") val bugfixThreshold: Double = 0.75
-)
+) {
+    init {
+        require(jobs >= 1) { "triage.jobs must be at least 1" }
+        require(limit == null || limit >= 0) { "triage.limit must be non-negative" }
+    }
+}
 
 @Serializable
 data class EnvironmentSection(

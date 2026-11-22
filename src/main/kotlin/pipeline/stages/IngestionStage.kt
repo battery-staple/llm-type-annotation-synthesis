@@ -44,7 +44,7 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
             "commit" to input.commitHash.hash,
             "parent" to input.parentHash.hash
         )
-        val configSlice = buildConfigSlice(ctx.build) + mapOf(
+        val configSlice = buildConfigSlice(ctx.build) + buildTimeoutConfig(ctx) + mapOf(
             "source_compatibility" to ctx.sourceCompatibility,
             "target_compatibility" to ctx.targetCompatibility,
             "benchmark_id" to input.benchmarkId.canonical
@@ -66,7 +66,7 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
         log.info { "Ingestion: ensuring mirror for repo=$repoName commit=${input.commitHash} parent=${input.parentHash}" }
 
         val mirror = try {
-            Git.ensureMirror(input.repoUrl, evalReposDir, repoName)
+            input.mirror ?: Git.ensureMirror(input.repoUrl, evalReposDir, repoName)
         } catch (t: Throwable) {
             log.warn { "Ingestion: mirror fetch failed (transient): ${t.message}" }
             return StageResult.TransientFailure(
@@ -122,6 +122,9 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
         log.info { "Ingestion: pre-warm exit=${prewarm.exitCode} success=${prewarm.success}" }
 
         if (!prewarm.success) {
+            if (prewarm.timedOut) return StageResult.TransientFailure(
+                RuntimeException("Pre-warm compile timed out: ${prewarm.output.take(2000)}"), 0, emptyList()
+            )
             if (isTransientOutput(prewarm.output)) {
                 log.warn { "Ingestion: pre-warm failed with network/transient signature; retryable" }
                 return StageResult.TransientFailure(

@@ -61,6 +61,8 @@ class RepairStage(
         val configSlice = mapOf(
             "model_repair" to ctx.config.model.repairModel,
             "agent_steps_repair" to ctx.config.agent.steps.repair,
+            "agent_timeout_ms" to ctx.config.agent.timeoutMs,
+            "build_timeout_ms" to ctx.config.agent.timeoutMs,
             "max_checker_invocations" to ctx.config.agent.maxCheckerInvocations,
             "local_variable_annotations" to ctx.config.repair.localVariableAnnotations.name.lowercase(),
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
@@ -184,6 +186,15 @@ class RepairStage(
             treeChangedSinceChecker = false
             errorProgression += result.errorCount
             lastDiagnostics = sanitizeCheckerLogPaths(worktree, result.diagnosticsLog.readText()).take(MAX_FEEDBACK_CHARS)
+            if (result.timedOut) {
+                persistRepairCheckerTimeout(ctx, checkerRuns.last(), checkerDiagnostics.takeLast(result.diagnostics.size))
+                return StageResult.TransientFailure(RuntimeException("Repair checker timed out"), stepsTaken, fullTranscript.toList())
+            }
+            if (!checkerCompletedSuccessfully(result)) {
+                feedback = "The selected checker pass did not complete (invoked=${result.checkerInvoked}, success=${result.success})."
+                refreshWorkspace(worktree, workspace, checker, ctx)
+                continue
+            }
             if (result.errorCount == 0) {
                 converged = true
             } else {
@@ -200,11 +211,22 @@ class RepairStage(
             finalCheckerRecord = checkerRuns.lastOrNull()
             checkerRunsUsed++
             treeChangedSinceChecker = false
-            if (finalChecker.errorCount == 0) converged = true
+            if (finalChecker.timedOut) {
+                persistRepairCheckerTimeout(ctx, checkerRuns.last(), checkerDiagnostics.takeLast(finalChecker.diagnostics.size))
+                return StageResult.TransientFailure(RuntimeException("Final repair checker timed out"), stepsTaken, fullTranscript.toList())
+            }
+            if (checkerCompletedSuccessfully(finalChecker) && finalChecker.errorCount == 0) converged = true
         } else if (finalCheckerRecord != null && treeChangedSinceChecker) {
             logger.warn { "checker invocation budget exhausted; reusing last intermediate result as final evidence" }
         }
         val remainingTypeErrors = finalCheckerRecord?.errorCount ?: -1
+        if (finalCheckerRecord == null || !checkerCompletedSuccessfully(finalCheckerRecord.checkerInvoked, finalCheckerRecord.success)) {
+            return StageResult.TransientFailure(
+                RuntimeException("Repair checker did not complete successfully; convergence cannot be established"),
+                stepsTaken,
+                fullTranscript.toList()
+            )
+        }
 
         val patchFile = PatchManager(worktree).writePatch(stagingDir.resolve(ArtifactNames.REPAIR_PATCH))
         writer.register(ArtifactNames.REPAIR_PATCH, patchFile)
@@ -342,6 +364,7 @@ class RepairStage(
             result.errorCount,
             result.warningCount,
             result.diagnosticsLog.absolutePath,
+            result.timedOut,
         )
         checkerDiagnostics += result.diagnostics.map { diagnostic ->
             CheckerDiagnosticRecord(
@@ -386,6 +409,20 @@ class RepairStage(
         val MIRROR_EXCLUDES = setOf(".agent-libs", "run-checker.sh")
     }
 }
+
+private suspend fun persistRepairCheckerTimeout(
+    ctx: RunContext,
+    run: CheckerRunRecord,
+    diagnostics: List<CheckerDiagnosticRecord>
+) {
+    ctx.database.recordStageTelemetry(TelemetryProjection(checkerRuns = listOf(run), checkerDiagnostics = diagnostics))
+}
+
+internal fun checkerCompletedSuccessfully(checker: pipeline.ports.CheckerResult): Boolean =
+    checkerCompletedSuccessfully(checker.checkerInvoked, checker.success)
+
+internal fun checkerCompletedSuccessfully(checkerInvoked: Boolean, success: Boolean): Boolean =
+    checkerInvoked && success
 
 /**
  * Redacts the worktree's absolute path from checker logs shown to the blind

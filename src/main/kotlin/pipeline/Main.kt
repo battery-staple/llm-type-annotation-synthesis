@@ -33,6 +33,7 @@ import pipeline.stages.VerificationStage
 import pipeline.util.Env
 import pipeline.util.FileOps
 import pipeline.util.Git
+import pipeline.util.RuntimeCleanup
 
 private val logger = KotlinLogging.logger {}
 
@@ -136,7 +137,8 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
     private val model by option("--model", help = "Override the configured model for every stage")
     private val triageMode by option("--triage-mode", help = "Override triage.mode (manifest | crawler)")
     private val depth by option("--depth", help = "Override triage.depth (number of commits to crawl in crawler mode)").int()
-    private val limit by option("--limit", help = "Override triage.limit (max verified commits to run in crawler mode)").int()
+    private val limit by option("--limit", help = "Override triage.limit (maximum verified samples sent to downstream stages)").int()
+    private val jobs by option("--jobs", help = "Override triage.jobs (concurrent crawler commits; must be >= 1)").int()
     private val stopAfter by option(
         "--stop-after",
         help = "Stop once this stage succeeds and skip every later stage. " +
@@ -165,7 +167,8 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                     )
                 )
             } ?: c
-            if (triageMode != null || depth != null || limit != null) {
+            if (jobs != null && jobs!! < 1) throw UsageError("--jobs must be at least 1")
+            if (triageMode != null || depth != null || limit != null || jobs != null) {
                 val resolvedMode = triageMode?.let { raw ->
                     when (raw.lowercase()) {
                         "manifest" -> pipeline.stages.TriageMode.MANIFEST
@@ -177,9 +180,13 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                     triage = updated.triage.copy(
                         mode = resolvedMode,
                         depth = depth ?: updated.triage.depth,
-                        limit = limit ?: updated.triage.limit
+                        limit = limit ?: updated.triage.limit,
+                        jobs = jobs ?: updated.triage.jobs
                     )
                 )
+                if (jobs != null && resolvedMode != pipeline.stages.TriageMode.CRAWLER) {
+                    throw UsageError("--jobs is only available in crawler mode")
+                }
             }
             updated
         }
@@ -224,6 +231,7 @@ class VerifyBenchmarkCommand : CliktCommand(name = "verify-benchmark", help = "V
 }
 
 internal fun lifecycleStatus(outcome: PipelineRunOutcome): String = when {
+    outcome.limitSkipped -> "triage_only"
     outcome.stoppedAfter != null -> "stopped"
     outcome.discarded -> "discarded"
     outcome.haltMessage != null -> "failed"
@@ -241,7 +249,7 @@ private fun printOutcome(outcome: PipelineRunOutcome) {
     if (outcome.stoppedAfter != null) {
         println("stopped_after:             ${outcome.stoppedAfter.identifier}")
     }
-    println("evaluation_verdict:        ${r.verdict.name.lowercase()}")
+    if (!outcome.limitSkipped) println("evaluation_verdict:        ${r.verdict.name.lowercase()}")
     println("regression_test_passed:    ${r.regressionTestPassed ?: "unknown"}")
     println("original_tests_passed:     ${r.originalTestsPassed ?: "unknown"}")
     println("remaining_checker_errors:  ${r.remainingCheckerErrors ?: "unknown"}")
@@ -258,6 +266,7 @@ class PipelineCli : CliktCommand(name = "pipeline") {
 }
 
 fun main(args: Array<String>) {
+    RuntimeCleanup.startup()
     PipelineCli()
         .subcommands(InitCommand(), RunCommand(), VerifyBenchmarkCommand())
         .main(args)

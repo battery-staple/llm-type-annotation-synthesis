@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS checker_runs (
     error_count INTEGER NOT NULL DEFAULT 0,
     warning_count INTEGER NOT NULL DEFAULT 0,
     diagnostics_log_path TEXT,
+    timed_out BOOLEAN NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

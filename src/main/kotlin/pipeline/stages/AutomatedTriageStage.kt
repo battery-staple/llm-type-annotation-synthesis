@@ -43,7 +43,7 @@ class AutomatedTriageStage(
             "verification_scope" to ctx.config.verification.scope.name.lowercase(),
             "production_roots" to ctx.productionRoots.sorted(),
             "test_roots" to ctx.testRoots.sorted()
-        )
+        ) + buildTimeoutConfig(ctx)
         return CacheKeys.compute(
             ctx = ctx,
             stage = stageName,

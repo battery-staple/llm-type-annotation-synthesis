@@ -71,7 +71,7 @@ interface AgentRunner {
 }
 
 // Port 3: Build & Test Tooling (Gradle / Future Maven)
-data class BuildResult(val success: Boolean, val exitCode: Int, val output: String)
+data class BuildResult(val success: Boolean, val exitCode: Int, val output: String, val timedOut: Boolean = false)
 
 @Serializable
 enum class TestStatus {
@@ -118,7 +118,8 @@ data class CheckerResult(
     val errorCount: Int,
     val warningCount: Int,
     val diagnostics: List<CheckerDiagnostic>,
-    val diagnosticsLog: File
+    val diagnosticsLog: File,
+    val timedOut: Boolean = false
 )
 
 interface BuildRunner {

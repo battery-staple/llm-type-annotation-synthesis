@@ -168,7 +168,8 @@ data class CheckerRunRecord(
     val checkerInvoked: Boolean,
     val errorCount: Int,
     val warningCount: Int,
-    val diagnosticsLogPath: String?
+    val diagnosticsLogPath: String?,
+    val timedOut: Boolean = false
 )
 
 data class CheckerDiagnosticRecord(
@@ -254,4 +255,3 @@ data class TelemetryProjection(
     val testExecutions: List<TestExecutionRecord> = emptyList(),
     val llmInvocations: List<LlmInvocationRecord> = emptyList()
 )
-

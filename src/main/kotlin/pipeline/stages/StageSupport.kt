@@ -10,6 +10,7 @@ import com.github.javaparser.ast.expr.SingleMemberAnnotationExpr
 import com.github.javaparser.ast.nodeTypes.NodeWithAnnotations
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonElement
@@ -39,6 +40,10 @@ internal fun buildConfigSlice(build: BuildSection): Map<String, Any?> = mapOf(
     "test_task" to build.testTask,
     "checker_task" to build.checkerTask,
 )
+
+/** Outcome-affecting wall-clock budget used by every Gradle invocation. */
+internal fun buildTimeoutConfig(ctx: RunContext): Map<String, Any?> =
+    mapOf("build_timeout_ms" to ctx.config.agent.timeoutMs)
 
 object PromptTemplates {
     fun load(name: String): String {
@@ -95,14 +100,41 @@ fun agentStartupFailure(result: AgentRunResult): String? =
 fun haltIfBenchmarkRepoDirty(ctx: RunContext, stage: String) {
     val repo = ctx.repoDir
     if (!repo.isDirectory) return
-    val status = runCatching { Git.statusPorcelain(repo) }.getOrNull() ?: return
-    if (status.isBlank()) return
-    runCatching { Git.run(repo, "checkout", "--", ".") }
-    runCatching { Git.run(repo, "clean", "-fd") }
-    throw StageHaltException(
-        "$stage modified the benchmark repository; the checkout was rolled back. Status was:\n" +
-            status.take(2000)
-    )
+    BenchmarkCheckoutGuard.check(repo, ctx.contaminationScope, stage)
+}
+
+/** Serializes contamination detection/rollback and poisons a checkout for its run. */
+internal object BenchmarkCheckoutGuard {
+    private data class State(val lock: Any = Any(), var contaminated: Boolean = false)
+    private val states = ConcurrentHashMap<String, State>()
+
+    fun reset(repo: File, scope: String) {
+        val key = key(repo, scope)
+        val state = states.computeIfAbsent(key) { State() }
+        synchronized(state.lock) { state.contaminated = false }
+    }
+
+    fun check(repo: File, scope: String, stage: String) {
+        val key = key(repo, scope)
+        val state = states.computeIfAbsent(key) { State() }
+        synchronized(state.lock) {
+            if (state.contaminated) throw StageHaltException("$stage stopped: benchmark checkout contamination was already detected")
+            val status = try { Git.statusPorcelain(repo) } catch (t: Throwable) {
+                state.contaminated = true
+                throw StageHaltException("$stage could not verify benchmark checkout cleanliness: ${t.message}")
+            }
+            if (status.isBlank()) return
+            state.contaminated = true
+            runCatching { Git.run(repo, "checkout", "--", ".") }
+            runCatching { Git.run(repo, "clean", "-fd") }
+            throw StageHaltException(
+                "$stage modified the benchmark repository; the checkout was rolled back. Status was:\n" + status.take(2000)
+            )
+        }
+    }
+
+    private fun key(repo: File, scope: String): String =
+        "${runCatching { repo.canonicalPath }.getOrDefault(repo.absolutePath)}::$scope"
 }
 
 data class QualifierInfo(

@@ -1,6 +1,9 @@
 package pipeline.util
 
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 data class CommitMetadata(
     val hash: String,
@@ -10,6 +13,12 @@ data class CommitMetadata(
 )
 
 object Git {
+    private val repositoryLocks = ConcurrentHashMap<String, ReentrantLock>()
+    internal val worktreeOperationsLock = ReentrantLock()
+    internal fun worktreeLockFor(repo: File): ReentrantLock = worktreeOperationsLock
+    private fun lockFor(repo: File): ReentrantLock = repositoryLocks.computeIfAbsent(
+        runCatching { repo.canonicalPath }.getOrDefault(repo.absolutePath)
+    ) { ReentrantLock() }
     fun run(cwd: File, vararg args: String, timeoutSeconds: Long = 300, env: Map<String, String> = emptyMap()): ProcResult =
         Processes.run(listOf("git") + args.toList(), cwd, environment = env, timeoutSeconds = timeoutSeconds)
 
@@ -74,14 +83,16 @@ object Git {
     fun ensureMirror(repoUrl: String, evalReposDir: File, repoName: String): File {
         evalReposDir.mkdirs()
         val mirror = mirrorPath(evalReposDir, repoName)
-        if (!mirror.exists()) {
-            val source = resolveRepoUrl(repoUrl)
-            val result = run(evalReposDir, "clone", "--mirror", source, mirror.absolutePath, timeoutSeconds = 1800)
-            requireOk(result, "git clone --mirror $source")
-        } else {
-            run(mirror, "fetch", "--all", "--prune", timeoutSeconds = 600)
+        return lockFor(mirror).withLock {
+            if (!mirror.exists()) {
+                val source = resolveRepoUrl(repoUrl)
+                val result = run(evalReposDir, "clone", "--mirror", source, mirror.absolutePath, timeoutSeconds = 1800)
+                requireOk(result, "git clone --mirror $source")
+            } else {
+                requireOk(run(mirror, "fetch", "--all", "--prune", timeoutSeconds = 600), "git fetch --all")
+            }
+            mirror
         }
-        return mirror
     }
 
     fun resolveRepoUrl(repoUrl: String): String {
@@ -90,19 +101,22 @@ object Git {
     }
 
     fun addWorktree(repo: File, destination: File, commit: String) {
-        destination.parentFile?.mkdirs()
-        FileOps.deleteRecursively(destination)
-        requireOk(
-            run(repo, "worktree", "add", "--detach", destination.absolutePath, commit, timeoutSeconds = 600),
-            "git worktree add $destination"
-        )
+        worktreeLockFor(repo).withLock {
+            destination.parentFile?.mkdirs()
+            FileOps.deleteRecursively(destination)
+            requireOk(
+                run(repo, "worktree", "add", "--detach", destination.absolutePath, commit, timeoutSeconds = 600),
+                "git worktree add $destination"
+            )
+        }
     }
 
     fun removeWorktree(repo: File, destination: File) {
-        if (!destination.exists()) return
-        run(repo, "worktree", "remove", "--force", destination.absolutePath)
-        FileOps.deleteRecursively(destination)
-        run(repo, "worktree", "prune")
+        worktreeLockFor(repo).withLock {
+            if (!destination.exists()) return
+            requireOk(run(repo, "worktree", "remove", "--force", destination.absolutePath), "git worktree remove $destination")
+            FileOps.deleteRecursively(destination)
+        }
     }
 
     /**

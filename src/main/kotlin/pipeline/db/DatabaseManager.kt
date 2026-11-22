@@ -23,6 +23,7 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
             statement.execute("PRAGMA foreign_keys=ON")
         }
         migrateTestRunColumns()
+        migrateCheckerRunColumns()
         migrateEvaluationRunColumns()
         connection.createStatement().use { statement ->
             // JDBC's execute() only runs the first statement in a multi-statement string.
@@ -62,6 +63,13 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
             connection.createStatement().use { statement ->
                 statement.execute("ALTER TABLE evaluation_runs ADD COLUMN batch_id TEXT")
             }
+        }
+    }
+
+    private fun migrateCheckerRunColumns() {
+        val columns = tableColumns("checker_runs")
+        if (columns.isNotEmpty() && "timed_out" !in columns) {
+            connection.createStatement().use { it.execute("ALTER TABLE checker_runs ADD COLUMN timed_out BOOLEAN NOT NULL DEFAULT 0") }
         }
     }
 
