@@ -133,6 +133,7 @@ enum class AgentEventType {
     @SerialName("tool_call") TOOL_CALL,
     @SerialName("tool_result") TOOL_RESULT,
     @SerialName("message") MESSAGE,
+    @SerialName("reasoning") REASONING,
     @SerialName("step_finish") STEP_FINISH
 }
 
@@ -238,7 +239,8 @@ data class AgentTranscriptEvent(
     @SerialName("tool_arguments") val toolArguments: Map<String, JsonElement>? = null,
     @SerialName("tool_result") val toolResult: String? = null,
     val content: String? = null,
-    @SerialName("token_usage") val tokenUsage: TokenUsage? = null
+    @SerialName("token_usage") val tokenUsage: TokenUsage? = null,
+    @SerialName("reasoning_tokens") val reasoningTokens: Int? = null
 )
 
 data class RunContext(

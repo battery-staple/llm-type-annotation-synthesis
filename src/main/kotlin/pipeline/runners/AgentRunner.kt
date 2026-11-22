@@ -16,12 +16,26 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import mu.KotlinLogging
 import pipeline.ports.AgentRunResult
 import pipeline.ports.AgentRunner
 import pipeline.stages.AgentEventType
 import pipeline.stages.AgentTranscriptEvent
 import pipeline.stages.TokenUsage
 import pipeline.util.Env
+
+private data class StreamReasoning(
+    val sessionId: String?,
+    val messageId: String?,
+    val partId: String?,
+    val event: AgentTranscriptEvent
+)
+
+private data class OpenCodeLineMetadata(
+    val sessionId: String?,
+    val messageId: String?,
+    val partId: String?
+)
 
 /**
  * Spawns the OpenCode CLI (`opencode run --auto --format json`) and parses its
@@ -40,6 +54,7 @@ class CoroutineOpenCodeRunner(
     private val databasePath: String? = null
 ) : AgentRunner {
 
+    private val log = KotlinLogging.logger {}
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
     override suspend fun runAgent(
@@ -119,6 +134,8 @@ class CoroutineOpenCodeRunner(
                 content = prompt
             )
         )
+        val sessionIds = linkedSetOf<String>()
+        val streamReasoning = mutableListOf<StreamReasoning>()
         var turnIndex = 0
         var stepsCounted = 0
         var parsed = 0
@@ -132,6 +149,8 @@ class CoroutineOpenCodeRunner(
             for (line in batch) {
                 parsed++
                 if (line.isBlank()) continue
+                val metadata = lineMetadata(line)
+                metadata.sessionId?.let(sessionIds::add)
                 val events = parseLine(line, turnIndex)
                 for (event in events) {
                     if (event.eventType == AgentEventType.STEP_START) {
@@ -142,8 +161,19 @@ class CoroutineOpenCodeRunner(
                         onEvent?.invoke(indexed)
                     } else {
                         val indexed = if (event.turnIndex <= 0) event.copy(turnIndex = maxOf(turnIndex, 1)) else event
-                        transcript.add(indexed)
-                        onEvent?.invoke(indexed)
+                        if (indexed.eventType == AgentEventType.REASONING) {
+                            // Buffer reasoning until the run DB can be reconciled;
+                            // OpenCode may expose the same part in both sources.
+                            streamReasoning += StreamReasoning(
+                                sessionId = metadata.sessionId,
+                                messageId = metadata.messageId,
+                                partId = metadata.partId,
+                                event = indexed
+                            )
+                        } else {
+                            transcript.add(indexed)
+                            onEvent?.invoke(indexed)
+                        }
                     }
                 }
             }
@@ -190,6 +220,66 @@ class CoroutineOpenCodeRunner(
                 exitCode = runCatching {
                     if (process.waitFor(5, TimeUnit.SECONDS)) process.exitValue() else -1
                 }.getOrDefault(-1)
+            }
+            try {
+                val databaseFile = env["OPENCODE_DB"]?.let(::File)
+                if (databaseFile != null && sessionIds.isNotEmpty()) {
+                    val persisted = OpenCodeDb.readReasoning(databaseFile, sessionIds)
+                    val persistedSessions = persisted.mapTo(mutableSetOf()) { it.sessionId }
+                    val persistedPartIds = persisted.mapTo(mutableSetOf()) { it.partId }
+                    val persistedMessages = persisted.mapTo(mutableSetOf()) { it.sessionId to it.messageId }
+                    val streamFallback = streamReasoning.filterNot { streamed ->
+                        when {
+                            streamed.partId != null && streamed.partId in persistedPartIds -> true
+                            streamed.sessionId != null && streamed.messageId != null &&
+                                (streamed.sessionId to streamed.messageId) in persistedMessages -> true
+                            streamed.sessionId != null && streamed.sessionId in persistedSessions &&
+                                persisted.any {
+                                    it.sessionId == streamed.sessionId &&
+                                        it.turnIndex == streamed.event.turnIndex &&
+                                        it.text == streamed.event.content
+                                } -> true
+                            streamed.sessionId == null && persisted.any {
+                                it.turnIndex == streamed.event.turnIndex && it.text == streamed.event.content
+                            } -> true
+                            else -> false
+                        }
+                    }.map { it.event }
+                    val dbEvents = persisted.map { part ->
+                        AgentTranscriptEvent(
+                            timestamp = runCatching { Instant.ofEpochMilli(part.timeCreated).toString() }
+                                .getOrDefault(Instant.now().toString()),
+                            eventType = AgentEventType.REASONING,
+                            turnIndex = part.turnIndex,
+                            content = part.text,
+                            reasoningTokens = part.reasoningTokens
+                        )
+                    }
+                    (streamFallback + dbEvents)
+                        .sortedWith(compareBy<AgentTranscriptEvent>({ it.turnIndex }, { it.timestamp }))
+                        .forEach { event ->
+                            insertReasoningEvent(transcript, event)
+                            runCatching { onEvent?.invoke(event) }
+                        }
+                } else {
+                    if (databaseFile != null && sessionIds.isEmpty()) {
+                        log.warn { "OpenCode stream did not expose a session ID; cannot associate persisted reasoning with this run" }
+                    }
+                    streamReasoning.map { it.event }
+                        .sortedWith(compareBy<AgentTranscriptEvent>({ it.turnIndex }, { it.timestamp }))
+                        .forEach { event ->
+                            insertReasoningEvent(transcript, event)
+                            runCatching { onEvent?.invoke(event) }
+                        }
+                }
+            } catch (error: Exception) {
+                log.warn(error) { "Could not reconcile OpenCode reasoning; retaining streamed reasoning" }
+                streamReasoning.map { it.event }
+                    .sortedWith(compareBy<AgentTranscriptEvent>({ it.turnIndex }, { it.timestamp }))
+                    .forEach { event ->
+                        insertReasoningEvent(transcript, event)
+                        runCatching { onEvent?.invoke(event) }
+                    }
             }
             ownedDbPath?.let { deleteIsolatedDb(it) }
         }
@@ -247,6 +337,15 @@ class CoroutineOpenCodeRunner(
                     eventType = AgentEventType.STEP_FINISH,
                     turnIndex = maxOf(currentTurn, 1),
                     tokenUsage = parseTokenUsage(part)
+                )
+            )
+            "reasoning" -> listOf(
+                AgentTranscriptEvent(
+                    timestamp = now,
+                    eventType = AgentEventType.REASONING,
+                    turnIndex = maxOf(currentTurn, 1),
+                    content = part?.get("text")?.jsonPrimitive?.contentOrNull,
+                    reasoningTokens = parseReasoningTokens(part)
                 )
             )
             "text" -> listOf(
@@ -319,6 +418,46 @@ class CoroutineOpenCodeRunner(
         val completion = tokens["output"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0
         val total = tokens["total"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: (prompt + completion)
         return TokenUsage(promptTokens = prompt, completionTokens = completion, totalTokens = total)
+    }
+
+    private fun parseReasoningTokens(part: JsonObject?): Int? {
+        val tokens = part?.get("tokens") as? JsonObject
+        return tokens?.get("reasoning")?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+            ?: part?.get("reasoning_tokens")?.jsonPrimitive?.contentOrNull?.toIntOrNull()
+    }
+
+    private fun lineMetadata(line: String): OpenCodeLineMetadata {
+        val element = runCatching { json.parseToJsonElement(line) as? JsonObject }.getOrNull()
+            ?: return OpenCodeLineMetadata(null, null, null)
+        val part = element["part"] as? JsonObject
+        fun string(obj: JsonObject?, vararg keys: String): String? =
+            keys.firstNotNullOfOrNull { key -> obj?.get(key)?.jsonPrimitive?.contentOrNull }
+        return OpenCodeLineMetadata(
+            sessionId = string(element, "sessionID", "sessionId", "session_id")
+                ?: string(part, "sessionID", "sessionId", "session_id"),
+            messageId = string(part, "messageID", "messageId", "message_id"),
+            partId = string(part, "id")
+        )
+    }
+
+    private fun insertReasoningEvent(
+        transcript: MutableList<AgentTranscriptEvent>,
+        event: AgentTranscriptEvent
+    ) {
+        val firstNonReasoning = transcript.indexOfFirst {
+            it.turnIndex == event.turnIndex &&
+                it.eventType != AgentEventType.STEP_START &&
+                it.eventType != AgentEventType.REASONING
+        }
+        val insertAt = if (firstNonReasoning >= 0) {
+            firstNonReasoning
+        } else {
+            transcript.indexOfLast { it.turnIndex == event.turnIndex }
+                .takeIf { it >= 0 }
+                ?.plus(1)
+                ?: transcript.size
+        }
+        transcript.add(insertAt, event)
     }
 
     private fun primitiveOrText(element: JsonElement): String =
