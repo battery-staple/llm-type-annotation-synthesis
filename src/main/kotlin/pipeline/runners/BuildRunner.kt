@@ -165,8 +165,12 @@ class GradleBuildRunner(
         val simpleName = processor.substringAfterLast('.')
         val outputMentionsProcessor = output.contains(simpleName) || output.contains("Checker Framework")
         val checkerInvoked = hasBracketCategory || outputMentionsTask || outputMentionsProcessor
+        // A crashed checker (e.g. a malformed qualifier hierarchy) prints no
+        // file diagnostics, so without this it would look like a clean run with
+        // zero errors.
+        val crashed = outputShowsCheckerCrash(output)
         return CheckerResult(
-            success = !result.timedOut && checkerInvoked,
+            success = !result.timedOut && checkerInvoked && !crashed,
             exitCode = result.exitCode,
             checkerInvoked = checkerInvoked,
             errorCount = errorCount,
@@ -320,3 +324,9 @@ class GradleBuildRunner(
         }
     }
 }
+
+private val checkerCrashPattern =
+    Regex("""TypeSystemError|BugInCF|The Checker Framework crashed|\bUserError\b""")
+
+/** True when the Checker Framework itself failed, as opposed to reporting type errors. */
+internal fun outputShowsCheckerCrash(output: String): Boolean = checkerCrashPattern.containsMatchIn(output)
