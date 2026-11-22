@@ -107,6 +107,7 @@ def load_cas_transcript(cas_dir: Path | None) -> list[dict[str, Any]]:
 
 def extract_key_config(config: dict[str, Any], run_row: dict[str, Any]) -> dict[str, Any]:
     model_cfg = config.get("model") or {}
+    triage_cfg = config.get("triage") or {}
     agent_cfg = config.get("agent") or {}
     steps_cfg = agent_cfg.get("steps") or {}
     synth_cfg = config.get("synthesis") or {}
@@ -118,6 +119,10 @@ def extract_key_config(config: dict[str, Any], run_row: dict[str, Any]) -> dict[
     checker_cfg = config.get("checker") or {}
 
     return {
+        "triage_mode": triage_cfg.get("mode"),
+        "triage_depth": triage_cfg.get("depth"),
+        "triage_limit": triage_cfg.get("limit"),
+        "triage_bugfix_threshold": triage_cfg.get("bugfix_threshold"),
         "model_default": model_cfg.get("default"),
         "model_triage": model_cfg.get("triage"),
         "model_synthesis": model_cfg.get("synthesis"),
@@ -165,6 +170,9 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
                     c.pr_number,
                     c.pr_title,
                     c.triage_status,
+                    c.classification,
+                    c.bugfix_score,
+                    c.discard_reason,
                     c.regression_test_class,
                     c.regression_test_method,
                     repo.name AS repo_name
@@ -181,9 +189,14 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
         for s in rows_to_dicts(
             conn.execute(
                 """
-                SELECT run_id, step_id, step_number, attempt_number, step_name, success, cache_hit, started_at, completed_at
-                FROM step_trajectories
-                ORDER BY step_number ASC, attempt_number ASC
+                SELECT
+                    st.run_id, st.step_id, st.step_number, st.attempt_number, st.step_name,
+                    st.success, st.cache_hit, st.started_at, st.completed_at, st.compiler_diagnostics,
+                    vs.turns_taken, vs.total_tokens, vs.checker_invocations,
+                    vs.test_invocations, vs.checker_diagnostic_count
+                FROM step_trajectories st
+                LEFT JOIN v_step_summaries vs ON st.step_id = vs.step_id
+                ORDER BY st.step_number ASC, st.attempt_number ASC
                 """
             ).fetchall()
         ):
@@ -354,9 +367,14 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
                         step["cas_diff_name"] = diff_name
                         break
 
-            # Load placement_guide.md inline if available
+            # Load placement_guide.md and triage_metadata.json inline if available
             if cas_dir is not None and (cas_dir / "placement_guide.md").is_file():
                 step["placement_guide"] = (cas_dir / "placement_guide.md").read_text(encoding="utf-8", errors="replace")
+            if cas_dir is not None and (cas_dir / "triage_metadata.json").is_file():
+                step["triage_metadata"] = safe_json_loads(
+                    (cas_dir / "triage_metadata.json").read_text(encoding="utf-8", errors="replace"),
+                    None,
+                )
 
             turns = agent_turns.get(sid, [])
             for t in turns:

@@ -17,6 +17,8 @@
     logText: null,
     lastDbMtime: null,
     autoRefreshTimer: null,
+    viewMode: "inspector",
+    matrixStage: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -265,6 +267,7 @@
   function populateFilterOptions() {
     const verdicts = [...new Set(state.runs.map((r) => r.verdict || "unknown"))].sort();
     const guardrails = [...new Set(state.runs.map((r) => r.guardrails_mode || "unknown"))].sort();
+    const triageModes = [...new Set(state.runs.map((r) => r.key_config?.triage_mode || "manifest"))].sort();
 
     const vf = $("verdictFilter");
     const prevV = vf.value;
@@ -275,16 +278,23 @@
     const prevG = gf.value;
     gf.innerHTML = `<option value="">All guardrails</option>` + guardrails.map((g) => `<option value="${esc(g)}">${esc(g)}</option>`).join("");
     gf.value = guardrails.includes(prevG) ? prevG : "";
+
+    const tf = $("triageModeFilter");
+    const prevT = tf.value;
+    tf.innerHTML = `<option value="">All triage</option>` + triageModes.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+    tf.value = triageModes.includes(prevT) ? prevT : "";
   }
 
   function getFilteredRuns() {
     const q = $("runSearch").value.trim().toLowerCase();
     const vf = $("verdictFilter").value;
     const gf = $("guardrailFilter").value;
+    const tf = $("triageModeFilter").value;
 
     return state.runs.filter((r) => {
       if (vf && (r.verdict || "unknown") !== vf) return false;
       if (gf && (r.guardrails_mode || "unknown") !== gf) return false;
+      if (tf && (r.key_config?.triage_mode || "manifest") !== tf) return false;
       if (q) {
         const hay = [
           r.run_id,
@@ -293,6 +303,8 @@
           r.pr_title,
           r.pr_number ? `pr#${r.pr_number}` : "",
           r.key_config?.model_default,
+          r.triage_status,
+          r.discard_reason,
         ].filter(Boolean).join(" ").toLowerCase();
         if (!hay.includes(q)) return false;
       }
@@ -303,6 +315,7 @@
   function renderRunsList() {
     const filtered = getFilteredRuns();
     $("runsCount").textContent = `${filtered.length} of ${state.runs.length} runs`;
+    if (state.viewMode === "matrix") renderMatrixView();
     const listEl = $("runsList");
 
     if (filtered.length === 0) {
@@ -322,6 +335,7 @@
         return `<span class="stage-mini-dot ${cls}${cached}" title="${esc(stName)}: ${latest.success ? "ok" : "failed"}${latest.cache_hit ? " (cached)" : ""}"></span>`;
       }).join("");
 
+      const triageMode = r.key_config?.triage_mode || "manifest";
       const tokens = r.llm_stats?.total_tokens ? `${fmtNum(r.llm_stats.total_tokens)} tok` : "0 tok";
       return `
         <div class="run-card ${active}" data-run-id="${esc(r.run_id)}">
@@ -331,6 +345,7 @@
           </div>
           <div class="run-card-id" title="Started: ${esc(fmtTs(r.started_at))}">${esc(r.run_id.slice(0, 8))} &middot; ${esc(fmtTs(r.started_at))}</div>
           <div class="run-card-meta">
+            <span class="badge badge-muted" title="Triage mode: ${esc(triageMode)}">${esc(triageMode)}</span>
             <span class="badge badge-muted" title="Guardrails mode: ${esc(r.guardrails_mode)}">${esc(r.guardrails_mode)}</span>
             <span class="badge badge-muted" title="Verification scope: ${esc(r.verification_scope)}">${esc(r.verification_scope)}</span>
             <span class="muted" style="font-size:11px;" title="Total LLM tokens across all stages">${esc(tokens)}</span>
@@ -341,7 +356,10 @@
     }).join("");
 
     listEl.querySelectorAll(".run-card").forEach((el) => {
-      el.addEventListener("click", () => selectRun(el.dataset.runId, false));
+      el.addEventListener("click", () => {
+        if (state.viewMode !== "inspector") setViewMode("inspector");
+        selectRun(el.dataset.runId, false);
+      });
     });
   }
 
@@ -418,6 +436,11 @@
     `;
 
     const pills = [
+      ["triage", kc.triage_mode || "manifest"],
+      ["triage_model", kc.triage_mode === "crawler" ? kc.model_triage : null],
+      ["depth", kc.triage_mode === "crawler" ? kc.triage_depth : null],
+      ["limit", kc.triage_mode === "crawler" ? kc.triage_limit : null],
+      ["threshold", kc.triage_mode === "crawler" ? kc.triage_bugfix_threshold : null],
       ["model", kc.model_default],
       ["guardrails", kc.guardrails_mode],
       ["scope", kc.verification_scope],
@@ -809,6 +832,40 @@
               </tbody>
             </table>
           ` : ""}
+        </div>
+      `;
+    }
+
+    if (step.step_name === "triage") {
+      const r = state.runDetail || {};
+      const tm = step.triage_metadata || {};
+      const kc = r.key_config || {};
+      const provenance = tm.source_provenance || kc.triage_mode || "manifest";
+      const triageStatus = r.triage_status || (step.success ? "verified" : "discarded");
+      const discardReason = r.discard_reason || tm.discard_reason || "-";
+      const classification = r.classification || tm.llm_classification || "-";
+      const score = r.bugfix_score ?? tm.bugfix_score;
+      const threshold = kc.triage_bugfix_threshold;
+      const regClass = tm.regression_test_class || r.regression_test_class;
+      const regMethod = tm.regression_test_method || r.regression_test_method;
+      const regTest = regClass ? `${regClass}${regMethod ? "." + regMethod : ""}` : "-";
+      const details = tm.details || step.compiler_diagnostics || "";
+
+      stageSpecific += `
+        <div class="card">
+          <h4>Triage Details (<span class="badge badge-muted">${esc(provenance)}</span>)</h4>
+          <table class="data-table">
+            <tbody>
+              <tr><th>Triage Status</th><td><code>${esc(triageStatus)}</code></td><th>Discard Reason</th><td><code>${esc(discardReason)}</code></td></tr>
+              <tr><th>Classification</th><td><code>${esc(classification)}</code></td><th>Bugfix Score</th><td>${score !== null && score !== undefined ? `<code>${esc(score)}</code>${threshold !== null && threshold !== undefined ? ` (threshold: <code>${esc(threshold)}</code>)` : ""}` : "-"}</td></tr>
+              <tr><th>Regression Test</th><td colspan="3"><code>${esc(regTest)}</code></td></tr>
+              <tr><th>Path Audit</th><td><code>${esc(tm.path_audit_result || "-")}</code></td><th>C-1 Build</th><td><code>${esc(tm.c1_build_status || "-")}</code></td></tr>
+              <tr><th>C-1 Test</th><td><code>${esc(tm.c1_test_status || "-")}</code></td><th>C Test</th><td><code>${esc(tm.c_test_status || "-")}</code></td></tr>
+            </tbody>
+          </table>
+          ${tm.llm_rationale ? `<div style="margin-top:10px;"><strong>LLM Rationale:</strong> ${esc(tm.llm_rationale)}</div>` : ""}
+          ${details ? `<div style="margin-top:8px;"><strong>Details:</strong> <pre class="code-block" style="margin-top:4px;">${esc(details)}</pre></div>` : ""}
+          ${r.commit_compiler_error_log ? `<div style="margin-top:8px;"><strong>Compiler Error Log:</strong> <pre class="code-block" style="margin-top:4px;">${esc(r.commit_compiler_error_log)}</pre></div>` : ""}
         </div>
       `;
     }
@@ -1696,6 +1753,220 @@
     }
   }
 
+  // ---- Matrix View (Compare Across Commits) ----
+  function setViewMode(mode) {
+    state.viewMode = mode;
+    $("viewModeInspector").classList.toggle("active", mode === "inspector");
+    $("viewModeMatrix").classList.toggle("active", mode === "matrix");
+
+    if (mode === "matrix") {
+      $("matrixView").classList.remove("hidden");
+      $("emptyState").classList.add("hidden");
+      $("runView").classList.add("hidden");
+      renderMatrixView();
+    } else {
+      $("matrixView").classList.add("hidden");
+      if (state.runDetail) {
+        $("runView").classList.remove("hidden");
+        $("emptyState").classList.add("hidden");
+      } else {
+        $("emptyState").classList.remove("hidden");
+        $("runView").classList.add("hidden");
+      }
+    }
+  }
+
+  function latestStep(run, stageName) {
+    const matches = (run.steps || []).filter((s) => s.step_name === stageName);
+    return matches.length ? matches[matches.length - 1] : null;
+  }
+
+  async function jumpToRunStage(runId, stageName) {
+    setViewMode("inspector");
+    state.activeRunTab = "stages";
+    state.activeStageTab = "overview";
+    await selectRun(runId, true);
+    if (stageName && state.runDetail) {
+      const matching = (state.runDetail.steps || []).filter((s) => s.step_name === stageName);
+      const latest = matching[matching.length - 1];
+      if (latest) {
+        state.selectedStepName = stageName;
+        state.selectedStepId = latest.step_id;
+        renderStageStepper();
+        renderStageInspector();
+      }
+    }
+  }
+
+  function renderMatrixCell(run, stageName) {
+    const st = latestStep(run, stageName);
+    if (!st) return `<td class="matrix-cell"><span class="muted">-</span></td>`;
+    const cls = st.success ? "badge-ok" : "badge-fail";
+    const label = st.success ? "ok" : "fail";
+    const cached = st.cache_hit ? " (C)" : "";
+    const tok = st.total_tokens ? ` · ${fmtNum(st.total_tokens)}t` : "";
+    return `
+      <td class="matrix-cell">
+        <button class="matrix-cell-btn" data-run-id="${esc(run.run_id)}" data-stage="${esc(stageName)}" title="Inspect ${esc(stageName)} for ${esc(run.benchmark_id)}">
+          <span class="badge ${cls}">${label}${cached}</span>${tok ? `<span class="muted" style="font-size:11px;">${esc(tok)}</span>` : ""}
+        </button>
+      </td>
+    `;
+  }
+
+  function renderMatrixView() {
+    const el = $("matrixView");
+    const runs = getFilteredRuns();
+    const stage = state.matrixStage;
+
+    const stagePills = [
+      `<button class="stage-pill ${stage === null ? "active" : ""}" data-matrix-stage="">All Stages</button>`,
+      ...STAGE_ORDER.map((s) => `<button class="stage-pill ${stage === s ? "active" : ""}" data-matrix-stage="${esc(s)}">${esc(s)}</button>`),
+    ].join("");
+
+    let tableHtml = "";
+    if (runs.length === 0) {
+      tableHtml = `<div class="muted" style="padding:16px;">No runs match the current sidebar filters.</div>`;
+    } else if (stage === null) {
+      tableHtml = `
+        <table class="data-table matrix-table">
+          <thead>
+            <tr>
+              <th>Commit / Benchmark</th>
+              <th>Triage</th>
+              ${STAGE_ORDER.map((s) => `<th><button class="matrix-col-btn" data-matrix-stage="${esc(s)}" title="Focus on ${esc(s)} across all commits">${esc(s)}</button></th>`).join("")}
+              <th>Verdict</th>
+              <th>Tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${runs.map((r) => {
+              const mode = r.key_config?.triage_mode || "manifest";
+              const verdict = r.verdict || r.status || "-";
+              const tokens = r.llm_stats?.total_tokens ? fmtNum(r.llm_stats.total_tokens) : "0";
+              return `
+                <tr>
+                  <td>
+                    <button class="matrix-row-btn" data-run-id="${esc(r.run_id)}">
+                      <strong>${esc(r.benchmark_id)}</strong>
+                      <span class="muted" style="font-size:11px;">${esc((r.commit_hash || "").slice(0, 8))}</span>
+                    </button>
+                  </td>
+                  <td><span class="badge badge-muted">${esc(mode)}</span></td>
+                  ${STAGE_ORDER.map((s) => renderMatrixCell(r, s)).join("")}
+                  <td><span class="badge ${verdictBadgeClass(r.verdict)}">${esc(verdict)}</span></td>
+                  <td>${esc(tokens)}</td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      `;
+    } else if (stage === "triage") {
+      tableHtml = `
+        <table class="data-table matrix-table">
+          <thead>
+            <tr>
+              <th>Commit / Benchmark</th>
+              <th>Mode</th>
+              <th>Triage Status</th>
+              <th>Classification</th>
+              <th>Score</th>
+              <th>Discard Reason</th>
+              <th>Regression Test</th>
+              <th>Cache</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${runs.map((r) => {
+              const st = latestStep(r, "triage");
+              const mode = r.key_config?.triage_mode || "manifest";
+              const regTest = r.regression_test_class
+                ? `${r.regression_test_class.split(".").pop()}.${r.regression_test_method || ""}`
+                : "-";
+              return `
+                <tr class="matrix-focus-row" data-run-id="${esc(r.run_id)}" data-stage="triage">
+                  <td><strong>${esc(r.benchmark_id)}</strong> <span class="muted" style="font-size:11px;">${esc((r.commit_hash || "").slice(0, 8))}</span></td>
+                  <td><span class="badge badge-muted">${esc(mode)}</span></td>
+                  <td><code>${esc(r.triage_status || (st ? (st.success ? "verified" : "discarded") : "not_run"))}</code></td>
+                  <td><code>${esc(r.classification || "-")}</code></td>
+                  <td>${r.bugfix_score !== null && r.bugfix_score !== undefined ? `<code>${esc(r.bugfix_score)}</code>` : "-"}</td>
+                  <td><code>${esc(r.discard_reason || "-")}</code></td>
+                  <td><code>${esc(regTest)}</code></td>
+                  <td>${st ? (st.cache_hit ? '<span class="badge badge-muted">hit</span>' : "miss") : "-"}</td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      `;
+    } else {
+      tableHtml = `
+        <table class="data-table matrix-table">
+          <thead>
+            <tr>
+              <th>Commit / Benchmark</th>
+              <th>Status</th>
+              <th>Cache</th>
+              <th>Turns</th>
+              <th>Tokens</th>
+              <th>Checker Runs</th>
+              <th>Diagnostics</th>
+              <th>Test Runs</th>
+              <th>Verdict / Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${runs.map((r) => {
+              const st = latestStep(r, stage);
+              const statusBadge = !st
+                ? `<span class="muted">not run</span>`
+                : `<span class="badge ${st.success ? "badge-ok" : "badge-fail"}">${st.success ? "ok" : "fail"}</span>`;
+              const note = st?.compiler_diagnostics ? st.compiler_diagnostics.slice(0, 80) : (r.verdict || "");
+              return `
+                <tr class="matrix-focus-row" data-run-id="${esc(r.run_id)}" data-stage="${esc(stage)}">
+                  <td><strong>${esc(r.benchmark_id)}</strong> <span class="muted" style="font-size:11px;">${esc((r.commit_hash || "").slice(0, 8))}</span></td>
+                  <td>${statusBadge}</td>
+                  <td>${st ? (st.cache_hit ? '<span class="badge badge-muted">hit</span>' : "miss") : "-"}</td>
+                  <td>${st?.turns_taken ?? "-"}</td>
+                  <td>${st?.total_tokens !== null && st?.total_tokens !== undefined ? fmtNum(st.total_tokens) : "-"}</td>
+                  <td>${st?.checker_invocations ?? "-"}</td>
+                  <td>${st?.checker_diagnostic_count ?? "-"}</td>
+                  <td>${st?.test_invocations ?? "-"}</td>
+                  <td class="muted" style="font-size:12px;">${esc(note)}</td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      `;
+    }
+
+    el.innerHTML = `
+      <div class="matrix-toolbar">
+        <div>
+          <h2 style="margin:0 0 4px 0;">Stage Matrix <span class="muted" style="font-size:13px;font-weight:400;">(${runs.length} commit${runs.length === 1 ? "" : "s"})</span></h2>
+          <div class="muted" style="font-size:12px;">Click a stage column or pill to compare one stage across all commits; click any row or cell to inspect that commit.</div>
+        </div>
+        <div class="matrix-stage-pills">${stagePills}</div>
+      </div>
+      <div class="card" style="overflow-x:auto;">${tableHtml}</div>
+    `;
+
+    el.querySelectorAll("[data-matrix-stage]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.matrixStage = btn.dataset.matrixStage || null;
+        renderMatrixView();
+      });
+    });
+    el.querySelectorAll(".matrix-cell-btn, .matrix-focus-row").forEach((btn) => {
+      btn.addEventListener("click", () => jumpToRunStage(btn.dataset.runId, btn.dataset.stage));
+    });
+    el.querySelectorAll(".matrix-row-btn").forEach((btn) => {
+      btn.addEventListener("click", () => jumpToRunStage(btn.dataset.runId, null));
+    });
+  }
+
   // ---- Event Wiring ----
   function init() {
     document.addEventListener("keydown", handleKeyDown);
@@ -1703,6 +1974,9 @@
     $("runSearch").addEventListener("input", renderRunsList);
     $("verdictFilter").addEventListener("change", renderRunsList);
     $("guardrailFilter").addEventListener("change", renderRunsList);
+    $("triageModeFilter").addEventListener("change", renderRunsList);
+    $("viewModeInspector").addEventListener("click", () => setViewMode("inspector"));
+    $("viewModeMatrix").addEventListener("click", () => setViewMode("matrix"));
 
     document.querySelectorAll(".run-tab").forEach((btn) => {
       btn.addEventListener("click", () => switchRunTab(btn.dataset.runTab));

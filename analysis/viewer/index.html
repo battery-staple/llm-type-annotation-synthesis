@@ -16,6 +16,10 @@
           <h1>Run Viewer</h1>
         </div>
         <div class="sidebar-actions">
+          <div class="view-toggle" role="group" aria-label="View mode">
+            <button id="viewModeInspector" class="btn btn-sm active" title="Inspect one run across all stages">Run</button>
+            <button id="viewModeMatrix" class="btn btn-sm" title="Compare stages across all filtered commits">Matrix</button>
+          </div>
           <label class="auto-refresh-toggle" title="Auto-refresh every 5 seconds">
             <input type="checkbox" id="autoRefreshToggle" />
             <span>Live</span>
@@ -33,6 +37,9 @@
           <select id="guardrailFilter" aria-label="Filter by guardrails">
             <option value="">All guardrails</option>
           </select>
+          <select id="triageModeFilter" aria-label="Filter by triage mode">
+            <option value="">All triage</option>
+          </select>
         </div>
         <div id="runsCount" class="runs-count">Loading runs...</div>
       </div>
@@ -42,6 +49,8 @@
 
     <!-- Main Content -->
     <main class="main-pane">
+      <section id="matrixView" class="matrix-view hidden"></section>
+
       <div id="emptyState" class="empty-state">
         <div class="empty-card">
           <h2>Select a pipeline run</h2>

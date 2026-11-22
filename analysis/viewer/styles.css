@@ -997,3 +997,98 @@ code, pre {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* View Toggle & Stage Matrix */
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.view-toggle .btn-sm {
+  border: none;
+  border-radius: 0;
+  padding: 3px 8px;
+  font-size: 11px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.view-toggle .btn-sm.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.matrix-view {
+  padding: 18px 22px;
+}
+
+.matrix-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.matrix-stage-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.stage-pill {
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.stage-pill:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.stage-pill.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.matrix-col-btn,
+.matrix-row-btn,
+.matrix-cell-btn {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.matrix-col-btn {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.matrix-col-btn:hover,
+.matrix-row-btn:hover {
+  color: var(--accent);
+}
+
+.matrix-focus-row {
+  cursor: pointer;
+}
+
+.matrix-focus-row:hover td {
+  background: var(--bg-elev-2);
+}
