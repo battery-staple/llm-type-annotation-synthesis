@@ -1,6 +1,7 @@
 package pipeline
 
 import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.UsageError
 import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.flag
@@ -26,6 +27,7 @@ import pipeline.stages.BenchmarkEntry
 import pipeline.stages.IngestionStage
 import pipeline.stages.ManifestTriageStage
 import pipeline.stages.RepairStage
+import pipeline.stages.StageName
 import pipeline.stages.SynthesisStage
 import pipeline.stages.VerificationStage
 import pipeline.util.Env
@@ -33,6 +35,21 @@ import pipeline.util.FileOps
 import pipeline.util.Git
 
 private val logger = KotlinLogging.logger {}
+
+/** Canonical stage ids accepted by `--stop-after`, in pipeline order. */
+internal val STAGE_IDS: List<String> = StageName.entries.map { it.identifier }
+
+/**
+ * Resolves a `--stop-after` value into a stage.
+ *
+ * Throws [IllegalArgumentException] for an unknown value so the CLI can report
+ * the accepted stages through its normal usage error instead of a stack trace.
+ */
+internal fun parseStopAfter(raw: String): StageName =
+    StageName.entries.firstOrNull { it.identifier == raw.trim().lowercase() }
+        ?: throw IllegalArgumentException(
+            "unknown --stop-after stage '${raw.trim()}'; expected one of: ${STAGE_IDS.joinToString(", ")}"
+        )
 
 private fun loadConfig(path: String): ProjectConfig {
     val file = File(path)
@@ -57,7 +74,8 @@ private fun buildOrchestrator(
     config: ProjectConfig,
     buildRunner: GradleBuildRunner,
     db: SQLiteDatabaseManager,
-    cas: CasEngine
+    cas: CasEngine,
+    stopAfter: StageName? = null
 ): PipelineOrchestrator {
     val openCodeDb = OpenCodeDb.prepare()
     val agentRunner = CoroutineOpenCodeRunner(databasePath = openCodeDb?.absolutePath)
@@ -72,7 +90,8 @@ private fun buildOrchestrator(
         cas = cas,
         database = db,
         config = config,
-        automatedTriage = AutomatedTriageStage(OpenCodeSingleShotLlmClient(), buildRunner)
+        automatedTriage = AutomatedTriageStage(OpenCodeSingleShotLlmClient(agentRunner = agentRunner), buildRunner),
+        stopAfter = stopAfter
     )
 }
 
@@ -115,10 +134,24 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
     private val benchmark by option("--benchmark", help = "Benchmark id from benchmarks.yaml").required()
     private val seed by option("--seed", help = "Deterministic sample seed / sample index").int().default(0)
     private val model by option("--model", help = "Override the configured model for every stage")
+    private val triageMode by option("--triage-mode", help = "Override triage.mode (manifest | crawler)")
     private val depth by option("--depth", help = "Override triage.depth (number of commits to crawl in crawler mode)").int()
     private val limit by option("--limit", help = "Override triage.limit (max verified commits to run in crawler mode)").int()
+    private val stopAfter by option(
+        "--stop-after",
+        help = "Stop once this stage succeeds and skip every later stage. " +
+            "Completed stages stay cached, so a later run resumes from their bundles. " +
+            "Values: ${STAGE_IDS.joinToString("|")} (default: run the whole pipeline)"
+    )
 
     override fun run() = runBlocking {
+        val stopAfterStage = stopAfter?.let { raw ->
+            try {
+                parseStopAfter(raw)
+            } catch (invalid: IllegalArgumentException) {
+                throw UsageError(invalid.message ?: "invalid --stop-after value '$raw'")
+            }
+        }
         val loaded = loadConfig(configPath)
         val config = loaded.let { c ->
             var updated = model?.let { chosen ->
@@ -132,9 +165,17 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                     )
                 )
             } ?: c
-            if (depth != null || limit != null) {
+            if (triageMode != null || depth != null || limit != null) {
+                val resolvedMode = triageMode?.let { raw ->
+                    when (raw.lowercase()) {
+                        "manifest" -> pipeline.stages.TriageMode.MANIFEST
+                        "crawler" -> pipeline.stages.TriageMode.CRAWLER
+                        else -> throw UsageError("Invalid --triage-mode '$raw'; expected 'manifest' or 'crawler'")
+                    }
+                } ?: updated.triage.mode
                 updated = updated.copy(
                     triage = updated.triage.copy(
+                        mode = resolvedMode,
                         depth = depth ?: updated.triage.depth,
                         limit = limit ?: updated.triage.limit
                     )
@@ -153,7 +194,7 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                     ?: error("Repo '$benchmark' not found in ${crawlerFile.path}; known ids: ${targets.joinToString { it.benchmarkId.canonical }}")
                 checkRepoClean(File(target.repoUrl))
                 val buildRunner = GradleBuildRunner(config, target.build, target.sourceCompatibility, target.targetCompatibility)
-                val orchestrator = buildOrchestrator(config, buildRunner, db, cas)
+                val orchestrator = buildOrchestrator(config, buildRunner, db, cas, stopAfterStage)
                 val outcomes = orchestrator.crawlAndRun(target, seed)
                 outcomes.forEach { printOutcome(it) }
             } else {
@@ -163,7 +204,7 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                     ?: error("Benchmark '$benchmark' not found in ${manifestFile.path}; known ids: ${entries.joinToString { it.benchmarkId.canonical }}")
                 checkRepoClean(File(entry.repoUrl))
                 val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
-                val orchestrator = buildOrchestrator(config, buildRunner, db, cas)
+                val orchestrator = buildOrchestrator(config, buildRunner, db, cas, stopAfterStage)
                 val outcome = orchestrator.runSingleSample(entry, seed)
                 printOutcome(outcome)
             }
@@ -182,18 +223,24 @@ class VerifyBenchmarkCommand : CliktCommand(name = "verify-benchmark", help = "V
     }
 }
 
+internal fun lifecycleStatus(outcome: PipelineRunOutcome): String = when {
+    outcome.stoppedAfter != null -> "stopped"
+    outcome.discarded -> "discarded"
+    outcome.haltMessage != null -> "failed"
+    else -> "success"
+}
+
 private fun printOutcome(outcome: PipelineRunOutcome) {
     val r = outcome.result
     // Lifecycle status (orchestration completed) is distinct from the
     // evaluation verdict (what the repaired code actually achieved).
-    val lifecycle = when {
-        outcome.discarded -> "discarded"
-        outcome.haltMessage != null -> "failed"
-        else -> "success"
-    }
+    val lifecycle = lifecycleStatus(outcome)
     println("")
     println("run_id:                    ${outcome.runId}")
     println("lifecycle_status:          $lifecycle")
+    if (outcome.stoppedAfter != null) {
+        println("stopped_after:             ${outcome.stoppedAfter.identifier}")
+    }
     println("evaluation_verdict:        ${r.verdict.name.lowercase()}")
     println("regression_test_passed:    ${r.regressionTestPassed ?: "unknown"}")
     println("original_tests_passed:     ${r.originalTestsPassed ?: "unknown"}")
