@@ -12,6 +12,7 @@ import kotlinx.coroutines.runBlocking
 import mu.KotlinLogging
 import pipeline.cas.CasEngine
 import pipeline.config.BenchmarkManifestLoader
+import pipeline.config.ModelSection
 import pipeline.config.ProjectConfig
 import pipeline.db.SQLiteDatabaseManager
 import pipeline.runners.CoroutineOpenCodeRunner
@@ -19,6 +20,7 @@ import pipeline.runners.GradleBuildRunner
 import pipeline.runners.JavacRunner
 import pipeline.runners.OpenCodeDb
 import pipeline.stages.ApplicationStage
+import pipeline.stages.BenchmarkEntry
 import pipeline.stages.IngestionStage
 import pipeline.stages.ManifestTriageStage
 import pipeline.stages.RepairStage
@@ -32,10 +34,15 @@ private val logger = KotlinLogging.logger {}
 private fun loadConfig(path: String): ProjectConfig = ProjectConfig.load(File(path))
 
 private fun database(config: ProjectConfig): SQLiteDatabaseManager =
-    SQLiteDatabaseManager(File("data/pipeline.db"))
+    SQLiteDatabaseManager(config.paths.databaseFile())
 
-private fun buildOrchestrator(config: ProjectConfig, db: SQLiteDatabaseManager, cas: CasEngine): PipelineOrchestrator {
-    val buildRunner = GradleBuildRunner(config)
+private fun buildOrchestrator(
+    config: ProjectConfig,
+    entry: BenchmarkEntry,
+    db: SQLiteDatabaseManager,
+    cas: CasEngine
+): PipelineOrchestrator {
+    val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
     val openCodeDb = OpenCodeDb.prepare()
     val agentRunner = CoroutineOpenCodeRunner(databasePath = openCodeDb?.absolutePath)
     val javac = JavacRunner()
@@ -59,17 +66,17 @@ class InitCommand : CliktCommand(name = "init", help = "Initialize the SQLite da
     override fun run() = runBlocking {
         val config = loadConfig(configPath)
         database(config).use { db ->
-            echo("Initialized database data/pipeline.db")
+            echo("Initialized database ${config.paths.databaseFile().path}")
             if (!skipPrewarm) {
                 val manifestFile = File(config.triage.manifestFile)
                 if (!manifestFile.isFile) {
                     echo("Benchmark manifest ${manifestFile.path} not found; skipping pre-warm")
                     return@use
                 }
-                val entries = BenchmarkManifestLoader.load(manifestFile)
-                val buildRunner = GradleBuildRunner(config)
-                val evalRepos = File(config.project.rootDir).absoluteFile.parentFile ?: File("eval-repos")
+                val entries = BenchmarkManifestLoader.load(manifestFile, config)
+                val evalRepos = config.paths.evalRepos()
                 entries.forEach { entry ->
+                    val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
                     val repoName = File(entry.repoUrl).name.removeSuffix(".git")
                     val mirror = Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
                     val dir = File(".worktrees/init/${entry.benchmarkId.canonical}")
@@ -90,13 +97,31 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
     private val configPath by option("--config", help = "Path to project_config.yaml").required()
     private val benchmark by option("--benchmark", help = "Benchmark id from benchmarks.yaml").required()
     private val seed by option("--seed", help = "Deterministic sample seed / sample index").int().default(0)
+    private val model by option("--model", help = "Override the configured model for every stage")
 
     override fun run() = runBlocking {
-        val config = loadConfig(configPath)
+        val loaded = loadConfig(configPath)
+        val config = loaded.let { c ->
+            model?.let { chosen ->
+                c.copy(
+                    model = ModelSection(
+                        default = chosen,
+                        triage = chosen,
+                        synthesis = chosen,
+                        application = chosen,
+                        repair = chosen
+                    )
+                )
+            } ?: c
+        }
         require(config.triage.mode == "manifest") {
             "triage.mode='${config.triage.mode}' is not supported; the automated crawler is deferred (design plan §7.4)"
         }
-        val benchmarkRepo = File(config.project.repoUrl)
+        val manifestFile = File(config.triage.manifestFile)
+        val entries = BenchmarkManifestLoader.load(manifestFile, config)
+        val entry = BenchmarkManifestLoader.resolve(entries, benchmark)
+            ?: error("Benchmark '$benchmark' not found in ${manifestFile.path}; known ids: ${entries.joinToString { it.benchmarkId.canonical }}")
+        val benchmarkRepo = File(entry.repoUrl)
         if (benchmarkRepo.isDirectory && Git.isRepository(benchmarkRepo)) {
             val dirty = Git.statusPorcelain(benchmarkRepo)
             require(dirty.isBlank()) {
@@ -104,15 +129,11 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                     "agent contamination is detectable:\n$dirty"
             }
         }
-        val manifestFile = File(config.triage.manifestFile)
-        val entries = BenchmarkManifestLoader.load(manifestFile)
-        val entry = BenchmarkManifestLoader.resolve(entries, benchmark)
-            ?: error("Benchmark '$benchmark' not found in ${manifestFile.path}; known ids: ${entries.joinToString { it.benchmarkId.canonical }}")
         val cas = CasEngine(File(config.cache.stagesDir), config.cache.enabled)
         database(config).use { db ->
             // Sequential MVP: a run still marked running is stale.
             db.markStaleRunningRuns()
-            val orchestrator = buildOrchestrator(config, db, cas)
+            val orchestrator = buildOrchestrator(config, entry, db, cas)
             val outcome = orchestrator.runSingleSample(entry, seed)
             printOutcome(outcome)
         }

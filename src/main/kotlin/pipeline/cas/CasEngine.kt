@@ -305,9 +305,9 @@ object CacheKeys {
             "java_vendor" to System.getProperty("java.vendor"),
             "os_name" to System.getProperty("os.name"),
             "checker_framework_home" to ctx.config.environment.checkerFrameworkHome,
-            "source_compatibility" to ctx.config.environment.sourceCompatibility,
-            "target_compatibility" to ctx.config.environment.effectiveTargetCompatibility,
-            "gradle_wrapper" to ctx.config.build.wrapperExecutable
+            "source_compatibility" to ctx.sourceCompatibility,
+            "target_compatibility" to ctx.targetCompatibility,
+            "gradle_wrapper" to ctx.build.wrapperExecutable
         )
         val fields = mapOf(
             "stage_name" to stage.identifier,

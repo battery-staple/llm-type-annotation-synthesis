@@ -4,6 +4,7 @@ import java.io.File
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import pipeline.config.BuildSection
 import pipeline.config.ProjectConfig
 import pipeline.db.TelemetryProjection
 import pipeline.ports.DatabasePort
@@ -241,6 +242,9 @@ data class AgentTranscriptEvent(
 
 data class RunContext(
     val config: ProjectConfig,
+    val build: BuildSection,
+    val sourceCompatibility: String,
+    val targetCompatibility: String,
     val runId: RunId,
     val sampleIndex: Int,
     val sampleTemperature: Double,
@@ -304,7 +308,7 @@ class StageHaltException(message: String, cause: Throwable? = null) : RuntimeExc
 
 // --- Typed Stage Inputs and Outputs ---
 
-data class IngestionInput(val repoUrl: String, val commitHash: CommitHash, val parentHash: CommitHash)
+data class IngestionInput(val benchmarkId: BenchmarkId, val repoUrl: String, val commitHash: CommitHash, val parentHash: CommitHash)
 data class IngestionWorktree(
     val commitHash: CommitHash,
     val parentHash: CommitHash,
@@ -319,7 +323,13 @@ data class BenchmarkEntry(
     val parentHash: CommitHash,
     val regressionTest: TestCoordinate,
     val testPatchFile: File? = null,
-    val description: String
+    val description: String,
+    // Raw manifest reference; keeps telemetry stable when repoUrl is resolved to an absolute path.
+    val repoIdentity: String = repoUrl,
+    val defaultBranch: String = "main",
+    val build: BuildSection = BuildSection(),
+    val sourceCompatibility: String = "17",
+    val targetCompatibility: String = "17"
 ) {
     // `commitDiff` must already be filtered to production paths; test-file hunks,
     // the test patch, and test coordinates are intentionally not part of BugContext.

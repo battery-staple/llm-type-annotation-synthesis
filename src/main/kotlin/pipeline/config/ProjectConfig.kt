@@ -5,20 +5,13 @@ import com.charleskorn.kaml.YamlConfiguration
 import java.io.File
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import pipeline.stages.AllowedCheckers
 import pipeline.stages.CheckerCategory
 import pipeline.stages.FreedomLevel
 import pipeline.stages.GuardrailsMode
 import pipeline.stages.LocalAnnotationPolicy
 import pipeline.stages.VerificationScope
-
-@Serializable
-data class ProjectSection(
-    val name: String = "cmsx",
-    @SerialName("repo_url") val repoUrl: String = "",
-    @SerialName("root_dir") val rootDir: String = "eval-repos/cmsx",
-    @SerialName("default_branch") val defaultBranch: String = "main"
-)
 
 @Serializable
 data class TriageSection(
@@ -31,7 +24,7 @@ data class EnvironmentSection(
     @SerialName("java_home") val javaHome: String = "",
     @SerialName("source_compatibility") val sourceCompatibility: String = "17",
     @SerialName("target_compatibility") val targetCompatibility: String? = null,
-    @SerialName("checker_framework_home") val checkerFrameworkHome: String = "vendor/checker-framework-3.42.0",
+    @SerialName("checker_framework_home") val checkerFrameworkHome: String = "",
     @SerialName("gradle_user_home") val gradleUserHome: String = ""
 ) {
     val effectiveTargetCompatibility: String get() = targetCompatibility ?: sourceCompatibility
@@ -69,10 +62,16 @@ data class AgentSection(
 )
 
 @Serializable
-data class SampleSection(
-    val seed: Int = 0,
-    val temperature: Double = 0.0
-)
+data class SampleSection(val temperature: Double = 0.0)
+
+@Serializable
+data class PathsSection(
+    @SerialName("eval_repos_dir") val evalReposDir: String = "eval-repos",
+    val database: String = "data/pipeline.db"
+) {
+    fun evalRepos(): File = File(evalReposDir)
+    fun databaseFile(): File = File(database)
+}
 
 @Serializable
 data class SynthesisSection(
@@ -110,14 +109,6 @@ data class BuildSection(
 )
 
 @Serializable
-data class LoggingSection(
-    val level: String = "INFO",
-    val file: String = "logs/pipeline.log",
-    @SerialName("json_format") val jsonFormat: Boolean = true,
-    @SerialName("per_run_file") val perRunFile: Boolean = true
-)
-
-@Serializable
 data class CacheSection(
     @SerialName("stages_dir") val stagesDir: String = ".cache/stages",
     val enabled: Boolean = true
@@ -131,8 +122,8 @@ data class VerificationSection(
 
 @Serializable
 data class ProjectConfig(
-    val project: ProjectSection = ProjectSection(),
     val triage: TriageSection = TriageSection(),
+    val paths: PathsSection = PathsSection(),
     val environment: EnvironmentSection = EnvironmentSection(),
     val guardrails: GuardrailsSection = GuardrailsSection(),
     val model: ModelSection = ModelSection(),
@@ -142,17 +133,36 @@ data class ProjectConfig(
     val checker: CheckerSection = CheckerSection(),
     val repair: RepairSection = RepairSection(),
     val prompt: PromptSection = PromptSection(),
-    val build: BuildSection = BuildSection(),
-    val logging: LoggingSection = LoggingSection(),
     val cache: CacheSection = CacheSection(),
-    val verification: VerificationSection = VerificationSection()
+    val verification: VerificationSection = VerificationSection(),
+    @Transient val sourceFile: File = File("project_config.yaml")
 ) {
     companion object {
         private val yaml = Yaml(configuration = YamlConfiguration(strictMode = false))
 
         fun load(file: File): ProjectConfig {
-            require(file.isFile) { "Configuration file not found: ${file.absolutePath}" }
-            val config = yaml.decodeFromString(ProjectConfig.serializer(), file.readText())
+            val absolute = file.absoluteFile
+            require(absolute.isFile) { "Configuration file not found: ${absolute.absolutePath}" }
+            val decoded = yaml.decodeFromString(ProjectConfig.serializer(), absolute.readText())
+            val base = absolute.parentFile ?: File(".")
+            fun resolve(raw: String): String = if (raw.isBlank()) raw else {
+                val path = File(raw).let { if (it.isAbsolute) it else File(base, raw) }
+                path.toPath().normalize().toString()
+            }
+            val checkerHome = decoded.environment.checkerFrameworkHome
+                .takeIf { it.isNotBlank() }
+                ?: System.getenv("CHECKERFRAMEWORK")?.takeIf { it.isNotBlank() }
+                ?: "vendor/checker-framework-3.42.0"
+            val config = decoded.copy(
+                triage = decoded.triage.copy(manifestFile = resolve(decoded.triage.manifestFile)),
+                paths = decoded.paths.copy(
+                    evalReposDir = resolve(decoded.paths.evalReposDir),
+                    database = resolve(decoded.paths.database)
+                ),
+                environment = decoded.environment.copy(checkerFrameworkHome = resolve(checkerHome)),
+                cache = decoded.cache.copy(stagesDir = resolve(decoded.cache.stagesDir)),
+                sourceFile = absolute
+            )
             require(config.verification.baseline == "none") {
                 "verification.baseline='${config.verification.baseline}' is not supported in the MVP; only 'none' is accepted"
             }

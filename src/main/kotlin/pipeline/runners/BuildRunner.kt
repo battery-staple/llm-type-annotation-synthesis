@@ -5,6 +5,7 @@ import javax.xml.parsers.DocumentBuilderFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.w3c.dom.Element
+import pipeline.config.BuildSection
 import pipeline.config.ProjectConfig
 import pipeline.ports.BuildResult
 import pipeline.ports.BuildRunner
@@ -24,7 +25,12 @@ import pipeline.util.Processes
  * `checkerPass` task injected via `--init-script`; the processor is never
  * attached to normal `compileJava`/`test` passes.
  */
-class GradleBuildRunner(private val config: ProjectConfig) : BuildRunner {
+class GradleBuildRunner(
+    private val config: ProjectConfig,
+    private val build: BuildSection,
+    private val sourceCompatibility: String,
+    private val targetCompatibility: String
+) : BuildRunner {
 
     override suspend fun compile(
         worktreeDir: File,
@@ -33,8 +39,8 @@ class GradleBuildRunner(private val config: ProjectConfig) : BuildRunner {
     ): BuildResult {
         val env = baseEnv().toMutableMap()
         val args = mutableListOf(
-            config.build.wrapperExecutable,
-            prefixed(config.build.compileTask),
+            build.wrapperExecutable,
+            prefixed(build.compileTask),
             "--console=plain", "--stacktrace", "--no-watch-fs"
         )
         if (customQualsJar != null) {
@@ -66,11 +72,11 @@ class GradleBuildRunner(private val config: ProjectConfig) : BuildRunner {
         extraClasspath: List<File>
     ): TestRunResult {
         val env = baseEnv().toMutableMap()
-        val cleanTask = "clean" + config.build.testTask.replaceFirstChar { it.uppercaseChar() }
+        val cleanTask = "clean" + build.testTask.replaceFirstChar { it.uppercaseChar() }
         val args = mutableListOf(
-            config.build.wrapperExecutable,
+            build.wrapperExecutable,
             prefixed(cleanTask),
-            prefixed(config.build.testTask),
+            prefixed(build.testTask),
             "--console=plain", "--stacktrace", "--no-watch-fs"
         )
         if (testFilter != null) {
@@ -137,8 +143,8 @@ class GradleBuildRunner(private val config: ProjectConfig) : BuildRunner {
             )
         )
         val args = listOf(
-            config.build.wrapperExecutable,
-            prefixed(config.build.checkerTask),
+            build.wrapperExecutable,
+            prefixed(build.checkerTask),
             "--init-script", script.absolutePath,
             "--console=plain", "--stacktrace", "--no-watch-fs"
         )
@@ -172,7 +178,7 @@ class GradleBuildRunner(private val config: ProjectConfig) : BuildRunner {
     // --- Helpers ---------------------------------------------------------
 
     private fun prefixed(task: String): String {
-        val sub = config.build.subproject.trim().trim(':')
+        val sub = build.subproject.trim().trim(':')
         return if (sub.isEmpty()) task else ":$sub:$task"
     }
 
@@ -200,8 +206,8 @@ class GradleBuildRunner(private val config: ProjectConfig) : BuildRunner {
             put("CF_PROCESSOR", processor)
             put("CF_AQUALS", quals.joinToString(",") { it.value })
             put("CF_CHECKER_CATEGORY", categoryId)
-            put("CF_SOURCE_COMPATIBILITY", config.environment.sourceCompatibility)
-            put("CF_TARGET_COMPATIBILITY", config.environment.effectiveTargetCompatibility)
+            put("CF_SOURCE_COMPATIBILITY", sourceCompatibility)
+            put("CF_TARGET_COMPATIBILITY", targetCompatibility)
             put("GUARDRAILS_MODE", guardrailsMode.name.lowercase())
             if (extraClasspath.isNotEmpty()) {
                 put("CF_EXTRA_CLASSPATH", extraClasspath.joinToString(File.pathSeparator) { it.absolutePath })

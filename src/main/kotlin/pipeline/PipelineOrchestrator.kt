@@ -59,7 +59,7 @@ class PipelineOrchestrator(
             ?: File(System.getProperty("java.io.tmpdir"), "pipeline-scratch")
         scratchRoot.mkdirs()
         val scratchBase = scratchRoot.resolve("run_$runId").apply { mkdirs() }
-        val repoDir = File(config.project.rootDir)
+        val repoDir = File(entry.repoUrl)
         val metadata = runCatching { Git.metadata(resolveMetadataRepo(entry), entry.commitHash.hash) }
             .getOrElse { CommitMetadata("", emptyList(), "", "") }
 
@@ -68,10 +68,10 @@ class PipelineOrchestrator(
                 runId = runId,
                 benchmarkId = entry.benchmarkId.canonical,
                 commitHash = entry.commitHash.hash,
-                repoId = repoId(entry.repoUrl),
-                repoName = config.project.name,
-                gitUrl = entry.repoUrl,
-                defaultBranch = config.project.defaultBranch,
+                repoId = repoId(entry.repoIdentity),
+                repoName = entry.benchmarkId.canonical,
+                gitUrl = entry.repoIdentity,
+                defaultBranch = entry.defaultBranch,
                 configYaml = readConfigText(),
                 parentCommit = entry.parentHash.hash,
                 authorDate = metadata.authorDate,
@@ -87,6 +87,9 @@ class PipelineOrchestrator(
 
         val baseCtx = RunContext(
             config = config,
+            build = entry.build,
+            sourceCompatibility = entry.sourceCompatibility,
+            targetCompatibility = entry.targetCompatibility,
             runId = runId,
             sampleIndex = sampleSeed,
             sampleTemperature = config.sample.temperature,
@@ -98,7 +101,7 @@ class PipelineOrchestrator(
         )
 
         try {
-            val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.repoUrl, entry.commitHash, entry.parentHash))
+            val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
                 ?: return finishDiscarded(runId, "triage preconditions failed during ingestion")
             val sample = stageOrDiscard(
                 baseCtx, 2, triage,
@@ -377,7 +380,7 @@ class PipelineOrchestrator(
     }
 
     private fun restoreIngestionWorktree(input: IngestionInput, destination: File): IngestionWorktree {
-        val evalRepos = File(config.project.rootDir).absoluteFile.parentFile ?: File("eval-repos")
+        val evalRepos = config.paths.evalRepos()
         val repoName = File(input.repoUrl).name.removeSuffix(".git")
         val mirror = Git.ensureMirror(input.repoUrl, evalRepos, repoName)
         Git.addWorktree(mirror, destination, input.parentHash.hash)
@@ -385,7 +388,7 @@ class PipelineOrchestrator(
     }
 
     private fun materializeC1(entry: BenchmarkEntry, destination: File) {
-        val evalRepos = File(config.project.rootDir).absoluteFile.parentFile ?: File("eval-repos")
+        val evalRepos = config.paths.evalRepos()
         val repoName = File(entry.repoUrl).name.removeSuffix(".git")
         val mirror = Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
         Git.addWorktree(mirror, destination, entry.parentHash.hash)
@@ -402,17 +405,15 @@ class PipelineOrchestrator(
     private fun resolveMetadataRepo(entry: BenchmarkEntry): File {
         val local = File(entry.repoUrl)
         if (local.exists()) return local
-        val evalRepos = File(config.project.rootDir).absoluteFile.parentFile ?: File("eval-repos")
+        val evalRepos = config.paths.evalRepos()
         val mirror = Git.mirrorPath(evalRepos, File(entry.repoUrl).name.removeSuffix(".git"))
         return if (mirror.exists()) mirror else local
     }
 
     private fun repoId(url: String): String = "repo-" + Hashing.sha256(url).take(12)
 
-    private fun readConfigText(): String {
-        val f = File("project_config.yaml")
-        return if (f.isFile) f.readText() else ""
-    }
+    private fun readConfigText(): String =
+        runCatching { config.sourceFile.readText() }.getOrDefault("")
 
     private fun incompleteResult(runId: RunId, message: String): VerificationResult {
         val summary = File(".worktrees/run_$runId/incomplete_summary.json")
@@ -435,4 +436,3 @@ class PipelineOrchestrator(
         )
     }
 }
-

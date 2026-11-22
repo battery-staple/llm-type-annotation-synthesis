@@ -41,10 +41,10 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
             "parent" to input.parentHash.hash
         )
         val configSlice = mapOf(
-            "source_compatibility" to ctx.config.environment.sourceCompatibility,
-            "target_compatibility" to ctx.config.environment.effectiveTargetCompatibility,
-            "gradle_wrapper" to ctx.config.build.wrapperExecutable,
-            "project_name" to ctx.config.project.name
+            "source_compatibility" to ctx.sourceCompatibility,
+            "target_compatibility" to ctx.targetCompatibility,
+            "gradle_wrapper" to ctx.build.wrapperExecutable,
+            "benchmark_id" to input.benchmarkId.canonical
         )
         return CacheKeys.compute(
             ctx = ctx,
@@ -58,7 +58,7 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
 
     override suspend fun execute(ctx: RunContext, input: IngestionInput): StageResult<IngestionWorktree> {
         val repoName = repoBaseName(input.repoUrl)
-        val evalReposDir = ctx.repoDir.absoluteFile.parentFile ?: File("eval-repos")
+        val evalReposDir = ctx.config.paths.evalRepos()
         log.info { "Ingestion: ensuring mirror for repo=$repoName commit=${input.commitHash} parent=${input.parentHash}" }
 
         val mirror = try {
@@ -104,7 +104,7 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
             )
         )
 
-        log.info { "Ingestion: pre-warming Gradle cache via ${ctx.config.build.compileTask}" }
+        log.info { "Ingestion: pre-warming Gradle cache via ${ctx.build.compileTask}" }
         val prewarm = try {
             buildRunner.compile(ctx.worktreeDir)
         } catch (t: Throwable) {

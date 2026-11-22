@@ -60,9 +60,9 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             "verification_scope" to ctx.config.verification.scope.name.lowercase(),
             "verification_baseline" to ctx.config.verification.baseline,
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
-            "checker_task" to ctx.config.build.checkerTask,
-            "source_compatibility" to ctx.config.environment.sourceCompatibility,
-            "target_compatibility" to ctx.config.environment.effectiveTargetCompatibility
+            "checker_task" to ctx.build.checkerTask,
+            "source_compatibility" to ctx.sourceCompatibility,
+            "target_compatibility" to ctx.targetCompatibility
         )
         return CacheKeys.compute(
             ctx = ctx,

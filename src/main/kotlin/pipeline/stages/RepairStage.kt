@@ -557,8 +557,8 @@ internal fun writeRunCheckerScript(workspace: File, checker: CheckerConfig, ctx:
         export CF_PROCESSOR="${checker.processor}"
         export CF_AQUALS="${checker.qualifierClassNames.joinToString(",") { it.value }}"
         export CF_CHECKER_CATEGORY="${checkerCategoryName(checker.checkerCategory)}"
-        export CF_SOURCE_COMPATIBILITY="${ctx.config.environment.sourceCompatibility}"
-        export CF_TARGET_COMPATIBILITY="${ctx.config.environment.effectiveTargetCompatibility}"
+        export CF_SOURCE_COMPATIBILITY="${ctx.sourceCompatibility}"
+        export CF_TARGET_COMPATIBILITY="${ctx.targetCompatibility}"
         export GUARDRAILS_MODE="${ctx.config.guardrails.mode.name.lowercase()}"
         exec ./gradlew :checkerPass --init-script "${'$'}SCRIPT_DIR/../.pipeline-init/checker.init.gradle"
         """.trimIndent(),

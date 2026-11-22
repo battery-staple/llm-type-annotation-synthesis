@@ -1,19 +1,25 @@
-project:
-  name: "synthetic-id-swap"
-  repo_url: "eval-repos/synthetic-id-swap"
-  root_dir: "eval-repos/synthetic-id-swap"
-  default_branch: "main"
+# Global pipeline policy. Per-benchmark settings (repository, build tool,
+# Java compatibility) live in benchmarks.yaml; machine-specific values come
+# from the environment (JAVA_HOME, GRADLE_USER_HOME, CHECKERFRAMEWORK).
+# Relative paths are resolved against this file's directory.
 
 triage:
   mode: "manifest"
   manifest_file: "benchmarks.yaml"
 
+paths:
+  eval_repos_dir: "eval-repos"
+  database: "data/pipeline.db"
+
 environment:
-  java_home: "/usr/lib/jvm/java-21-openjdk-arm64"
+  # Blank means: inherit JAVA_HOME / GRADLE_USER_HOME from the process.
+  java_home: ""
+  gradle_user_home: ""
+  # Blank means: use $CHECKERFRAMEWORK, else vendor/checker-framework-3.42.0.
+  checker_framework_home: ""
+  # Global defaults; a benchmark entry may override either value.
   source_compatibility: "17"
   target_compatibility: "17"
-  checker_framework_home: "vendor/checker-framework-3.42.0"
-  gradle_user_home: ""
 
 guardrails:
   mode: "lenient"
@@ -28,6 +34,7 @@ model:
   repair: "opencode-go/deepseek-v4.1-flash"
 
 agent:
+  # Experiment profile: these are overrides of the code defaults (25/20/50).
   steps:
     synthesis: 100
     application: 200
@@ -36,7 +43,6 @@ agent:
   max_checker_invocations: 20
 
 sample:
-  seed: 0
   temperature: 0.0
 
 synthesis:
@@ -54,21 +60,6 @@ repair:
 
 prompt:
   tell_non_triviality_error: false
-
-build:
-  tool: "gradle"
-  wrapper_executable: "./gradlew"
-  subproject: ""
-  compile_task: "compileJava"
-  test_task: "test"
-  checker_task: "checkerPass"
-  single_test_cmd: "./gradlew test --tests {test_class}.{test_method}"
-
-logging:
-  level: "INFO"
-  file: "logs/pipeline.log"
-  json_format: true
-  per_run_file: true
 
 cache:
   stages_dir: ".cache/stages"

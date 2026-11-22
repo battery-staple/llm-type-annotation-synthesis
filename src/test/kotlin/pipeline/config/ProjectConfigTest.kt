@@ -1,0 +1,70 @@
+package pipeline.config
+
+import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class ProjectConfigTest {
+    @Test
+    fun `resolves relative paths against config directory`() {
+        val dir = Files.createTempDirectory("project-config").toFile()
+        try {
+            val file = dir.resolve("project.yaml")
+            file.writeText(
+                """
+                triage:
+                  manifest_file: manifests/benchmarks.yaml
+                paths:
+                  eval_repos_dir: data/repos
+                  database: data/pipeline.db
+                environment:
+                  checker_framework_home: tools/checker
+                cache:
+                  stages_dir: cache/stages
+                """.trimIndent()
+            )
+
+            val config = ProjectConfig.load(file)
+
+            assertEquals(dir.resolve("manifests/benchmarks.yaml").toString(), config.triage.manifestFile)
+            assertEquals(dir.resolve("data/repos").toString(), config.paths.evalReposDir)
+            assertEquals(dir.resolve("data/pipeline.db").toString(), config.paths.databaseFile().path)
+            assertEquals(dir.resolve("tools/checker").toString(), config.environment.checkerFrameworkHome)
+            assertEquals(dir.resolve("cache/stages").toString(), config.cache.stagesDir)
+            assertEquals(file.absoluteFile, config.sourceFile)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `ignores legacy project and logging sections`() {
+        val dir = Files.createTempDirectory("project-config-legacy").toFile()
+        try {
+            val file = dir.resolve("project.yaml")
+            file.writeText(
+                """
+                triage:
+                  mode: crawler
+                  manifest_file: benchmarks.yaml
+                paths:
+                  eval_repos_dir: repos
+                project:
+                  name: legacy-project
+                logging:
+                  level: debug
+                """.trimIndent()
+            )
+
+            val config = ProjectConfig.load(file)
+
+            assertEquals("crawler", config.triage.mode)
+            assertEquals(dir.resolve("repos").toString(), config.paths.evalReposDir)
+            assertEquals(dir.resolve("data/pipeline.db").toString(), config.paths.databaseFile().path)
+            assertEquals("", config.environment.javaHome)
+            assertEquals(0.0, config.sample.temperature)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+}

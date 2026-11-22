@@ -20,7 +20,11 @@ data class BenchmarkManifestEntry(
     @SerialName("regression_test_class") val regressionTestClass: String,
     @SerialName("regression_test_method") val regressionTestMethod: String,
     @SerialName("test_patch") val testPatch: String? = null,
-    val description: String = ""
+    val description: String = "",
+    @SerialName("default_branch") val defaultBranch: String = "main",
+    val build: BuildSection = BuildSection(),
+    @SerialName("source_compatibility") val sourceCompatibility: String? = null,
+    @SerialName("target_compatibility") val targetCompatibility: String? = null
 )
 
 @Serializable
@@ -29,21 +33,33 @@ data class BenchmarkManifest(val benchmarks: List<BenchmarkManifestEntry> = empt
 object BenchmarkManifestLoader {
     private val yaml = Yaml(configuration = YamlConfiguration(strictMode = false))
 
-    fun load(file: File): List<BenchmarkEntry> {
-        require(file.isFile) { "Benchmark manifest not found: ${file.absolutePath}" }
-        val manifest = yaml.decodeFromString(BenchmarkManifest.serializer(), file.readText())
-        val base = file.absoluteFile.parentFile
+    fun load(file: File, config: ProjectConfig): List<BenchmarkEntry> {
+        val absolute = file.absoluteFile
+        require(absolute.isFile) { "Benchmark manifest not found: ${absolute.absolutePath}" }
+        val manifest = yaml.decodeFromString(BenchmarkManifest.serializer(), absolute.readText())
+        val base = absolute.parentFile
         val seen = mutableSetOf<String>()
         return manifest.benchmarks.map { row ->
             require(seen.add(row.id)) { "Duplicate benchmark id '${row.id}' in ${file.path}" }
+            val repoUrl = row.repoUrl.let { raw ->
+                if (raw.contains("://") || raw.startsWith("git@") || raw.startsWith("file:")) raw
+                else File(raw).let { f -> if (f.isAbsolute) f else File(base, raw) }.toPath().normalize().toString()
+            }
+            val source = row.sourceCompatibility ?: config.environment.sourceCompatibility
+            val target = row.targetCompatibility ?: row.sourceCompatibility ?: config.environment.effectiveTargetCompatibility
             BenchmarkEntry(
                 benchmarkId = BenchmarkId.parse(row.id),
-                repoUrl = row.repoUrl,
+                repoUrl = repoUrl,
                 commitHash = CommitHash(row.commitHash),
                 parentHash = CommitHash(row.parentHash),
                 regressionTest = TestCoordinate(Fqcn(row.regressionTestClass), row.regressionTestMethod),
                 testPatchFile = row.testPatch?.let { File(it).let { f -> if (f.isAbsolute) f else File(base, it) } },
-                description = row.description
+                description = row.description,
+                repoIdentity = row.repoUrl,
+                defaultBranch = row.defaultBranch,
+                build = row.build,
+                sourceCompatibility = source,
+                targetCompatibility = target
             )
         }
     }
