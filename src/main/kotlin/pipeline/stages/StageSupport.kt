@@ -17,6 +17,7 @@ import pipeline.db.AgentTurnRecord
 import pipeline.db.AnnotationPlacementRecord
 import pipeline.db.LlmInvocationRecord
 import pipeline.ports.AgentRunResult
+import pipeline.util.Git
 import pipeline.util.PipelineJson
 
 object PromptTemplates {
@@ -64,6 +65,25 @@ fun agentFailureMessage(result: AgentRunResult): String? {
  */
 fun agentStartupFailure(result: AgentRunResult): String? =
     agentFailureMessage(result)?.takeIf { !result.timedOut && result.stepsCounted == 0 }
+
+/**
+ * Agents are not OS-sandboxed: they can reach the benchmark checkout even when
+ * their working directory is a scratch export. Detect and roll back any such
+ * edit after every agent invocation; a contaminated benchmark invalidates the
+ * sample and must not be allowed to continue.
+ */
+fun haltIfBenchmarkRepoDirty(ctx: RunContext, stage: String) {
+    val repo = ctx.repoDir
+    if (!repo.isDirectory) return
+    val status = runCatching { Git.statusPorcelain(repo) }.getOrNull() ?: return
+    if (status.isBlank()) return
+    runCatching { Git.run(repo, "checkout", "--", ".") }
+    runCatching { Git.run(repo, "clean", "-fd") }
+    throw StageHaltException(
+        "$stage modified the benchmark repository; the checkout was rolled back. Status was:\n" +
+            status.take(2000)
+    )
+}
 
 data class QualifierInfo(
     val fqcn: Fqcn,

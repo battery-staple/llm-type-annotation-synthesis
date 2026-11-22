@@ -144,6 +144,7 @@ class SynthesisStage(
             stepsTaken += runResult.stepsCounted
             fullTranscript += runResult.transcript
             agentStartupFailure(runResult)?.let { throw StageHaltException(it) }
+            haltIfBenchmarkRepoDirty(ctx, "synthesis")
             val problems = buildList {
                 agentFailureMessage(runResult)?.let { add(it) }
                 addAll(

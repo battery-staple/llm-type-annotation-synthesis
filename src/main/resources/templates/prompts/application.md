@@ -49,6 +49,8 @@ Non-triviality hint enabled: {{tell_non_triviality_error}}
   and `src/test/**`. Test sources may receive ONLY qualifier annotations and
   qualifier imports; executable test logic is immutable.
 - Do not read `.git`, do not inspect test patches, test results, or report files.
+- Do not spawn subagents. Write only inside the current working directory; never
+  modify the pipeline repository or any other checkout outside it.
 
 ## Verification
 

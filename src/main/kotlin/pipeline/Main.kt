@@ -94,6 +94,14 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
         require(config.triage.mode == "manifest") {
             "triage.mode='${config.triage.mode}' is not supported; the automated crawler is deferred (design plan §7.4)"
         }
+        val benchmarkRepo = File(config.project.repoUrl)
+        if (benchmarkRepo.isDirectory && Git.isRepository(benchmarkRepo)) {
+            val dirty = Git.statusPorcelain(benchmarkRepo)
+            require(dirty.isBlank()) {
+                "Benchmark repository ${benchmarkRepo.path} is dirty; revert or commit changes before running so " +
+                    "agent contamination is detectable:\n$dirty"
+            }
+        }
         val manifestFile = File(config.triage.manifestFile)
         val entries = BenchmarkManifestLoader.load(manifestFile)
         val entry = BenchmarkManifestLoader.resolve(entries, benchmark)

@@ -140,6 +140,7 @@ class RepairStage(
             stepsTaken += runResult.stepsCounted
             fullTranscript += runResult.transcript
             agentStartupFailure(runResult)?.let { throw StageHaltException(it) }
+            haltIfBenchmarkRepoDirty(ctx, "repair")
 
             FileOps.mirrorTreeInto(workspace, worktree, MIRROR_EXCLUDES)
             val changed = PatchManager(worktree).changedPaths()

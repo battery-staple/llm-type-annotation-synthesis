@@ -30,6 +30,8 @@ Maximum checker invocations: {{max_checker_invocations}}
 - NEVER modify tests, build scripts, `package-info.java`, or `.astub` files.
 - NEVER add, delete, or rename files.
 - Do not read `.git`, do not search for tests or patches, do not use the network.
+- Do not spawn subagents. Write only inside the current working directory; never
+  modify the pipeline repository or any other checkout outside it.
 
 Resolve every diagnostic from the selected processor by fixing method bodies so
 the confused values no longer flow where they must not. When the checker

@@ -66,6 +66,9 @@ values). Never name concrete repository symbols, files, or the regression test.
 ## Hard constraints
 
 - Do not read `.git`, do not run `git log`, do not look for test files or patches.
+- Do not spawn subagents or delegate to another agent.
+- Write only inside the current working directory. Never modify the pipeline
+  repository or any other checkout outside it.
 - Every qualifier source must compile with `javac -proc:none` against `checker-qual.jar`.
 - Keep the package stable; the harness discovers all `@Target(TYPE_USE)`
   qualifiers automatically for `-Aquals`.
