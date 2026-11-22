@@ -121,6 +121,53 @@ python3 analysis/inspect_cache.py
 
 The run is finalized with the database lifecycle status `stopped_after_<stage>` (the CLI prints `lifecycle_status: stopped` plus the `stopped_after` line) and records no evaluation verdict. Completed stages are still published to the CAS, so re-running the same command without the flag reuses their bundles instead of repeating the work. Accepted values are `ingestion|triage|synthesis|application|repair|verification`; `verification` is the same as omitting the flag, and an unknown value is rejected with that list. A discard or halt in the named stage still ends the run as `discarded`/`failed`, regardless of the stop point.
 
+### Crawler mode
+
+Crawler mode reads repositories from `repos.yaml`. `triage.depth` (default
+`20`) is the number of commits to crawl; set it explicitly for larger crawls
+(`--depth 1000` for 1,000 commits). `--limit` is the maximum number of
+verified samples admitted to downstream stages, not a scan limit: all
+non-root crawled commits are ingested and triaged even after the downstream
+limit is reached. Use `--jobs` to bound concurrent crawler commit runners
+(default `1`; crawler mode only):
+
+```bash
+./build/install/pipeline/bin/pipeline run --config project_config.yaml \
+  --benchmark synthetic-id-swap --triage-mode crawler \
+  --depth 1000 --jobs 4 --limit 1000
+```
+
+The current `jobs` bound covers the whole per-commit runner. Agent/LLM and
+Gradle concurrency are not independently controlled yet; separate agent/build
+concurrency is the next recommended change, not an implemented feature.
+
+When a verified sample is beyond the downstream gate, its run ends as
+`triage_only`: it has no evaluation verdict, and its triage CAS bundle is
+retained for reuse. In `v_evaluation_verdicts`, interpret `outcome_kind` to
+separate these from evaluated runs; `triage_only` is not a failed evaluation
+and must not be counted as one. The viewer presents the lifecycle status
+without a verdict; the offline `analysis/evaluate_metrics.py` verdict section
+shows the `triage_only` status and NULL verdict.
+
+### Logs, cleanup, and telemetry
+
+Successful and `triage_only` runs remove their run worktrees and scratch
+directories. Failed or discarded runs and `--stop-after` runs are retained for
+debugging. Per-run log appenders are best-effort, capped at 64 active run IDs,
+and have a finite child timeout; the rolling JSON log is authoritative. If
+concurrency exceeds the per-run appender cap, some per-run files may be
+unavailable; use `logs/pipeline.log` and its rolled files, filtering by
+`run_id`, for full history. Startup retention prunes run logs older than 14
+days or beyond 2,000 files, orphaned CAS staging directories, stale OpenCode
+seed DBs/sidecars, and stale per-invocation temporary DBs.
+
+Database-operation timing/success telemetry is stored in
+`db_operation_metrics` and summarized by `v_db_operation_summary`. Retry
+attempts and decisions are stored in `retry_events` and summarized by
+`v_retry_summary`. The viewer provides run-level lifecycle context; use SQL
+or the offline `analysis/evaluate_metrics.py` report alongside these views to
+inspect database operations and retries.
+
 Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build output) is gitignored. A fresh checkout needs the Checker Framework vendored before running.
 
 ### Local environment
@@ -219,4 +266,12 @@ Run it (from the repository root, after `./gradlew installDist`):
   regression test **fails on C-1** (`expected ACCEPT but was REJECT`) and
   **passes on C**. A full end-to-end LLM run has not been attempted (no LLM
   run is claimed).
+- Crawler mode has a parallel per-commit scheduler, a hard downstream gate,
+  finite child-process timeouts, and lifecycle-aware cleanup. `--depth` must
+  be raised explicitly for large crawls; `--limit` gates downstream work, not
+  ingestion/triage. This remains experimental, not a claim of deterministic or
+  production-ready 1,000-commit operation.
+- Operational limits remain: agent/LLM and Gradle concurrency are not
+  separately bounded; output/transcript caps and daemon policy need further
+  work; and larger runs require resource piloting. See `deviations.md`.
 - Known limitations and implementation gaps are tracked in `deviations.md`.

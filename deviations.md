@@ -321,3 +321,40 @@ the crawler) are not listed unless the code had to interpret the plan.
      test-run evidence columns and rebuild `v_evaluation_verdicts` on open; the
      old `regression_introduced` stored label remains readable as
      `suite_failure`.
+
+## Crawler lifecycle and operational telemetry
+
+53. **Crawler scheduling and the downstream limit are separate controls.** The
+    crawler lists the configured commit depth (default 20), ingests/triages all
+    non-root commits, and uses a bounded `jobs` scheduler (default 1) for whole
+    per-commit runners. `limit` controls how many verified samples proceed past
+    the hard downstream gate; it does not cap scanning or triage. Thus a sample
+    rejected by that gate finishes with lifecycle status `triage_only`, records
+    no verdict, and retains its triage CAS bundle. In
+    `v_evaluation_verdicts`, `outcome_kind='triage_only'` distinguishes this
+    from evaluation failure; its verdict is NULL. The viewer/offline metrics
+    report expose the outcome as not evaluated, not as a failed evaluation.
+54. **Crawler concurrency is not independently partitioned by resource type.**
+    `jobs` currently bounds the whole commit runner; it does not separately
+    limit agent/LLM calls and Gradle builds. Separate agent/build concurrency
+    controls are recommended next, but are not implemented. This scheduler is
+    not a guarantee of deterministic behavior or production readiness for
+    1,000-commit crawls; output/transcript caps, daemon policy, and resource
+    piloting remain operational limits.
+55. **Run worktree/scratch retention follows lifecycle outcome.** Successful
+    and `triage_only` runs remove their run worktrees and scratch data. Failures,
+    discards, and `--stop-after` runs are retained for debugging. Per-run
+    appenders are capped at 64 active run IDs and use a finite child timeout;
+    excess concurrent run IDs may lack a per-run log, so the rolling JSON log
+    (including `run_id`) is authoritative. Startup housekeeping prunes run logs
+    after 14 days or above 2,000 files, orphaned CAS staging directories,
+    stale OpenCode seed databases/sidecars, and stale per-invocation temporary
+    databases.
+56. **Database and retry telemetry has dedicated tables and summaries.**
+    `db_operation_metrics` records database operation duration, success,
+    affected rows, and errors; `v_db_operation_summary` groups calls, failures,
+    and latency by operation. `retry_events` captures attempts, retry decision,
+    delay, and error details; `v_retry_summary` groups attempts/retries by
+    stage and error class. The viewer exposes run lifecycle/verdict context;
+    `analysis/evaluate_metrics.py` reports verdicts and other offline telemetry,
+    while these new table/view summaries are directly queryable in SQLite.

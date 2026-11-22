@@ -6,8 +6,13 @@
 triage:
   mode: "crawler"
   manifest_file: "repos.yaml"
+  # Commit scan depth per repository; default 20. Raise explicitly for large crawls.
   depth: 20
-  # Maximum concurrent crawler commits; ignored in manifest mode.
+  # Maximum verified samples admitted downstream (not a scan cap): all non-root
+  # crawled commits are still ingested and triaged.
+  # limit: 1000
+  # Concurrent whole per-commit crawler runners; default 1, crawler-only.
+  # Agent/LLM and Gradle concurrency are not separately bounded.
   # jobs: 1
   bugfix_threshold: 0.75
 
