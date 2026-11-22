@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pipeline Run Viewer</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <span class="brand-dot"></span>
+          <h1>Run Viewer</h1>
+        </div>
+        <div class="sidebar-actions">
+          <label class="auto-refresh-toggle" title="Auto-refresh every 5 seconds">
+            <input type="checkbox" id="autoRefreshToggle" />
+            <span>Live</span>
+          </label>
+          <button id="refreshBtn" class="btn btn-icon" title="Refresh runs">&#x21bb;</button>
+        </div>
+      </div>
+
+      <div class="sidebar-filters">
+        <input id="runSearch" type="search" placeholder="Filter by run ID, benchmark, PR..." autocomplete="off" />
+        <div class="filter-row">
+          <select id="verdictFilter" aria-label="Filter by verdict">
+            <option value="">All verdicts</option>
+          </select>
+          <select id="guardrailFilter" aria-label="Filter by guardrails">
+            <option value="">All guardrails</option>
+          </select>
+        </div>
+        <div id="runsCount" class="runs-count">Loading runs...</div>
+      </div>
+
+      <div id="runsList" class="runs-list"></div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-pane">
+      <div id="emptyState" class="empty-state">
+        <div class="empty-card">
+          <h2>Select a pipeline run</h2>
+          <p>Choose an evaluation run from the sidebar to inspect its stages, patches, agent transcripts, diagnostics, tests, and configuration.</p>
+        </div>
+      </div>
+
+      <div id="runView" class="run-view hidden">
+        <!-- Run Header -->
+        <header class="run-header">
+          <div class="run-title-row">
+            <div class="run-title-left">
+              <span id="hdrVerdictBadge" class="badge"></span>
+              <span id="hdrStatusBadge" class="badge"></span>
+              <h2 id="hdrBenchmark"></h2>
+              <code id="hdrRunId" class="copyable" title="Click to copy full Run ID"></code>
+            </div>
+            <div class="run-title-right" id="hdrMetrics"></div>
+          </div>
+
+          <div class="run-meta-row" id="hdrCommitMeta"></div>
+          <div class="config-pills-row" id="hdrConfigPills"></div>
+
+          <nav class="run-tabs" role="tablist">
+            <button class="run-tab active" data-run-tab="stages">Stages</button>
+            <button class="run-tab" data-run-tab="config">Configuration</button>
+            <button class="run-tab" data-run-tab="log">Run Log <span id="logSizeBadge" class="pill-count"></span></button>
+          </nav>
+        </header>
+
+        <!-- Tab: Stages -->
+        <section id="runTabStages" class="run-tab-panel">
+          <div class="stage-stepper" id="stageStepper"></div>
+
+          <div id="stageInspector" class="stage-inspector hidden">
+            <div class="stage-header-bar">
+              <div class="stage-header-left">
+                <span id="stageStatusIcon" class="stage-dot"></span>
+                <h3 id="stageTitle"></h3>
+                <span id="stageCacheBadge" class="badge badge-muted hidden"></span>
+                <span id="stageDuration" class="muted"></span>
+              </div>
+              <div class="stage-header-right">
+                <label id="attemptSelectorWrap" class="attempt-wrap hidden">
+                  Attempt:
+                  <select id="attemptSelector"></select>
+                </label>
+                <span id="stageStats" class="muted"></span>
+              </div>
+            </div>
+
+            <nav class="stage-tabs" role="tablist">
+              <button class="stage-tab active" data-stage-tab="overview">Overview &amp; Artifacts</button>
+              <button class="stage-tab" data-stage-tab="patch">Patch / Diff <span id="cntPatch" class="pill-count"></span></button>
+              <button class="stage-tab" data-stage-tab="transcript">Transcript &amp; Turns <span id="cntTranscript" class="pill-count"></span></button>
+              <button class="stage-tab" data-stage-tab="diagnostics">Diagnostics &amp; Checker <span id="cntDiagnostics" class="pill-count"></span></button>
+              <button class="stage-tab" data-stage-tab="tests">Tests <span id="cntTests" class="pill-count"></span></button>
+              <button class="stage-tab" data-stage-tab="guardrails">Guardrails <span id="cntGuardrails" class="pill-count"></span></button>
+            </nav>
+
+            <div id="stageTabContent" class="stage-tab-content"></div>
+          </div>
+        </section>
+
+        <!-- Tab: Configuration -->
+        <section id="runTabConfig" class="run-tab-panel hidden">
+          <div class="config-toolbar">
+            <div class="config-toolbar-left">
+              <label>
+                Compare config with:
+                <select id="configCompareSelect">
+                  <option value="">None (view current run only)</option>
+                </select>
+              </label>
+              <label class="checkbox-inline">
+                <input type="checkbox" id="configDiffOnlyToggle" />
+                <span>Show differences only</span>
+              </label>
+            </div>
+            <div class="config-toolbar-right">
+              <button id="configRawToggle" class="btn">Raw JSON</button>
+              <button id="configCopyBtn" class="btn">Copy JSON</button>
+            </div>
+          </div>
+          <div id="configContent" class="config-content"></div>
+        </section>
+
+        <!-- Tab: Run Log -->
+        <section id="runTabLog" class="run-tab-panel hidden">
+          <div class="log-toolbar">
+            <input id="logSearchInput" type="search" placeholder="Filter log lines (text or regex)..." />
+            <select id="logLevelFilter">
+              <option value="">All levels</option>
+              <option value="ERROR">ERROR</option>
+              <option value="WARN">WARN</option>
+              <option value="INFO">INFO</option>
+              <option value="DEBUG">DEBUG</option>
+            </select>
+            <button id="logRefreshBtn" class="btn">Reload Log</button>
+            <button id="logBottomBtn" class="btn">Jump to Bottom</button>
+          </div>
+          <pre id="logContent" class="log-viewer"></pre>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- Artifact Preview Modal -->
+  <div id="artifactModal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <code id="artifactModalTitle"></code>
+        <div class="modal-actions">
+          <button id="artifactCopyBtn" class="btn">Copy</button>
+          <button id="artifactCloseBtn" class="btn">&times;</button>
+        </div>
+      </div>
+      <pre id="artifactModalBody" class="modal-body"></pre>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
