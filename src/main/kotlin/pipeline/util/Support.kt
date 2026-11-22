@@ -37,6 +37,7 @@ object Processes {
         val builder = ProcessBuilder(command).directory(cwd)
         builder.environment().apply {
             putAll(environment)
+            Env.applyTo(this)
             // Keep PWD consistent with the actual working directory; tools that
             // resolve paths from PWD would otherwise target the pipeline checkout.
             this["PWD"] = cwd.absolutePath

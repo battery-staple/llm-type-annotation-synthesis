@@ -112,15 +112,16 @@ Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build outp
 Machine-specific values are supplied through environment variables, not the committed config:
 
 ```bash
-cp local.env.example local.env
-$EDITOR local.env
-source local.env
+cp .env.example .env
+$EDITOR .env
 ```
 
-`local.env` is gitignored. The template covers the JDK path, Checker Framework location, optional Gradle cache, OpenCode DB paths, and the scratch location. The most common required changes for a new checkout are:
+The pipeline reads `.env` automatically before loading `project_config.yaml`. It looks next to `--config` (usually the repository root), then in the working directory; set `PIPELINE_ENV_FILE` to use a different file. Existing shell environment variables take precedence, and the file is parsed rather than sourced, so `$VAR` and `$(...)` are not expanded — use absolute paths.
 
-1. Point `JAVA_HOME` at a JDK 21.
-2. Install Checker Framework 3.42.0 at `vendor/checker-framework-3.42.0/`, or set `CHECKERFRAMEWORK` to its location.
+The template covers the JDK path, Checker Framework location, optional Gradle cache, OpenCode DB paths, and the scratch location. The most common required changes for a new checkout are:
+
+1. Build and run the pipeline on JDK 21. If child target builds need an explicit JDK, uncomment `JAVA_HOME` in `.env`.
+2. Install Checker Framework 3.42.0 at `vendor/checker-framework-3.42.0/`, or uncomment `CHECKERFRAMEWORK` and point it at the installation.
 3. Install and authenticate the `opencode` CLI. If you are not on OpenCode Go, pass `--model <provider/model>` instead of editing `project_config.yaml`.
 4. Initialize at least the synthetic benchmark submodule:
    `git submodule update --init eval-repos/synthetic-id-swap`

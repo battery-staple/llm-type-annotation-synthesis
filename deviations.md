@@ -235,3 +235,8 @@ the crawler) are not listed unless the code had to interpret the plan.
     `config_yaml`/`config_snapshot` read that file. The unused `logging:`
     section and `sample.seed` key were removed, and `paths.database` replaces
     the hardcoded `data/pipeline.db`.
+44. **`.env` is loaded automatically before configuration parsing.** A file
+    next to `--config` (or the file named by `PIPELINE_ENV_FILE`) supplies
+    values only for keys absent from the process environment, and those values
+    are forwarded to child Gradle/OpenCode processes. The file is parsed
+    literally, not sourced, so shell expansion does not apply.

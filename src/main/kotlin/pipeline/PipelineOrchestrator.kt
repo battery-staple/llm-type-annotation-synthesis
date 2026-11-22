@@ -18,6 +18,7 @@ import pipeline.db.StepTrajectoryRecord
 import pipeline.ports.DatabasePort
 import pipeline.stages.*
 import pipeline.util.CommitMetadata
+import pipeline.util.Env
 import pipeline.util.Git
 import pipeline.util.Hashing
 import pipeline.util.PipelineJson
@@ -55,7 +56,7 @@ class PipelineOrchestrator(
         // resolves tool cwd to the enclosing Git root, so a workspace under
         // .scratch/ would let agents write into the project root and break
         // both blindness isolation and per-stage validation.
-        val scratchRoot = System.getenv("PIPELINE_SCRATCH_DIR")?.let { File(it) }
+        val scratchRoot = Env.get("PIPELINE_SCRATCH_DIR")?.let { File(it) }
             ?: File(System.getProperty("java.io.tmpdir"), "pipeline-scratch")
         scratchRoot.mkdirs()
         val scratchBase = scratchRoot.resolve("run_$runId").apply { mkdirs() }

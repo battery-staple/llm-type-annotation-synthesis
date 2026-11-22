@@ -26,12 +26,17 @@ import pipeline.stages.ManifestTriageStage
 import pipeline.stages.RepairStage
 import pipeline.stages.SynthesisStage
 import pipeline.stages.VerificationStage
+import pipeline.util.Env
 import pipeline.util.FileOps
 import pipeline.util.Git
 
 private val logger = KotlinLogging.logger {}
 
-private fun loadConfig(path: String): ProjectConfig = ProjectConfig.load(File(path))
+private fun loadConfig(path: String): ProjectConfig {
+    val file = File(path)
+    Env.loadFor(file)
+    return ProjectConfig.load(file)
+}
 
 private fun database(config: ProjectConfig): SQLiteDatabaseManager =
     SQLiteDatabaseManager(config.paths.databaseFile())

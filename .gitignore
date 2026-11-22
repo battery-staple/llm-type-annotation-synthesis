@@ -16,8 +16,10 @@ data/
 logs/
 eval-repos/*.git/
 
-# Local environment overrides (copy local.env.example)
-local.env
+# Local environment overrides (copy .env.example)
+.env
+.env.*
+!.env.example
 
 # Vendored Checker Framework (install separately; see README/project_config.yaml)
 vendor/

@@ -4,6 +4,7 @@ import java.io.File
 import java.sql.Connection
 import java.sql.DriverManager
 import mu.KotlinLogging
+import pipeline.util.Env
 
 /**
  * OpenCode stores provider credentials in its global SQLite DB. The pipeline
@@ -53,15 +54,15 @@ object OpenCodeDb {
     }
 
     private fun defaultTarget(): File =
-        File(System.getenv("PIPELINE_OPENCODE_DB") ?: "data/opencode-agent-${ProcessHandle.current().pid()}.db")
+        File(Env.get("PIPELINE_OPENCODE_DB") ?: "data/opencode-agent-${ProcessHandle.current().pid()}.db")
 
     private fun locateGlobalDb(): File? {
         val home = System.getProperty("user.home")
         return listOfNotNull(
-            System.getenv("OPENCODE_GLOBAL_DB")?.let(::File),
+            Env.get("OPENCODE_GLOBAL_DB")?.let(::File),
             File(home, ".local/share/opencode/opencode.db"),
             File(home, "Library/Application Support/opencode/opencode.db"),
-            System.getenv("XDG_DATA_HOME")?.let { File(it, "opencode/opencode.db") }
+            Env.get("XDG_DATA_HOME")?.let { File(it, "opencode/opencode.db") }
         ).firstOrNull { it.isFile }
     }
 

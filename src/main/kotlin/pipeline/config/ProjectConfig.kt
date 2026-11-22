@@ -12,6 +12,7 @@ import pipeline.stages.FreedomLevel
 import pipeline.stages.GuardrailsMode
 import pipeline.stages.LocalAnnotationPolicy
 import pipeline.stages.VerificationScope
+import pipeline.util.Env
 
 @Serializable
 data class TriageSection(
@@ -151,7 +152,7 @@ data class ProjectConfig(
             }
             val checkerHome = decoded.environment.checkerFrameworkHome
                 .takeIf { it.isNotBlank() }
-                ?: System.getenv("CHECKERFRAMEWORK")?.takeIf { it.isNotBlank() }
+                ?: Env.get("CHECKERFRAMEWORK")?.takeIf { it.isNotBlank() }
                 ?: "vendor/checker-framework-3.42.0"
             val config = decoded.copy(
                 triage = decoded.triage.copy(manifestFile = resolve(decoded.triage.manifestFile)),

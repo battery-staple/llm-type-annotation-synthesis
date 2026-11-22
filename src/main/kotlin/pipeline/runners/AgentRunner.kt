@@ -21,6 +21,7 @@ import pipeline.ports.AgentRunner
 import pipeline.stages.AgentEventType
 import pipeline.stages.AgentTranscriptEvent
 import pipeline.stages.TokenUsage
+import pipeline.util.Env
 
 /**
  * Spawns the OpenCode CLI (`opencode run --auto --format json`) and parses its
@@ -61,6 +62,7 @@ class CoroutineOpenCodeRunner(
         env.remove("GIT_INDEX_FILE")
         env.putAll(baseEnvironment)
         env.putAll(environment)
+        Env.applyTo(env)
         // ProcessBuilder changes the OS working directory but leaves PWD
         // inherited. The OpenCode CLI resolves its workspace from PWD, so
         // without this every agent writes into the parent pipeline checkout
