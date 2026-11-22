@@ -46,6 +46,7 @@ the guide even when the Java sources are already present.
 
 ## Qualifier Semantics
 
+- <a brief (short paragraph) description of the lattice's high level meaning and purpose.>
 - <one `- ` bullet per qualifier you declared: `@QualifierName` followed by what values it
   denotes (for example which identifier domain or trust level), and how it relates to the
   other qualifiers in the lattice (root, child, or bottom). At least one bullet.>
