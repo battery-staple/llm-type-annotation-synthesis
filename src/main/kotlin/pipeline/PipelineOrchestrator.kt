@@ -24,6 +24,7 @@ import pipeline.util.Env
 import pipeline.util.Git
 import pipeline.util.Hashing
 import pipeline.util.PipelineJson
+import pipeline.util.RuntimeCleanup
 import pipeline.util.TranscriptStreams
 
 private val logger = KotlinLogging.logger {}

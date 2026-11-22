@@ -32,6 +32,14 @@ data class TriageSection(
 }
 
 @Serializable
+data class ConcurrencySection(val agents: Int = 8, val builds: Int = 2) {
+    init {
+        require(agents >= 1) { "concurrency.agents must be at least 1" }
+        require(builds >= 1) { "concurrency.builds must be at least 1" }
+    }
+}
+
+@Serializable
 data class EnvironmentSection(
     @SerialName("java_home") val javaHome: String = "",
     @SerialName("source_compatibility") val sourceCompatibility: String = "17",
@@ -134,6 +142,7 @@ data class VerificationSection(
 @Serializable
 data class ProjectConfig(
     val triage: TriageSection = TriageSection(),
+    val concurrency: ConcurrencySection = ConcurrencySection(),
     val paths: PathsSection = PathsSection(),
     val environment: EnvironmentSection = EnvironmentSection(),
     val guardrails: GuardrailsSection = GuardrailsSection(),

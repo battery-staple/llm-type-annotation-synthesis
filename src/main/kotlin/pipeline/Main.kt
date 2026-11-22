@@ -10,6 +10,7 @@ import com.github.ajalt.clikt.parameters.options.required
 import com.github.ajalt.clikt.parameters.types.int
 import java.io.File
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Semaphore
 import mu.KotlinLogging
 import pipeline.cas.CasEngine
 import pipeline.config.BenchmarkManifestLoader
@@ -79,7 +80,7 @@ private fun buildOrchestrator(
     stopAfter: StageName? = null
 ): PipelineOrchestrator {
     val openCodeDb = OpenCodeDb.prepare()
-    val agentRunner = CoroutineOpenCodeRunner(databasePath = openCodeDb?.absolutePath)
+    val agentRunner = CoroutineOpenCodeRunner(databasePath = openCodeDb?.absolutePath, concurrency = Semaphore(config.concurrency.agents))
     val javac = JavacRunner()
     return PipelineOrchestrator(
         ingestion = IngestionStage(buildRunner),
@@ -113,7 +114,7 @@ class InitCommand : CliktCommand(name = "init", help = "Initialize the SQLite da
                 val entries = BenchmarkManifestLoader.load(manifestFile, config)
                 val evalRepos = config.paths.evalRepos()
                 entries.forEach { entry ->
-                    val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
+                    val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility, Semaphore(config.concurrency.builds))
                     val repoName = File(entry.repoUrl).name.removeSuffix(".git")
                     val mirror = Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
                     val dir = File(".worktrees/init/${entry.benchmarkId.canonical}")
@@ -139,6 +140,8 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
     private val depth by option("--depth", help = "Override triage.depth (number of commits to crawl in crawler mode)").int()
     private val limit by option("--limit", help = "Override triage.limit (maximum verified samples sent to downstream stages)").int()
     private val jobs by option("--jobs", help = "Override triage.jobs (concurrent crawler commits; must be >= 1)").int()
+    private val agentJobs by option("--agent-jobs", help = "Maximum concurrent agent/LLM calls (must be >= 1)").int()
+    private val buildJobs by option("--build-jobs", help = "Maximum concurrent Gradle invocations (must be >= 1)").int()
     private val stopAfter by option(
         "--stop-after",
         help = "Stop once this stage succeeds and skip every later stage. " +
@@ -168,6 +171,8 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                 )
             } ?: c
             if (jobs != null && jobs!! < 1) throw UsageError("--jobs must be at least 1")
+            if (agentJobs != null && agentJobs!! < 1) throw UsageError("--agent-jobs must be at least 1")
+            if (buildJobs != null && buildJobs!! < 1) throw UsageError("--build-jobs must be at least 1")
             if (triageMode != null || depth != null || limit != null || jobs != null) {
                 val resolvedMode = triageMode?.let { raw ->
                     when (raw.lowercase()) {
@@ -188,6 +193,9 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                     throw UsageError("--jobs is only available in crawler mode")
                 }
             }
+            if (agentJobs != null || buildJobs != null) updated = updated.copy(concurrency = updated.concurrency.copy(
+                agents = agentJobs ?: updated.concurrency.agents, builds = buildJobs ?: updated.concurrency.builds
+            ))
             updated
         }
         val cas = CasEngine(File(config.cache.stagesDir), config.cache.enabled)
@@ -200,7 +208,7 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                 val target = pipeline.config.CrawlerManifestLoader.resolve(targets, benchmark)
                     ?: error("Repo '$benchmark' not found in ${crawlerFile.path}; known ids: ${targets.joinToString { it.benchmarkId.canonical }}")
                 checkRepoClean(File(target.repoUrl))
-                val buildRunner = GradleBuildRunner(config, target.build, target.sourceCompatibility, target.targetCompatibility)
+                val buildRunner = GradleBuildRunner(config, target.build, target.sourceCompatibility, target.targetCompatibility, Semaphore(config.concurrency.builds))
                 val orchestrator = buildOrchestrator(config, buildRunner, db, cas, stopAfterStage)
                 val outcomes = orchestrator.crawlAndRun(target, seed)
                 outcomes.forEach { printOutcome(it) }
@@ -210,7 +218,7 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                 val entry = BenchmarkManifestLoader.resolve(entries, benchmark)
                     ?: error("Benchmark '$benchmark' not found in ${manifestFile.path}; known ids: ${entries.joinToString { it.benchmarkId.canonical }}")
                 checkRepoClean(File(entry.repoUrl))
-                val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
+                val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility, Semaphore(config.concurrency.builds))
                 val orchestrator = buildOrchestrator(config, buildRunner, db, cas, stopAfterStage)
                 val outcome = orchestrator.runSingleSample(entry, seed)
                 printOutcome(outcome)

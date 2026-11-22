@@ -12,9 +12,14 @@ triage:
   # crawled commits are still ingested and triaged.
   # limit: 1000
   # Concurrent whole per-commit crawler runners; default 1, crawler-only.
-  # Agent/LLM and Gradle concurrency are not separately bounded.
+  # Agent/LLM and Gradle concurrency are configured independently below.
   # jobs: 1
   bugfix_threshold: 0.75
+
+# Global process limits. One build gate covers compile, test, and checker work.
+concurrency:
+  agents: 8
+  builds: 2
 
 paths:
   eval_repos_dir: "eval-repos"

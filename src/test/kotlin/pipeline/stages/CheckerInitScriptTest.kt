@@ -80,5 +80,6 @@ class CheckerInitScriptTest {
         override suspend fun readVerdict(runId: RunId): EvalVerdict? = null
         override suspend fun updateCommit(update: CommitTriageUpdate) = Unit
         override suspend fun recordRetry(event: pipeline.db.RetryEvent) = Unit
+        override suspend fun recordSubprocess(metric: pipeline.db.SubprocessMetricRecord) = Unit
     }
 }

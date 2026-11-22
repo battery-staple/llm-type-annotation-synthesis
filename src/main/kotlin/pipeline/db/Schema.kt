@@ -293,6 +293,18 @@ CREATE TABLE IF NOT EXISTS retry_events (
     error_message TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS subprocess_metrics (
+    metric_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_id TEXT NOT NULL, stage TEXT NOT NULL,
+    kind TEXT NOT NULL, tool TEXT NOT NULL, duration_ms INTEGER NOT NULL, exit_code INTEGER,
+    timed_out BOOLEAN NOT NULL, success BOOLEAN NOT NULL, error_message TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_subprocess_metrics_run_stage_kind ON subprocess_metrics(run_id, stage, kind);
+CREATE VIEW IF NOT EXISTS v_subprocess_summary AS
+SELECT stage, kind, COUNT(*) calls, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) failures,
+ SUM(CASE WHEN timed_out=1 THEN 1 ELSE 0 END) timeouts,
+ AVG(duration_ms) avg_duration_ms, MAX(duration_ms) max_duration_ms, SUM(duration_ms) total_duration_ms
+FROM subprocess_metrics GROUP BY stage, kind;
 CREATE VIEW IF NOT EXISTS v_db_operation_summary AS
 SELECT operation, COUNT(*) AS calls, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failures,
        AVG(duration_ms) AS avg_duration_ms, MAX(duration_ms) AS max_duration_ms

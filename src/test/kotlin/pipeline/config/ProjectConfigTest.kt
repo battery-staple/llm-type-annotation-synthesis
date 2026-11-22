@@ -3,8 +3,16 @@ package pipeline.config
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class ProjectConfigTest {
+    @Test
+    fun `concurrency defaults and validates positive limits`() {
+        assertEquals(8, ConcurrencySection().agents)
+        assertEquals(2, ConcurrencySection().builds)
+        assertFailsWith<IllegalArgumentException> { ConcurrencySection(agents = 0) }
+        assertFailsWith<IllegalArgumentException> { ConcurrencySection(builds = 0) }
+    }
     @Test
     fun `resolves relative paths against config directory`() {
         val dir = Files.createTempDirectory("project-config").toFile()

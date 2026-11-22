@@ -9,6 +9,8 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -52,7 +54,8 @@ class CoroutineOpenCodeRunner(
     // A pre-seeded per-run OpenCode DB. Unlike the blank temporary fallback,
     // this DB contains the OpenCode Go account/credential rows copied by
     // OpenCodeDb, so provider routing resolves opencode-go/* models.
-    private val databasePath: String? = null
+    private val databasePath: String? = null,
+    private val concurrency: Semaphore = Semaphore(8)
 ) : AgentRunner {
 
     private val log = KotlinLogging.logger {}
@@ -69,7 +72,7 @@ class CoroutineOpenCodeRunner(
         temperature: Double,
         environment: Map<String, String>,
         onEvent: (suspend (AgentTranscriptEvent) -> Unit)?
-    ): AgentRunResult = withContext(Dispatchers.IO) {
+    ): AgentRunResult = concurrency.withPermit { withContext(Dispatchers.IO) {
         val command = listOf(executable, "run", "--standalone", "--auto", "--format", "json", "-m", model, prompt)
         val builder = ProcessBuilder(command).directory(cwd)
         val env = builder.environment()
@@ -342,7 +345,7 @@ class CoroutineOpenCodeRunner(
             runCatching { onEvent?.invoke(event) }
         }
         AgentRunResult(exitCode = finalExit, stepsCounted = stepsCounted, transcript = transcript, timedOut = timedOut)
-    }
+    } }
 
     private fun summarizeToolArgs(args: Map<String, JsonElement>?): String {
         if (args.isNullOrEmpty()) return ""

@@ -39,6 +39,7 @@ class AutomatedTriageStageTest {
         override suspend fun finishRun(runId: RunId, status: String) = Unit
         override suspend fun readVerdict(runId: RunId): EvalVerdict? = null
         override suspend fun recordRetry(event: pipeline.db.RetryEvent) = Unit
+        override suspend fun recordSubprocess(metric: pipeline.db.SubprocessMetricRecord) = Unit
         override suspend fun updateCommit(update: CommitTriageUpdate) {
             updates += update
         }

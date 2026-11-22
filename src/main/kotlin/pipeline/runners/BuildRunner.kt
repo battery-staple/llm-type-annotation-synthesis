@@ -4,6 +4,8 @@ import java.io.File
 import javax.xml.parsers.DocumentBuilderFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.w3c.dom.Element
 import pipeline.config.BuildSection
 import pipeline.config.ProjectConfig
@@ -29,7 +31,8 @@ class GradleBuildRunner(
     private val config: ProjectConfig,
     private val build: BuildSection,
     private val sourceCompatibility: String,
-    private val targetCompatibility: String
+    private val targetCompatibility: String,
+    private val concurrency: Semaphore = Semaphore(2)
 ) : BuildRunner {
 
     override suspend fun compile(
@@ -242,10 +245,10 @@ class GradleBuildRunner(
         worktreeDir: File,
         args: List<String>,
         env: Map<String, String>
-    ): pipeline.util.ProcResult = withContext(Dispatchers.IO) {
+    ): pipeline.util.ProcResult = concurrency.withPermit { withContext(Dispatchers.IO) {
         val timeoutSeconds = maxOf(60L, config.agent.timeoutMs / 1000L)
         Processes.run(args, worktreeDir, environment = env, timeoutSeconds = timeoutSeconds)
-    }
+    } }
 
     private fun findTestXml(worktreeDir: File): List<File> =
         worktreeDir.walkTopDown()

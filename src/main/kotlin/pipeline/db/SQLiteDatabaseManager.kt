@@ -33,6 +33,18 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
         }
     }
 
+    override suspend fun recordSubprocess(metric: SubprocessMetricRecord) {
+        transaction("record_subprocess") { c ->
+            c.prepareStatement("""INSERT INTO subprocess_metrics(metric_id,run_id,step_id,stage,kind,tool,duration_ms,exit_code,timed_out,success,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)""").use { s ->
+                s.setString(1, metric.metricId); s.setString(2, metric.runId.value); s.setString(3, metric.stepId)
+                s.setString(4, metric.stage); s.setString(5, metric.kind); s.setString(6, metric.tool)
+                s.setLong(7, metric.durationMs); if (metric.exitCode == null) s.setNull(8, Types.INTEGER) else s.setInt(8, metric.exitCode)
+                s.setInt(9, if (metric.timedOut) 1 else 0); s.setInt(10, if (metric.success) 1 else 0)
+                s.setString(11, metric.errorMessage?.take(1000)); s.executeUpdate()
+            }
+        }
+    }
+
     companion object {
         private fun openConnection(file: File): Connection {
             file.parentFile?.mkdirs()

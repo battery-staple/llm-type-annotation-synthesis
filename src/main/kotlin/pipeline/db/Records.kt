@@ -241,6 +241,12 @@ data class LlmInvocationRecord(
     val latencyMs: Long
 )
 
+data class SubprocessMetricRecord(
+    val metricId: String, val runId: RunId, val stepId: String, val stage: String,
+    val kind: String, val tool: String, val durationMs: Long, val exitCode: Int?,
+    val timedOut: Boolean, val success: Boolean, val errorMessage: String?
+)
+
 data class TelemetryProjection(
     val synthesisRun: SynthesisRunRecord? = null,
     val qualifiers: List<QualifierRecord> = emptyList(),
