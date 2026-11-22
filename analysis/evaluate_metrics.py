@@ -104,6 +104,17 @@ def main() -> int:
     else:
         print("  Unavailable: this database predates v_db_operation_summary.")
 
+    section("Subprocess timing (Gradle / checker vs. LLM)")
+    if has_view(connection, "v_subprocess_summary"):
+        print_table(query(connection, """
+            SELECT stage, kind, calls, failures, timeouts,
+                   avg_duration_ms, max_duration_ms, total_duration_ms
+            FROM v_subprocess_summary ORDER BY total_duration_ms DESC
+        """))
+        print("  Compare subprocess wall time by stage/kind with the LLM latency and token totals below.")
+    else:
+        print("  Unavailable: this database predates v_subprocess_summary (or subprocess_metrics).")
+
     section("Retry telemetry")
     if has_view(connection, "v_retry_summary"):
         print_table(query(connection, """

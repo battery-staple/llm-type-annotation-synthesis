@@ -1226,6 +1226,14 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
         guardrail_events = group_by_step("guardrail_events", "turn_index ASC, created_at ASC")
         agent_turns = group_by_step("agent_turns", "turn_index ASC, created_at ASC")
         llm_invocations = group_by_step("llm_invocations", "COALESCE(turn_index, 0) ASC, created_at ASC")
+        try:
+            run["subprocess_metrics"] = rows_to_dicts(conn.execute(
+                """SELECT stage, kind, duration_ms, exit_code, timed_out
+                   FROM subprocess_metrics WHERE run_id = ?
+                   ORDER BY created_at DESC LIMIT 50""", (run_id,)
+            ).fetchall())
+        except sqlite3.Error:
+            run["subprocess_metrics"] = []
 
         for step in steps:
             sid = step["step_id"]
@@ -1388,10 +1396,11 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
             if path == "/api/telemetry":
                 with connect_db(self.db_path) as conn:
-                    payload = {"db_operations": [], "retries": [], "recent_retries": [], "notes": []}
+                    payload = {"db_operations": [], "retries": [], "subprocesses": [], "recent_retries": [], "notes": []}
                     for key, sql in (
                         ("db_operations", "SELECT operation, calls, failures, avg_duration_ms, max_duration_ms FROM v_db_operation_summary ORDER BY avg_duration_ms DESC"),
                         ("retries", "SELECT stage, error_class, attempts, retries FROM v_retry_summary ORDER BY attempts DESC"),
+                        ("subprocesses", "SELECT stage, kind, calls, failures, timeouts, avg_duration_ms, max_duration_ms, total_duration_ms FROM v_subprocess_summary ORDER BY total_duration_ms DESC"),
                     ):
                         try:
                             payload[key] = rows_to_dicts(conn.execute(sql).fetchall())
