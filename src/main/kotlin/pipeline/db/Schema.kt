@@ -271,6 +271,37 @@ CREATE TABLE IF NOT EXISTS llm_invocations (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS db_operation_metrics (
+    metric_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation TEXT NOT NULL,
+    duration_ms REAL NOT NULL,
+    success BOOLEAN NOT NULL,
+    affected_rows INTEGER,
+    error_message TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS retry_events (
+    retry_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    max_attempts INTEGER NOT NULL,
+    will_retry BOOLEAN NOT NULL,
+    delay_ms INTEGER NOT NULL,
+    error_class TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE VIEW IF NOT EXISTS v_db_operation_summary AS
+SELECT operation, COUNT(*) AS calls, SUM(CASE WHEN success=0 THEN 1 ELSE 0 END) AS failures,
+       AVG(duration_ms) AS avg_duration_ms, MAX(duration_ms) AS max_duration_ms
+FROM db_operation_metrics GROUP BY operation;
+CREATE VIEW IF NOT EXISTS v_retry_summary AS
+SELECT stage, error_class, COUNT(*) AS attempts,
+       SUM(CASE WHEN will_retry=1 THEN 1 ELSE 0 END) AS retries
+FROM retry_events GROUP BY stage, error_class;
+
 DROP VIEW IF EXISTS v_evaluation_verdicts;
 CREATE VIEW v_evaluation_verdicts AS
 WITH latest_final_checker AS (
@@ -358,6 +389,10 @@ SELECT
     r.verification_scope,
     r.sample_index,
     r.status,
+    CASE WHEN r.status = 'triage_only' THEN 'triage_only'
+         WHEN r.status IN ('success') AND r.completed_at IS NOT NULL THEN 'evaluated'
+         WHEN r.status LIKE 'stopped_after_%' THEN 'not_evaluated'
+         ELSE 'not_evaluated' END AS outcome_kind,
     fc.error_count AS remaining_type_errors,
     CASE
         WHEN u.executed > 0 AND u.tests_found > 0 AND u.compile_failed = 0 AND u.timed_out = 0
@@ -368,6 +403,7 @@ SELECT
     reg.reg_test_passed,
     COALESCE(u.skipped, 0) AS skipped_tests,
     CASE
+        WHEN r.status = 'triage_only' THEN NULL
         WHEN r.status <> 'success' OR r.completed_at IS NULL THEN 'verification_missing'
         WHEN fc.checker_run_id IS NULL
              OR fc.checker_invoked = 0

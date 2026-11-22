@@ -7,6 +7,7 @@ import pipeline.db.CommitTriageUpdate
 import pipeline.db.EvaluationRunRecord
 import pipeline.db.StepTrajectoryRecord
 import pipeline.db.TelemetryProjection
+import pipeline.db.RetryEvent
 import pipeline.stages.AgentTranscriptEvent
 import pipeline.stages.CheckerCategory
 import pipeline.stages.CommitClassification
@@ -178,4 +179,5 @@ interface DatabasePort {
     suspend fun finishRun(runId: RunId, status: String)
     suspend fun readVerdict(runId: RunId): EvalVerdict?
     suspend fun updateCommit(update: CommitTriageUpdate)
+    suspend fun recordRetry(event: RetryEvent)
 }

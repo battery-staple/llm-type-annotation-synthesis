@@ -83,9 +83,12 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
         return columns
     }
 
-    suspend fun <T> transaction(block: (Connection) -> T): T =
+    suspend fun <T> transaction(operation: String = "transaction", block: (Connection) -> T): T =
         mutex.withLock {
             withContext(dbDispatcher) {
+                val started = System.nanoTime()
+                var success = false
+                var error: Throwable? = null
                 check(!inTransaction) { "Nested transactions are not supported" }
                 check(connection.autoCommit) {
                     "Connection must be in auto-commit mode; BEGIN IMMEDIATE manages the transaction"
@@ -95,8 +98,10 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
                 try {
                     val result = block(connection)
                     connection.createStatement().use { it.execute("COMMIT") }
+                    success = true
                     result
                 } catch (t: Throwable) {
+                    error = t
                     runCatching {
                         connection.createStatement().use { it.execute("ROLLBACK") }
                     }
@@ -104,17 +109,32 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
                     throw t
                 } finally {
                     inTransaction = false
+                    recordOperationMetric(operation, (System.nanoTime() - started) / 1_000_000.0, success, error)
                 }
             }
         }
 
     /** Serialized read on the same single connection (MVP intentionally has no reader pool). */
-    suspend fun <T> read(block: (Connection) -> T): T =
+    suspend fun <T> read(operation: String = "read", block: (Connection) -> T): T =
         mutex.withLock {
             withContext(dbDispatcher) {
-                block(connection)
+                val started = System.nanoTime()
+                var success = false
+                var error: Throwable? = null
+                try { block(connection).also { success = true } }
+                catch (t: Throwable) { error = t; throw t }
+                finally { recordOperationMetric(operation, (System.nanoTime() - started) / 1_000_000.0, success, error) }
             }
         }
+
+    private fun recordOperationMetric(operation: String, durationMs: Double, success: Boolean, error: Throwable?) {
+        runCatching {
+            connection.prepareStatement("INSERT INTO db_operation_metrics(operation,duration_ms,success,error_message) VALUES(?,?,?,?)").use { s ->
+                s.setString(1, operation); s.setDouble(2, durationMs); s.setInt(3, if (success) 1 else 0)
+                s.setString(4, error?.message?.take(300)); s.executeUpdate()
+            }
+        }.onFailure { logger.warn(it) { "Could not record database operation metric" } }
+    }
 
     val jdbc: Connection get() = connection
 

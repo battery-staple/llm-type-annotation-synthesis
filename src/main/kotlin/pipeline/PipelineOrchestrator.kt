@@ -464,6 +464,9 @@ class PipelineOrchestrator(
                         )
                     )
                     logger.info { "CAS HIT for ${stage.stageName.identifier} key=$cacheKey" }
+                    if (restored is VerifiedSample) database.updateCommit(CommitTriageUpdate(
+                        commitHash = restored.commitHash.hash, testPatch = restored.testPatchFile.absolutePath
+                    ))
                     return restored
                 }
                 logger.warn { "CAS bundle ${cached.dir} could not be restored for ${stage.stageName.identifier}; re-executing" }
@@ -526,7 +529,11 @@ class PipelineOrchestrator(
                     // Durable transcript is now in the published bundle; drop the live copy.
                     liveTranscript.delete()
                     logger.info { "Stage ${stage.stageName.identifier} succeeded (attempt $attempt) key=${outcome.casKey}" }
-                    return relocateArtifacts(outcome.data, publishedDir)
+                    val relocated = relocateArtifacts(outcome.data, publishedDir)
+                    if (relocated is VerifiedSample) database.updateCommit(CommitTriageUpdate(
+                        commitHash = relocated.commitHash.hash, testPatch = relocated.testPatchFile.absolutePath
+                    ))
+                    return relocated
                 }
                 is StageResult.Discard -> {
                     if (outcome.artifactsManifest != null && outcome.bundleDir != null) {
@@ -564,8 +571,17 @@ class PipelineOrchestrator(
                     logger.warn(outcome.error) {
                         "Transient failure in ${stage.stageName.identifier} (attempt $attempt/$maxTransientAttempts)"
                     }
-                    if (attempt >= maxTransientAttempts) throw outcome.error
-                    delay((1L shl attempt) * 1000L)
+                    val willRetry = attempt < maxTransientAttempts
+                    val delayMs = if (willRetry) (1L shl attempt) * 1000L else 0L
+                    database.recordRetry(pipeline.db.RetryEvent(
+                        retryId = UUID.randomUUID().toString(), runId = ctx.runId.value, stepId = stepId,
+                        stage = stage.stageName.identifier, attemptNumber = attempt, maxAttempts = maxTransientAttempts,
+                        willRetry = willRetry, delayMs = delayMs,
+                        errorClass = outcome.error.javaClass.simpleName,
+                        errorMessage = (outcome.error.message ?: outcome.error.toString()).take(1000)
+                    ))
+                    if (!willRetry) throw outcome.error
+                    delay(delayMs)
                     attempt++
                 }
             }
@@ -644,6 +660,8 @@ class PipelineOrchestrator(
             put("run_id", JsonPrimitive(runId.value))
             put("verdict", JsonPrimitive(EvalVerdict.VERIFICATION_MISSING.name.lowercase()))
             put("message", JsonPrimitive(message))
+            put("limit_skipped", JsonPrimitive(message.contains("downstream limit")))
+            put("triage_only", JsonPrimitive(message.contains("downstream limit")))
             put("completed_at", JsonPrimitive(Instant.now().toString()))
         }
         summary.parentFile.mkdirs()

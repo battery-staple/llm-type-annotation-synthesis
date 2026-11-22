@@ -12,9 +12,26 @@ import pipeline.stages.AgentTranscriptEvent
 import pipeline.stages.EvalVerdict
 import pipeline.util.PipelineJson
 
+data class RetryEvent(
+    val retryId: String, val runId: String, val stepId: String, val stage: String,
+    val attemptNumber: Int, val maxAttempts: Int, val willRetry: Boolean, val delayMs: Long,
+    val errorClass: String, val errorMessage: String
+)
+
 class SQLiteDatabaseManager(private val databaseFile: File) :
     DatabaseManager(openConnection(databaseFile)),
     pipeline.ports.DatabasePort {
+
+    override suspend fun recordRetry(event: RetryEvent) {
+        transaction("record_retry") { c ->
+            c.prepareStatement("""INSERT INTO retry_events(retry_id,run_id,step_id,stage,attempt_number,max_attempts,will_retry,delay_ms,error_class,error_message) VALUES(?,?,?,?,?,?,?,?,?,?)""").use { s ->
+                s.setString(1, event.retryId); s.setString(2, event.runId); s.setString(3, event.stepId)
+                s.setString(4, event.stage); s.setInt(5, event.attemptNumber); s.setInt(6, event.maxAttempts)
+                s.setInt(7, if (event.willRetry) 1 else 0); s.setLong(8, event.delayMs)
+                s.setString(9, event.errorClass); s.setString(10, event.errorMessage.take(1000)); s.executeUpdate()
+            }
+        }
+    }
 
     companion object {
         private fun openConnection(file: File): Connection {
@@ -25,7 +42,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
     }
 
     override suspend fun recordRunStart(run: EvaluationRunRecord) {
-        transaction { c ->
+        transaction("record_run_start") { c ->
             c.prepareStatement(
                 """INSERT OR IGNORE INTO repositories
                    (repo_id, name, git_url, default_branch, config_yaml)
@@ -75,7 +92,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
     }
 
     override suspend fun recordStep(step: StepTrajectoryRecord) {
-        transaction { c ->
+        transaction("record_step") { c ->
             c.prepareStatement(
                 """INSERT INTO step_trajectories
                    (step_id, run_id, step_number, attempt_number, step_name, cas_key, cache_hit,
@@ -117,7 +134,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
     }
 
     override suspend fun recordStageTelemetry(projection: TelemetryProjection) {
-        transaction { c -> TelemetryProjector.project(c, projection) }
+        transaction("record_stage_telemetry") { c -> TelemetryProjector.project(c, projection) }
     }
 
     override suspend fun recordVerdict(runId: pipeline.stages.RunId, verdict: EvalVerdict) {
@@ -154,7 +171,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
         // Run finalization must survive coroutine cancellation; otherwise an
         // interrupted run stays "running" in telemetry forever.
         withContext(NonCancellable) {
-            transaction { c ->
+            transaction("finish_run") { c ->
                 c.prepareStatement("UPDATE evaluation_runs SET status=?, completed_at=? WHERE run_id=?")
                     .use { s ->
                         s.setString(1, status)
@@ -166,7 +183,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
         }
     }
 
-    override suspend fun readVerdict(runId: pipeline.stages.RunId): EvalVerdict? = read { c ->
+    override suspend fun readVerdict(runId: pipeline.stages.RunId): EvalVerdict? = read("read_verdict") { c ->
         c.prepareStatement("SELECT verdict FROM v_evaluation_verdicts WHERE run_id=?").use { s ->
             s.setString(1, runId.value)
             s.executeQuery().use { rs ->
@@ -176,7 +193,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
     }
 
     override suspend fun updateCommit(update: CommitTriageUpdate) {
-        transaction { c ->
+        transaction("update_commit") { c ->
             val assignments = mutableListOf<String>()
             val values = mutableListOf<Pair<Int, Any?>>()
             fun add(column: String, value: Any?) {

@@ -228,7 +228,6 @@ internal object TriageVerifier {
                     testMethodsExtracted = 1,
                     regressionTestClass = req.regressionTest.testClass.value,
                     regressionTestMethod = req.regressionTest.testMethod,
-                    testPatch = patchFileRef.absolutePath
                 )
             )
             log.info { "Triage ${req.benchmarkId}: verified (T_reg fails on C-1, passes on C)" }
