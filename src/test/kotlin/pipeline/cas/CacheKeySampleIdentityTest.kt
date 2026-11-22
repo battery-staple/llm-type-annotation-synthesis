@@ -128,6 +128,15 @@ class CacheKeySampleIdentityTest {
         checkerCategory = CheckerCategory.BUILTIN_CHECKER
     )
 
+    private val noopLlmClient = object : pipeline.ports.SingleShotLlmClient {
+        override suspend fun classifyCommit(
+            prompt: String,
+            model: String,
+            temperature: Double
+        ): pipeline.ports.SingleShotLlmResponse<pipeline.ports.TriageClassification> =
+            error("llm client must not be used for cache-key computation")
+    }
+
     @Test
     fun `deterministic stages declare themselves deterministic`() {
         assertTrue(IngestionStage(noopRunner).isDeterministic)
@@ -136,7 +145,7 @@ class CacheKeySampleIdentityTest {
         assertFalse(SynthesisStage(noopAgent, noopJavac).isDeterministic)
         assertFalse(ApplicationStage(noopAgent, noopRunner).isDeterministic)
         assertFalse(RepairStage(noopAgent, noopRunner).isDeterministic)
-        assertFalse(AutomatedTriageStage().isDeterministic)
+        assertFalse(AutomatedTriageStage(noopLlmClient, noopRunner).isDeterministic)
     }
 
     @Test

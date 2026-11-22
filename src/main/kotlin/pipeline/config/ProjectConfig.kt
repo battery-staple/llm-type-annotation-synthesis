@@ -11,13 +11,17 @@ import pipeline.stages.CheckerCategory
 import pipeline.stages.FreedomLevel
 import pipeline.stages.GuardrailsMode
 import pipeline.stages.LocalAnnotationPolicy
+import pipeline.stages.TriageMode
 import pipeline.stages.VerificationScope
 import pipeline.util.Env
 
 @Serializable
 data class TriageSection(
-    val mode: String = "manifest",
-    @SerialName("manifest_file") val manifestFile: String = "benchmarks.yaml"
+    val mode: TriageMode = TriageMode.MANIFEST,
+    @SerialName("manifest_file") val manifestFile: String = "benchmarks.yaml",
+    val depth: Int = 20,
+    val limit: Int? = null,
+    @SerialName("bugfix_threshold") val bugfixThreshold: Double = 0.75
 )
 
 @Serializable
@@ -165,9 +169,6 @@ data class ProjectConfig(
             )
             require(config.verification.baseline == "none") {
                 "verification.baseline='${config.verification.baseline}' is not supported in the MVP; only 'none' is accepted"
-            }
-            require(config.triage.mode in setOf("manifest", "crawler")) {
-                "triage.mode='${config.triage.mode}' is invalid"
             }
             return config
         }

@@ -46,9 +46,111 @@ class PipelineOrchestrator(
     private val cas: CasEngine,
     private val database: DatabasePort,
     private val config: ProjectConfig,
-    private val maxTransientAttempts: Int = 3
+    private val maxTransientAttempts: Int = 3,
+    private val automatedTriage: AutomatedTriageStage? = null
 ) {
+    suspend fun crawlAndRun(entry: BenchmarkEntry, sampleSeed: Int): List<PipelineRunOutcome> {
+        val autoTriage = automatedTriage
+            ?: throw IllegalStateException("AutomatedTriageStage is required for crawler mode")
+        val evalRepos = config.paths.evalRepos()
+        val repoName = File(entry.repoUrl).name.removeSuffix(".git")
+        val mirror = Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
+        val startRef = if (runCatching { Git.revParse(mirror, entry.defaultBranch) }.isSuccess) {
+            entry.defaultBranch
+        } else {
+            logger.warn { "Crawler: defaultBranch '${entry.defaultBranch}' not found in mirror; falling back to HEAD" }
+            "HEAD"
+        }
+        val commits = Git.listCommits(mirror, startRef, config.triage.depth)
+        val limit = config.triage.limit
+        val outcomes = mutableListOf<PipelineRunOutcome>()
+        var verifiedCount = 0
+
+        for (meta in commits) {
+            if (limit != null && verifiedCount >= limit) {
+                logger.info { "Crawler reached verified commit limit=$limit; stopping" }
+                break
+            }
+            val commitHash = CommitHash(meta.hash)
+            val parentHash = CommitHash(meta.parents.firstOrNull() ?: "")
+            val commitEntry = entry.copy(
+                benchmarkId = BenchmarkId.of(entry.benchmarkId.canonical, commitHash),
+                commitHash = commitHash,
+                parentHash = parentHash,
+                description = meta.message
+            )
+            val outcome = runSingleSampleCrawler(commitEntry, meta, sampleSeed, autoTriage)
+            outcomes += outcome
+            if (!outcome.discarded) {
+                verifiedCount++
+            }
+        }
+        return outcomes
+    }
+
     suspend fun runSingleSample(entry: BenchmarkEntry, sampleSeed: Int): PipelineRunOutcome {
+        val (runId, worktreeBase, baseCtx) = initRunContext(entry, sampleSeed)
+        return withRunHandling(runId) {
+            val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
+                ?: return@withRunHandling finishDiscarded(runId, "triage preconditions failed during ingestion")
+            val sample = stageOrDiscard(
+                baseCtx, 2, triage,
+                ManifestTriageInput(entry.benchmarkId, worktree, entry.regressionTest, entry.testPatchFile)
+            ) ?: return@withRunHandling finishDiscarded(runId, "triage discarded the sample")
+
+            runDownstreamStages(runId, entry, sample, baseCtx, worktreeBase)
+        }
+    }
+
+    private suspend fun runSingleSampleCrawler(
+        entry: BenchmarkEntry,
+        meta: CommitMetadata,
+        sampleSeed: Int,
+        autoTriage: AutomatedTriageStage
+    ): PipelineRunOutcome {
+        val (runId, worktreeBase, baseCtx) = initRunContext(entry, sampleSeed)
+        return withRunHandling(runId) {
+            if (meta.parents.size != 1) {
+                database.updateCommit(
+                    CommitTriageUpdate(
+                        commitHash = entry.commitHash.hash,
+                        triageStatus = DiscardReason.MERGE_COMMIT.dbTriageStatus,
+                        discardReason = DiscardReason.MERGE_COMMIT.wireName
+                    )
+                )
+                return@withRunHandling finishDiscarded(runId, "merge commit (${meta.parents.size} parents) skipped")
+            }
+            val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
+                ?: return@withRunHandling finishDiscarded(runId, "triage preconditions failed during ingestion")
+            val sample = stageOrDiscard(
+                baseCtx, 2, autoTriage,
+                AutomatedTriageInput(entry.benchmarkId, worktree, meta)
+            ) ?: return@withRunHandling finishDiscarded(runId, "automated triage discarded the sample")
+
+            val verifiedEntry = entry.copy(regressionTest = sample.regressionTest)
+            runDownstreamStages(runId, verifiedEntry, sample, baseCtx, worktreeBase)
+        }
+    }
+
+    private suspend fun withRunHandling(
+        runId: RunId,
+        block: suspend () -> PipelineRunOutcome
+    ): PipelineRunOutcome = try {
+        block()
+    } catch (halt: StageHaltException) {
+        logger.error(halt) { "Run $runId halted" }
+        database.finishRun(runId, "failed")
+        PipelineRunOutcome(runId, incompleteResult(runId, halt.message ?: "stage halted"), haltMessage = halt.message)
+    } catch (t: Throwable) {
+        logger.error(t) { "Run $runId failed" }
+        runCatching { database.finishRun(runId, "failed") }
+        throw t
+    }
+
+    private suspend fun initRunContext(
+        entry: BenchmarkEntry,
+        sampleSeed: Int
+    ): Triple<RunId, File, RunContext> {
         val runId = RunId(UUID.randomUUID().toString())
         val startedAt = Instant.now().toString()
         val worktreeBase = File(".worktrees/run_$runId")
@@ -102,75 +204,67 @@ class PipelineOrchestrator(
             productionRoots = entry.productionRoots,
             testRoots = entry.testRoots
         )
+        return Triple(runId, worktreeBase, baseCtx)
+    }
 
-        try {
-            val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
-                ?: return finishDiscarded(runId, "triage preconditions failed during ingestion")
-            val sample = stageOrDiscard(
-                baseCtx, 2, triage,
-                ManifestTriageInput(entry.benchmarkId, worktree, entry.regressionTest, entry.testPatchFile)
-            ) ?: return finishDiscarded(runId, "triage discarded the sample")
+    private suspend fun runDownstreamStages(
+        runId: RunId,
+        entry: BenchmarkEntry,
+        sample: VerifiedSample,
+        baseCtx: RunContext,
+        worktreeBase: File
+    ): PipelineRunOutcome {
+        val productionDiff = productionDiff(entry)
+        val lattice = requireStage(
+            baseCtx, 3, synthesis,
+            SynthesisInput(entry.toBugContext(commitDiff = productionDiff))
+        )
 
-            val productionDiff = productionDiff(entry)
-            val lattice = requireStage(
-                baseCtx, 3, synthesis,
-                SynthesisInput(entry.toBugContext(commitDiff = productionDiff))
-            )
+        val applicationWorktree = worktreeBase.resolve("application")
+        materializeC1(entry, applicationWorktree)
+        val annotated = requireStage(
+            baseCtx, 4, application,
+            ApplicationInput(ApplicationTarget(sample.parentHash, applicationWorktree), lattice)
+        )
 
-            val applicationWorktree = worktreeBase.resolve("application")
-            materializeC1(entry, applicationWorktree)
-            val annotated = requireStage(
-                baseCtx, 4, application,
-                ApplicationInput(ApplicationTarget(sample.parentHash, applicationWorktree), lattice)
-            )
-
-            val repairWorktree = worktreeBase.resolve("repair")
-            materializeC1(entry, repairWorktree)
-            val patchCheck = Git.checkPatch(repairWorktree, annotated.annotationsPatch)
-            if (patchCheck.exitCode != 0) {
-                throw StageHaltException("annotations.patch does not apply cleanly to clean C-1: ${patchCheck.output.take(2000)}")
-            }
-            val apply = Git.applyPatch(repairWorktree, annotated.annotationsPatch)
-            if (apply.exitCode != 0) {
-                throw StageHaltException("failed to apply annotations.patch to repair baseline: ${apply.output.take(2000)}")
-            }
-            val repaired = requireStage(
-                baseCtx, 5, repair,
-                RepairInput(
-                    BlindRepairTarget(sample.parentHash, repairWorktree),
-                    lattice.toCheckerConfig(),
-                    annotated.initialCheckerErrorsLog,
-                    annotated.annotationsPatch
-                )
-            )
-
-            val verificationWorktree = worktreeBase.resolve("verification")
-            materializeC1(entry, verificationWorktree)
-            val result = requireStage(
-                baseCtx, 6, verification,
-                VerificationInput(
-                    sample,
-                    repaired,
-                    lattice,
-                    annotated.annotationsPatch,
-                    verificationWorktree,
-                    config.verification.scope
-                )
-            )
-
-            database.finishRun(runId, "success")
-            database.recordVerdict(runId, result.verdict)
-            logger.info { "Run $runId completed with verdict ${result.verdict}" }
-            return PipelineRunOutcome(runId, result)
-        } catch (halt: StageHaltException) {
-            logger.error(halt) { "Run $runId halted" }
-            database.finishRun(runId, "failed")
-            return PipelineRunOutcome(runId, incompleteResult(runId, halt.message ?: "stage halted"), haltMessage = halt.message)
-        } catch (t: Throwable) {
-            logger.error(t) { "Run $runId failed" }
-            runCatching { database.finishRun(runId, "failed") }
-            throw t
+        val repairWorktree = worktreeBase.resolve("repair")
+        materializeC1(entry, repairWorktree)
+        val patchCheck = Git.checkPatch(repairWorktree, annotated.annotationsPatch)
+        if (patchCheck.exitCode != 0) {
+            throw StageHaltException("annotations.patch does not apply cleanly to clean C-1: ${patchCheck.output.take(2000)}")
         }
+        val apply = Git.applyPatch(repairWorktree, annotated.annotationsPatch)
+        if (apply.exitCode != 0) {
+            throw StageHaltException("failed to apply annotations.patch to repair baseline: ${apply.output.take(2000)}")
+        }
+        val repaired = requireStage(
+            baseCtx, 5, repair,
+            RepairInput(
+                BlindRepairTarget(sample.parentHash, repairWorktree),
+                lattice.toCheckerConfig(),
+                annotated.initialCheckerErrorsLog,
+                annotated.annotationsPatch
+            )
+        )
+
+        val verificationWorktree = worktreeBase.resolve("verification")
+        materializeC1(entry, verificationWorktree)
+        val result = requireStage(
+            baseCtx, 6, verification,
+            VerificationInput(
+                sample,
+                repaired,
+                lattice,
+                annotated.annotationsPatch,
+                verificationWorktree,
+                config.verification.scope
+            )
+        )
+
+        database.finishRun(runId, "success")
+        database.recordVerdict(runId, result.verdict)
+        logger.info { "Run $runId completed with verdict ${result.verdict}" }
+        return PipelineRunOutcome(runId, result)
     }
 
     private suspend fun finishDiscarded(runId: RunId, message: String): PipelineRunOutcome {

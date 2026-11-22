@@ -6,7 +6,7 @@ consumed by the automated crawler.
 
 ## Instructions
 
-- Examine the commit message and the production diff provided by the harness.
+- Examine the commit message and the commit diff provided by the harness.
 - Decide whether the commit is a genuine bug fix (`bugfix`) or anything else
   (`non_bugfix`: feature, refactor, documentation, test-only, revert, merge).
 - Score your confidence in `[0.0, 1.0]`.

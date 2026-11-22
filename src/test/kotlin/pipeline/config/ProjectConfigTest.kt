@@ -58,7 +58,7 @@ class ProjectConfigTest {
 
             val config = ProjectConfig.load(file)
 
-            assertEquals("crawler", config.triage.mode)
+            assertEquals(pipeline.stages.TriageMode.CRAWLER, config.triage.mode)
             assertEquals(dir.resolve("repos").toString(), config.paths.evalReposDir)
             assertEquals(dir.resolve("data/pipeline.db").toString(), config.paths.databaseFile().path)
             assertEquals("", config.environment.javaHome)

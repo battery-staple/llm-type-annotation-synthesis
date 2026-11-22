@@ -19,7 +19,9 @@ import pipeline.runners.CoroutineOpenCodeRunner
 import pipeline.runners.GradleBuildRunner
 import pipeline.runners.JavacRunner
 import pipeline.runners.OpenCodeDb
+import pipeline.runners.OpenCodeSingleShotLlmClient
 import pipeline.stages.ApplicationStage
+import pipeline.stages.AutomatedTriageStage
 import pipeline.stages.BenchmarkEntry
 import pipeline.stages.IngestionStage
 import pipeline.stages.ManifestTriageStage
@@ -60,7 +62,8 @@ private fun buildOrchestrator(
         verification = VerificationStage(buildRunner),
         cas = cas,
         database = db,
-        config = config
+        config = config,
+        automatedTriage = AutomatedTriageStage(OpenCodeSingleShotLlmClient(), buildRunner)
     )
 }
 
@@ -98,16 +101,18 @@ class InitCommand : CliktCommand(name = "init", help = "Initialize the SQLite da
     }
 }
 
-class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipeline for one curated benchmark") {
+class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipeline for one curated benchmark or crawl a repository") {
     private val configPath by option("--config", help = "Path to project_config.yaml").required()
     private val benchmark by option("--benchmark", help = "Benchmark id from benchmarks.yaml").required()
     private val seed by option("--seed", help = "Deterministic sample seed / sample index").int().default(0)
     private val model by option("--model", help = "Override the configured model for every stage")
+    private val depth by option("--depth", help = "Override triage.depth (number of commits to crawl in crawler mode)").int()
+    private val limit by option("--limit", help = "Override triage.limit (max verified commits to run in crawler mode)").int()
 
     override fun run() = runBlocking {
         val loaded = loadConfig(configPath)
         val config = loaded.let { c ->
-            model?.let { chosen ->
+            var updated = model?.let { chosen ->
                 c.copy(
                     model = ModelSection(
                         default = chosen,
@@ -118,9 +123,15 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                     )
                 )
             } ?: c
-        }
-        require(config.triage.mode == "manifest") {
-            "triage.mode='${config.triage.mode}' is not supported; the automated crawler is deferred (design plan §7.4)"
+            if (depth != null || limit != null) {
+                updated = updated.copy(
+                    triage = updated.triage.copy(
+                        depth = depth ?: updated.triage.depth,
+                        limit = limit ?: updated.triage.limit
+                    )
+                )
+            }
+            updated
         }
         val manifestFile = File(config.triage.manifestFile)
         val entries = BenchmarkManifestLoader.load(manifestFile, config)
@@ -139,8 +150,13 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
             // Sequential MVP: a run still marked running is stale.
             db.markStaleRunningRuns()
             val orchestrator = buildOrchestrator(config, entry, db, cas)
-            val outcome = orchestrator.runSingleSample(entry, seed)
-            printOutcome(outcome)
+            if (config.triage.mode == pipeline.stages.TriageMode.CRAWLER) {
+                val outcomes = orchestrator.crawlAndRun(entry, seed)
+                outcomes.forEach { printOutcome(it) }
+            } else {
+                val outcome = orchestrator.runSingleSample(entry, seed)
+                printOutcome(outcome)
+            }
         }
     }
 }

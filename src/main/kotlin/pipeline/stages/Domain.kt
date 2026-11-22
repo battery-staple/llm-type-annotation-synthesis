@@ -8,6 +8,7 @@ import pipeline.config.BuildSection
 import pipeline.config.ProjectConfig
 import pipeline.db.TelemetryProjection
 import pipeline.ports.DatabasePort
+import pipeline.util.CommitMetadata
 import pipeline.validators.SourceRoots
 
 // --- Strongly-Typed Domain Primitives & Value Classes ---
@@ -139,14 +140,23 @@ enum class AgentEventType {
 }
 
 @Serializable
-enum class DiscardReason {
-    @SerialName("no_test_found") NO_TEST_FOUND,
-    @SerialName("test_compilation_failure") TEST_COMPILATION_FAILURE,
-    @SerialName("test_passes_unpatched") TEST_PASSES_UNPATCHED,
-    @SerialName("build_broken_unpatched") BUILD_BROKEN_UNPATCHED,
-    @SerialName("invalid_test_patch") INVALID_TEST_PATCH,
-    @SerialName("regression_does_not_pass_on_fixed_commit") REGRESSION_DOES_NOT_PASS_ON_FIXED_COMMIT,
-    @SerialName("fixed_commit_unavailable") FIXED_COMMIT_UNAVAILABLE
+enum class TriageMode {
+    @SerialName("manifest") MANIFEST,
+    @SerialName("crawler") CRAWLER
+}
+
+@Serializable
+enum class DiscardReason(val wireName: String, val dbTriageStatus: String?) {
+    @SerialName("no_test_found") NO_TEST_FOUND("no_test_found", "discarded_no_test"),
+    @SerialName("test_compilation_failure") TEST_COMPILATION_FAILURE("test_compilation_failure", "discarded_non_compiling"),
+    @SerialName("test_passes_unpatched") TEST_PASSES_UNPATCHED("test_passes_unpatched", "discarded_passes_unpatched"),
+    @SerialName("build_broken_unpatched") BUILD_BROKEN_UNPATCHED("build_broken_unpatched", null),
+    @SerialName("invalid_test_patch") INVALID_TEST_PATCH("invalid_test_patch", "discarded_invalid_test_patch"),
+    @SerialName("regression_does_not_pass_on_fixed_commit") REGRESSION_DOES_NOT_PASS_ON_FIXED_COMMIT("regression_does_not_pass_on_fixed_commit", "discarded_regression_not_passing_on_fixed_commit"),
+    @SerialName("fixed_commit_unavailable") FIXED_COMMIT_UNAVAILABLE("fixed_commit_unavailable", "discarded_fixed_commit_unavailable"),
+    @SerialName("not_bugfix") NOT_BUGFIX("not_bugfix", "non_bugfix"),
+    @SerialName("diff_too_large") DIFF_TOO_LARGE("diff_too_large", "discarded_diff_too_large"),
+    @SerialName("merge_commit") MERGE_COMMIT("merge_commit", "discarded_merge_commit")
 }
 
 @Serializable
@@ -366,6 +376,12 @@ data class ManifestTriageInput(
     val worktree: IngestionWorktree,
     val regressionTest: TestCoordinate,
     val testPatchFile: File? = null
+)
+
+data class AutomatedTriageInput(
+    val benchmarkId: BenchmarkId,
+    val worktree: IngestionWorktree,
+    val commitMetadata: CommitMetadata
 )
 
 // VerifiedSample is a triage output and a verification input ONLY. It is never

@@ -15,10 +15,10 @@ import pipeline.stages.TestCoordinate
 data class BenchmarkManifestEntry(
     val id: String,
     @SerialName("repo_url") val repoUrl: String,
-    @SerialName("commit_hash") val commitHash: String,
-    @SerialName("parent_hash") val parentHash: String,
-    @SerialName("regression_test_class") val regressionTestClass: String,
-    @SerialName("regression_test_method") val regressionTestMethod: String,
+    @SerialName("commit_hash") val commitHash: String = "",
+    @SerialName("parent_hash") val parentHash: String = "",
+    @SerialName("regression_test_class") val regressionTestClass: String = "",
+    @SerialName("regression_test_method") val regressionTestMethod: String = "",
     @SerialName("test_patch") val testPatch: String? = null,
     val description: String = "",
     @SerialName("default_branch") val defaultBranch: String = "main",
@@ -49,12 +49,24 @@ object BenchmarkManifestLoader {
             }
             val source = row.sourceCompatibility ?: config.environment.sourceCompatibility
             val target = row.targetCompatibility ?: row.sourceCompatibility ?: config.environment.effectiveTargetCompatibility
+            if (config.triage.mode == pipeline.stages.TriageMode.MANIFEST) {
+                require(row.commitHash.isNotBlank()) { "Benchmark '${row.id}' is missing commit_hash (required in manifest mode)" }
+                require(row.parentHash.isNotBlank()) { "Benchmark '${row.id}' is missing parent_hash (required in manifest mode)" }
+                require(row.regressionTestClass.isNotBlank()) { "Benchmark '${row.id}' is missing regression_test_class (required in manifest mode)" }
+                require(row.regressionTestMethod.isNotBlank()) { "Benchmark '${row.id}' is missing regression_test_method (required in manifest mode)" }
+            }
+            val regressionTest = if (row.regressionTestClass.isNotBlank() && row.regressionTestMethod.isNotBlank()) {
+                TestCoordinate(Fqcn(row.regressionTestClass), row.regressionTestMethod)
+            } else {
+                // Unused in crawler mode; AutomatedTriageStage discovers the regression test per commit.
+                TestCoordinate(Fqcn("crawler.Placeholder"), "placeholder")
+            }
             BenchmarkEntry(
                 benchmarkId = BenchmarkId.parse(row.id),
                 repoUrl = repoUrl,
-                commitHash = CommitHash(row.commitHash),
-                parentHash = CommitHash(row.parentHash),
-                regressionTest = TestCoordinate(Fqcn(row.regressionTestClass), row.regressionTestMethod),
+                commitHash = CommitHash(row.commitHash.ifBlank { "HEAD" }),
+                parentHash = CommitHash(row.parentHash.ifBlank { "HEAD~1" }),
+                regressionTest = regressionTest,
                 testPatchFile = row.testPatch?.let { File(it).let { f -> if (f.isAbsolute) f else File(base, it) } },
                 description = row.description,
                 repoIdentity = row.repoUrl,

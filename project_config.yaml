@@ -6,6 +6,8 @@
 triage:
   mode: "manifest"
   manifest_file: "benchmarks.yaml"
+  depth: 20
+  bugfix_threshold: 0.75
 
 paths:
   eval_repos_dir: "eval-repos"

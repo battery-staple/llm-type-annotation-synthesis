@@ -43,6 +43,28 @@ object Git {
         )
     }
 
+    fun listCommits(repo: File, ref: String, maxCount: Int): List<CommitMetadata> {
+        require(maxCount > 0) { "maxCount must be positive, got $maxCount" }
+        val raw = requireOk(
+            run(repo, "log", "-n", maxCount.toString(), "--format=%H%x00%P%x00%cI%x00%B%x1e", ref),
+            "git log -n $maxCount $ref"
+        )
+        return raw.split('\u001e')
+            .mapNotNull { record ->
+                val trimmed = record.trim()
+                if (trimmed.isEmpty()) return@mapNotNull null
+                val parts = trimmed.split('\u0000', limit = 4)
+                val hash = parts.getOrElse(0) { "" }.trim()
+                if (hash.isEmpty()) return@mapNotNull null
+                CommitMetadata(
+                    hash = hash,
+                    parents = parts.getOrElse(1) { "" }.split(' ').filter { it.isNotBlank() },
+                    authorDate = parts.getOrElse(2) { "" }.trim(),
+                    message = parts.getOrElse(3) { "" }.trim()
+                )
+            }
+    }
+
     fun mirrorPath(evalReposDir: File, repoName: String): File = File(evalReposDir, "$repoName.git")
 
     /**
