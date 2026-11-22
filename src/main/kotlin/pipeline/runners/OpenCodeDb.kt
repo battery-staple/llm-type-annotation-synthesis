@@ -4,6 +4,7 @@ import java.io.File
 import java.sql.Connection
 import java.sql.DriverManager
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -91,7 +92,82 @@ object OpenCodeDb {
         }.getOrDefault(emptyList())
     }
 
-    private fun readReasoning(connection: Connection, sessionIds: Set<String>): List<OpenCodeReasoning> {
+    private fun readReasoning(connection: Connection, sessionIds: Set<String>): List<OpenCodeReasoning> =
+        when {
+            hasTable(connection, "session_message") -> readSessionMessageReasoning(connection, sessionIds)
+            hasTable(connection, "message") && hasTable(connection, "part") ->
+                readLegacyReasoning(connection, sessionIds)
+            else -> {
+                log.warn { "OpenCode run database has neither the session_message nor the legacy message/part tables" }
+                emptyList()
+            }
+        }
+
+    private fun hasTable(connection: Connection, name: String): Boolean =
+        connection.prepareStatement("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").use { statement ->
+            statement.setString(1, name)
+            statement.executeQuery().use { it.next() }
+        }
+
+    /**
+     * OpenCode 2.x layout: one `session_message` row per message whose JSON `data`
+     * carries a `content` array (`text`, `reasoning`, ...) and message-level
+     * `tokens`. `session_part` is not populated for assistant content, and
+     * content items have no ids, so part ids are synthesized as `<messageId>:<index>`.
+     */
+    private fun readSessionMessageReasoning(connection: Connection, sessionIds: Set<String>): List<OpenCodeReasoning> {
+        val placeholders = sessionIds.joinToString(",") { "?" }
+        val query = """SELECT id, session_id, time_created, data
+                       FROM session_message
+                       WHERE type='assistant' AND session_id IN ($placeholders)
+                       ORDER BY session_id, seq"""
+        val nextTurnBySession = mutableMapOf<String, Int>()
+        val reasoning = mutableListOf<OpenCodeReasoning>()
+        connection.prepareStatement(query).use { statement ->
+            sessionIds.forEachIndexed { index, sessionId -> statement.setString(index + 1, sessionId) }
+            statement.executeQuery().use { rows ->
+                while (rows.next()) {
+                    val messageId = rows.getString(1)
+                    val sessionId = rows.getString(2)
+                    val messageTime = rows.getLong(3)
+                    val data = parseObject(rows.getString(4))
+                    if (data == null) {
+                        log.warn { "Ignoring malformed OpenCode message data in session $sessionId" }
+                        continue
+                    }
+                    val turnIndex = (nextTurnBySession[sessionId] ?: 0) + 1
+                    nextTurnBySession[sessionId] = turnIndex
+
+                    val messageTokens = (data["tokens"] as? JsonObject)?.let { intValue(it, "reasoning") }
+                    var tokensAssigned = false
+                    val content = data["content"] as? JsonArray ?: continue
+                    content.forEachIndexed { index, item ->
+                        val part = item as? JsonObject ?: return@forEachIndexed
+                        if (stringValue(part, "type") != "reasoning") return@forEachIndexed
+                        val text = stringValue(part, "text")
+                        if (text == null) {
+                            log.warn { "Ignoring OpenCode reasoning content without text (message $messageId)" }
+                            return@forEachIndexed
+                        }
+                        reasoning += OpenCodeReasoning(
+                            sessionId = sessionId,
+                            partId = "$messageId:$index",
+                            messageId = messageId,
+                            timeCreated = messageTime,
+                            turnIndex = turnIndex,
+                            text = text,
+                            reasoningTokens = if (tokensAssigned) null else messageTokens
+                        )
+                        tokensAssigned = true
+                    }
+                }
+            }
+        }
+        return reasoning
+    }
+
+    /** OpenCode 1.x layout (`message` + `part` tables). */
+    private fun readLegacyReasoning(connection: Connection, sessionIds: Set<String>): List<OpenCodeReasoning> {
         val placeholders = sessionIds.joinToString(",") { "?" }
         val query = """SELECT p.id, p.message_id, p.session_id, p.time_created, p.data, m.data
                        FROM part p JOIN message m ON m.id=p.message_id

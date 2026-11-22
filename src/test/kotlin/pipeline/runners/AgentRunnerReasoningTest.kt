@@ -12,11 +12,11 @@ import pipeline.stages.AgentEventType
 
 class AgentRunnerReasoningTest {
 
-    private data class MessageFixture(val id: String, val sessionId: String, val timeCreated: Long, val data: String)
-    private data class PartFixture(
+    private data class MessageFixture(
         val id: String,
-        val messageId: String,
         val sessionId: String,
+        val type: String,
+        val seq: Int,
         val timeCreated: Long,
         val data: String
     )
@@ -107,56 +107,37 @@ class AgentRunnerReasoningTest {
         }
     }
 
+    /** Builds a run DB with OpenCode 2.x's `session_message` layout. */
     private fun createOpenCodeDb(file: File) {
         Class.forName("org.sqlite.JDBC")
         DriverManager.getConnection("jdbc:sqlite:${file.absolutePath}").use { connection ->
             connection.createStatement().use { statement ->
                 statement.execute(
-                    """CREATE TABLE message (
-                       id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
-                       time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)"""
-                )
-                statement.execute(
-                    """CREATE TABLE part (
-                       id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                    """CREATE TABLE session_message (
+                       id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL,
                        time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL)"""
                 )
             }
             connection.prepareStatement(
-                "INSERT INTO message (id,session_id,time_created,time_updated,data) VALUES (?,?,?,?,?)"
+                "INSERT INTO session_message (id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)"
             ).use { statement ->
-                listOf<MessageFixture>(
-                    MessageFixture("message-1", "session-a", 1_000L, """{"role":"assistant","tokens":{"reasoning":7}}"""),
-                    MessageFixture("message-2", "session-a", 2_000L, """{"role":"assistant","tokens":{"reasoning":2}}"""),
-                    MessageFixture("other-message", "session-other", 3_000L, """{"role":"assistant","tokens":{"reasoning":99}}"""),
-                    MessageFixture("user-message", "session-a", 4_000L, """{"role":"user","tokens":{"reasoning":100}}""")
+                listOf(
+                    MessageFixture("message-1", "session-a", "assistant", 1, 1_000L,
+                        """{"content":[{"type":"reasoning","text":"database reasoning"},{"type":"text","text":"x"}],"tokens":{"reasoning":7}}"""),
+                    MessageFixture("message-2", "session-a", "assistant", 2, 2_000L,
+                        """{"content":[{"type":"text","text":"y"},{"type":"reasoning","text":"database-only reasoning"}],"tokens":{"reasoning":2}}"""),
+                    MessageFixture("other-message", "session-other", "assistant", 1, 3_000L,
+                        """{"content":[{"type":"reasoning","text":"other session reasoning"}],"tokens":{"reasoning":99}}"""),
+                    MessageFixture("user-message", "session-a", "user", 3, 4_000L,
+                        """{"content":[{"type":"reasoning","text":"user reasoning"}],"tokens":{"reasoning":100}}""")
                 ).forEach { values ->
                     statement.setString(1, values.id)
                     statement.setString(2, values.sessionId)
-                    statement.setLong(3, values.timeCreated)
-                    statement.setLong(4, values.timeCreated)
-                    statement.setString(5, values.data)
-                    statement.executeUpdate()
-                }
-            }
-            connection.prepareStatement(
-                "INSERT INTO part (id,message_id,session_id,time_created,time_updated,data) VALUES (?,?,?,?,?,?)"
-            ).use { statement ->
-                val parts = listOf<PartFixture>(
-                    PartFixture("step-1", "message-1", "session-a", 1_000L, """{"type":"step-start"}"""),
-                    PartFixture("reason-1", "message-1", "session-a", 1_001L, """{"type":"reasoning","text":"database reasoning"}"""),
-                    PartFixture("step-2", "message-2", "session-a", 2_000L, """{"type":"step-start"}"""),
-                    PartFixture("reason-2", "message-2", "session-a", 2_001L, """{"type":"reasoning","text":"database-only reasoning"}"""),
-                    PartFixture("other-reason", "other-message", "session-other", 3_001L, """{"type":"reasoning","text":"other session reasoning"}"""),
-                    PartFixture("user-reason", "user-message", "session-a", 4_001L, """{"type":"reasoning","text":"user reasoning"}""")
-                )
-                parts.forEach { values ->
-                    statement.setString(1, values.id)
-                    statement.setString(2, values.messageId)
-                    statement.setString(3, values.sessionId)
-                    statement.setLong(4, values.timeCreated)
+                    statement.setString(3, values.type)
+                    statement.setInt(4, values.seq)
                     statement.setLong(5, values.timeCreated)
-                    statement.setString(6, values.data)
+                    statement.setLong(6, values.timeCreated)
+                    statement.setString(7, values.data)
                     statement.executeUpdate()
                 }
             }
