@@ -156,9 +156,9 @@
     }
   }
 
-  // A step row is written when the step starts; completed_at stays null until it finishes.
+  // Computed server-side: unfinished step (no completed_at) whose run is still 'running'.
   function isStepRunning(step) {
-    return !!step && !step.completed_at && !step.success;
+    return !!step && step.in_progress === true;
   }
 
   function stepState(step) {

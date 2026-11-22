@@ -230,6 +230,7 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
             run_id = r["run_id"]
             r["key_config"] = extract_key_config(cfg, r)
             r["steps"] = steps_by_run.get(run_id, [])
+            mark_in_progress(r["steps"], r.get("status"))
             r["llm_stats"] = llm_by_run.get(
                 run_id,
                 {
@@ -403,8 +404,22 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
         log_file = logs_dir / f"{run_id}.log"
         run["log_available"] = log_file.is_file()
         run["log_size_bytes"] = log_file.stat().st_size if log_file.is_file() else 0
+        mark_in_progress(steps, run.get("status"))
         run["steps"] = steps
         return run
+
+
+def mark_in_progress(steps: list[dict[str, Any]], run_status: str | None) -> None:
+    """Flag steps that are genuinely executing.
+
+    A step row is written at step start with success=0 and no completed_at. If
+    the stage throws or the process dies, that row is never finalized, so an
+    unfinished step only counts as in progress while its run is still running.
+    """
+    for st in steps:
+        st["in_progress"] = (
+            run_status == "running" and not st.get("completed_at") and not st.get("success")
+        )
 
 
 class ViewerHandler(BaseHTTPRequestHandler):
