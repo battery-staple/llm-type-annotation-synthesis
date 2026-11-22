@@ -20,6 +20,7 @@
     viewMode: "inspector",
     matrixStage: null,
     selectedBatchId: null,
+    highlightedBatchId: null,
     expandedBatches: new Set(),
     collapsedBatches: new Set(),
     hideDiscardedInMatrix: false,
@@ -570,7 +571,7 @@
   }
 
   function renderRunCardHtml(r, isChild = false) {
-    const active = r.run_id === state.selectedRunId ? "active" : "";
+    const active = r.run_id === state.selectedRunId && !state.highlightedBatchId ? "active" : "";
     const outcome = deriveOutcome(r);
     const dots = STAGE_ORDER.map((stName) => {
       const matches = (r.steps || []).filter((s) => s.step_name === stName);
@@ -585,7 +586,7 @@
     const triageMode = r.key_config?.triage_mode || "manifest";
     const tokens = r.llm_stats?.total_tokens ? `${fmtNum(r.llm_stats.total_tokens)} tok` : "0 tok";
     return `
-      <div class="run-card ${isChild ? "batch-child" : ""} ${active}" data-run-id="${esc(r.run_id)}">
+      <div class="run-card ${isChild ? "batch-child" : ""} ${active}" data-run-id="${esc(r.run_id)}" tabindex="-1">
         <div class="run-card-top">
           <span class="run-card-bench" title="${esc(r.benchmark_id)}">${esc(r.benchmark_id)}</span>
           <span class="badge ${outcome.cls}" title="${esc(outcome.tooltip)}">${esc(outcome.label)}</span>
@@ -651,7 +652,7 @@
       const isExpanded =
         state.expandedBatches.has(item.batchId) ||
         (autoExpanded && !state.collapsedBatches.has(item.batchId));
-      const isActiveBatch = state.viewMode === "matrix" && state.selectedBatchId === item.batchId;
+      const isActiveBatch = state.highlightedBatchId === item.batchId || (state.viewMode === "matrix" && state.selectedBatchId === item.batchId);
 
       const summaryPills = [
         passCount ? `<span class="badge badge-green">${passCount} pass</span>` : "",
@@ -684,7 +685,8 @@
       `;
     }).join("");
 
-    function toggleBatch(batchId, currentlyExpanded) {
+    function toggleBatch(batchId, currentlyExpanded, preserveFocus = false) {
+      if (preserveFocus) state.highlightedBatchId = batchId;
       if (currentlyExpanded) {
         state.expandedBatches.delete(batchId);
         state.collapsedBatches.add(batchId);
@@ -693,18 +695,33 @@
         state.collapsedBatches.delete(batchId);
       }
       renderRunsList();
+      if (preserveFocus) {
+        [...listEl.querySelectorAll(".batch-card")]
+          .find((card) => card.dataset.batchId === batchId)
+          ?.focus();
+      }
     }
 
     listEl.querySelectorAll(".batch-card").forEach((el) => {
       const isExpanded = () => el.getAttribute("aria-expanded") === "true";
+      el.addEventListener("focus", () => {
+        state.highlightedBatchId = el.dataset.batchId;
+        listEl.querySelectorAll(".run-card.active, .batch-card.active").forEach((card) => card.classList.remove("active"));
+        el.classList.add("active");
+      });
       el.addEventListener("click", () => {
-        toggleBatch(el.dataset.batchId, isExpanded());
+        toggleBatch(el.dataset.batchId, isExpanded(), true);
       });
       el.addEventListener("keydown", (e) => {
-        if (e.target !== el) return;
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.target === el && (e.key === "Enter" || e.key === " ")) {
           e.preventDefault();
-          toggleBatch(el.dataset.batchId, isExpanded());
+          toggleBatch(el.dataset.batchId, isExpanded(), true);
+        } else if (e.target instanceof Element && e.target.closest(".batch-card") === el && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+          e.preventDefault();
+          const shouldExpand = e.key === "ArrowRight";
+          if (isExpanded() !== shouldExpand) {
+            toggleBatch(el.dataset.batchId, isExpanded(), true);
+          }
         }
       });
     });
@@ -729,6 +746,7 @@
   // ---- Run Selection & Header ----
   async function selectRun(runId, preserveStageAndTab = false) {
     state.selectedRunId = runId;
+    state.highlightedBatchId = null;
     renderRunsList();
 
     const detail = await apiGet(`/api/runs/${encodeURIComponent(runId)}`);
@@ -2436,44 +2454,84 @@
       }
     }
 
+    const ctrlTab = e.key === "Tab" && e.ctrlKey && !e.metaKey && !e.altKey;
+    const stageArrowFallback = e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight");
+    if ((ctrlTab || stageArrowFallback) && state.activeRunTab === "stages" && state.runDetail) {
+      const executedNames = [...new Set((state.runDetail.steps || []).map((s) => s.step_name))];
+      if (executedNames.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        const idx = executedNames.indexOf(state.selectedStepName);
+        const goesBackward = ctrlTab ? e.shiftKey : e.key === "ArrowLeft";
+        const nextIdx = goesBackward
+          ? Math.max(0, idx === -1 ? 0 : idx - 1)
+          : Math.min(executedNames.length - 1, idx + 1);
+        const nextName = executedNames[nextIdx];
+        if (nextName && nextName !== state.selectedStepName) {
+          const matching = (state.runDetail.steps || []).filter((s) => s.step_name === nextName);
+          const latest = matching[matching.length - 1];
+          state.selectedStepName = nextName;
+          state.selectedStepId = latest ? latest.step_id : null;
+          renderStageStepper();
+          renderStageInspector();
+        }
+      }
+      return;
+    }
+
     const tag = (e.target?.tagName || "").toLowerCase();
     if (tag === "input" || tag === "select" || tag === "textarea" || e.metaKey || e.ctrlKey || e.altKey) {
       return;
     }
 
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      const filtered = getFilteredRuns();
-      if (!filtered.length) return;
+      const cards = [...$("runsList").querySelectorAll(".batch-card, .run-card")];
+      if (!cards.length) return;
       e.preventDefault();
-      const idx = filtered.findIndex((r) => r.run_id === state.selectedRunId);
+      const currentCard = e.target instanceof Element ? e.target.closest(".batch-card, .run-card") : null;
+      let idx = cards.indexOf(currentCard);
+      if (idx === -1 && state.highlightedBatchId) {
+        idx = cards.findIndex((card) => card.dataset.batchId === state.highlightedBatchId);
+      }
+      if (idx === -1 && state.selectedRunId) {
+        idx = cards.findIndex((card) => card.dataset.runId === state.selectedRunId);
+        if (idx === -1) {
+          const selectedRun = state.runs.find((run) => run.run_id === state.selectedRunId);
+          if (selectedRun?.batch_id) {
+            idx = cards.findIndex((card) => card.dataset.batchId === selectedRun.batch_id);
+          }
+        }
+      }
       const nextIdx = e.key === "ArrowDown"
-        ? Math.min(filtered.length - 1, idx + 1)
+        ? Math.min(cards.length - 1, idx + 1)
         : Math.max(0, idx === -1 ? 0 : idx - 1);
-      if (filtered[nextIdx] && filtered[nextIdx].run_id !== state.selectedRunId) {
-        selectRun(filtered[nextIdx].run_id, false).then(() => {
-          document.querySelector(".run-card.active")?.scrollIntoView({ block: "nearest" });
-        });
+      const nextCard = cards[nextIdx];
+      if (nextCard?.dataset.batchId) {
+        state.highlightedBatchId = nextCard.dataset.batchId;
+        renderRunsList();
+        const target = [...$("runsList").querySelectorAll(".batch-card")]
+          .find((card) => card.dataset.batchId === state.highlightedBatchId);
+        target?.focus();
+        target?.scrollIntoView({ block: "nearest" });
+      } else if (nextCard?.dataset.runId) {
+        const runId = nextCard.dataset.runId;
+        const needsRender = Boolean(state.highlightedBatchId);
+        if (runId !== state.selectedRunId) {
+          selectRun(runId, false).then(() => {
+            [...$("runsList").querySelectorAll(".run-card")]
+              .find((card) => card.dataset.runId === runId)
+              ?.scrollIntoView({ block: "nearest" });
+          });
+        } else if (needsRender) {
+          state.highlightedBatchId = null;
+          renderRunsList();
+        }
+        const target = [...$("runsList").querySelectorAll(".run-card")]
+          .find((card) => card.dataset.runId === runId);
+        target?.focus();
+        target?.scrollIntoView({ block: "nearest" });
       }
       return;
-    }
-
-    if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && state.activeRunTab === "stages" && state.runDetail) {
-      const executedNames = [...new Set((state.runDetail.steps || []).map((s) => s.step_name))];
-      if (!executedNames.length) return;
-      e.preventDefault();
-      const idx = executedNames.indexOf(state.selectedStepName);
-      const nextIdx = e.key === "ArrowRight"
-        ? Math.min(executedNames.length - 1, idx + 1)
-        : Math.max(0, idx === -1 ? 0 : idx - 1);
-      const nextName = executedNames[nextIdx];
-      if (nextName && nextName !== state.selectedStepName) {
-        const matching = (state.runDetail.steps || []).filter((s) => s.step_name === nextName);
-        const latest = matching[matching.length - 1];
-        state.selectedStepName = nextName;
-        state.selectedStepId = latest ? latest.step_id : null;
-        renderStageStepper();
-        renderStageInspector();
-      }
     }
   }
 
@@ -2732,7 +2790,7 @@
 
   // ---- Event Wiring ----
   function init() {
-    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
     $("refreshBtn").addEventListener("click", () => loadRuns(true));
     $("runSearch").addEventListener("input", renderRunsList);
     $("verdictFilter").addEventListener("change", renderRunsList);
