@@ -194,18 +194,30 @@
     verification_missing: "Verification ran, but its evidence is missing or unusable (no checker result, no parseable JUnit report, or no tests found). This is a verification result; it does not mean verification was skipped.",
   };
 
+  // `discarded_build_broken` means the unpatched C-1 baseline itself failed to
+  // build. `discarded_non_compiling` means C-1 built, but the regression-test
+  // patch extracted from C does not compile against it (usually because the
+  // test uses an API introduced by C). Keep those labels distinct so a test
+  // portability failure is not reported as a broken baseline build.
   const TRIAGE_SKIP_LABELS = {
     non_bugfix: "not a bugfix",
     pending: "triage incomplete",
-    discarded_build_broken: "build broken",
+    discarded_build_broken: "baseline build broken",
     discarded_no_test: "no regression test",
-    discarded_non_compiling: "test build broken",
+    discarded_non_compiling: "test patch does not compile",
     discarded_passes_unpatched: "test passes unpatched",
     discarded_invalid_test_patch: "invalid test patch",
     discarded_regression_not_passing_on_fixed_commit: "test fails on fixed commit",
     discarded_fixed_commit_unavailable: "fixed commit unavailable",
     discarded_diff_too_large: "diff too large",
     discarded_merge_commit: "merge commit",
+  };
+
+  const TRIAGE_SKIP_TOOLTIPS = {
+    discarded_build_broken:
+      "The unpatched C-1 baseline failed to build. This is a property of the checked-out revision, not of the regression test.",
+    discarded_non_compiling:
+      "The unpatched C-1 baseline built successfully, but the regression-test patch from C does not compile on C-1. The test often references an API introduced by C.",
   };
 
   function verdictLabel(verdict) {
@@ -265,7 +277,9 @@
       return {
         label: triageSkipLabel(triageStatus),
         cls: "badge-muted",
-        tooltip: `Triage did not admit this commit (${triageStatus}), so the pipeline stopped before synthesis.`,
+        tooltip:
+          TRIAGE_SKIP_TOOLTIPS[triageStatus] ||
+          `Triage did not admit this commit (${triageStatus}), so the pipeline stopped before synthesis.`,
       };
     }
     if (triageStatus === "pending") {
@@ -346,10 +360,11 @@
 
     if (isTriageSkipped(run)) {
       const reason = triageSkipLabel(run.triage_status);
+      const detail = TRIAGE_SKIP_TOOLTIPS[run.triage_status] || "";
       return notEvaluated(
         "triage_skipped",
         `triage: ${reason}`,
-        `Triage did not admit this commit (${run.triage_status}: ${reason}), so synthesis and verification never ran. The stored "verification_missing" verdict only records that no verification evidence exists; it is not a failed evaluation.`
+        `${detail ? detail + " " : ""}Triage did not admit this commit (${run.triage_status}: ${reason}), so synthesis and verification never ran. The stored "verification_missing" verdict only records that no verification evidence exists; it is not a failed evaluation.`
       );
     }
 
