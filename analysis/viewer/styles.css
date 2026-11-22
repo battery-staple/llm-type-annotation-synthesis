@@ -16,6 +16,7 @@
   --red: #f85149;
   --red-soft: rgba(248, 81, 73, 0.15);
   --yellow: #d29922;
+  --orange: #db6d28;
   --yellow-soft: rgba(210, 153, 34, 0.16);
   --purple: #a371f7;
   --purple-soft: rgba(163, 113, 247, 0.15);
@@ -235,6 +236,7 @@ code, pre {
 .stage-mini-dot.ok { background: var(--green); }
 .stage-mini-dot.fail { background: var(--red); }
 .stage-mini-dot.running { background: var(--yellow); animation: step-pulse 1.2s ease-in-out infinite; }
+.stage-mini-dot.warn { background: var(--orange); }
 .stage-mini-dot.skip { background: var(--text-dim); }
 .stage-mini-dot.cached { box-shadow: inset 0 0 0 1px var(--accent); }
 
@@ -515,6 +517,7 @@ code, pre {
 .stage-dot.fail { background: var(--red); }
 .stage-dot.running { background: var(--yellow); animation: step-pulse 1.2s ease-in-out infinite; }
 @keyframes step-pulse { 50% { opacity: 0.35; } }
+.stage-dot.warn { background: var(--orange); }
 .stage-dot.skip { background: var(--text-dim); }
 
 .step-card-sub {

@@ -147,6 +147,8 @@
     return String(iso).replace("T", " ").replace(/\.\d+Z?$/, "Z");
   }
 
+  const SUCCESS_VERDICTS = new Set(["full_success", "partial_success_regression_only"]);
+
   function verdictBadgeClass(verdict) {
     switch (verdict) {
       case "full_success": return "badge-green";
@@ -227,10 +229,21 @@
     return Boolean(step && step.step_name === "triage" && !step.success && isTriageSkipped(run));
   }
 
+  /**
+   * A stage can complete without achieving its goal. "ok" only means the stage ran
+   * to completion; "warn" marks a completed repair/verification stage whose outcome
+   * is unsuccessful (type errors remain, or the evaluation verdict is not a success).
+   */
   function stageState(run, step) {
     if (isSkippedStep(run, step)) return "skip";
-    return stepState(step);
+    const base = stepState(step);
+    if (base !== "ok" || !run) return base;
+    if (step.step_name === "repair" && Number(run.remaining_type_errors) > 0) return "warn";
+    if (step.step_name === "verification" && run.verdict && !SUCCESS_VERDICTS.has(run.verdict)) return "warn";
+    return base;
   }
+
+  const STAGE_STATE_LABELS = { ok: "ok", fail: "failed", running: "running", skip: "skipped", warn: "incomplete" };
 
   function triageStatusMeta(triageStatus) {
     if (!triageStatus) {
@@ -564,7 +577,7 @@
       if (!latest) return `<span class="stage-mini-dot" title="${esc(stName)}: not run"></span>`;
       const cls = stageState(r, latest);
       const cached = latest.cache_hit ? " cached" : "";
-      const stateLabel = { ok: "ok", fail: "failed", running: "running", skip: "skipped" }[cls];
+      const stateLabel = STAGE_STATE_LABELS[cls];
       return `<span class="stage-mini-dot ${cls}${cached}" title="${esc(stName)}: ${stateLabel}${latest.cache_hit ? " (cached)" : ""}"></span>`;
     }).join("");
 
@@ -846,7 +859,7 @@
       const dur = fmtDuration(latest.started_at, latest.completed_at);
       const turns = latest.turns_taken ? `${latest.turns_taken}t` : "";
       const attBadge = attempts.length > 1 ? ` (${attempts.length} att)` : "";
-      const stateLabel = dotCls === "skip" ? "skipped" : (dotCls === "running" ? "running" : (latest.cache_hit ? "cached" : (latest.success ? "passed" : "failed")));
+      const stateLabel = dotCls === "skip" ? "skipped" : (dotCls === "running" ? "running" : (dotCls === "warn" ? "incomplete" : (latest.cache_hit ? "cached" : (latest.success ? "completed" : "failed"))));
       return `
         <button class="step-card ${active}" data-step-name="${esc(name)}">
           <div class="step-card-top">
@@ -888,8 +901,7 @@
     }
     insp.classList.remove("hidden");
 
-    const stepSkipped = isSkippedStep(state.runDetail, step);
-    $("stageStatusIcon").className = `stage-dot ${stepSkipped ? "skip" : stepState(step)}`;
+    $("stageStatusIcon").className = `stage-dot ${stageState(state.runDetail, step)}`;
     $("stageTitle").textContent = step.step_name;
 
     const cacheBadge = $("stageCacheBadge");
