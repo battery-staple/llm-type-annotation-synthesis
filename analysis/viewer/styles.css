@@ -881,6 +881,22 @@ code, pre {
   margin: 12px 0;
 }
 
+/* Lattice Graph Hover Highlight */
+.lattice-node {
+  cursor: pointer;
+}
+.lattice-node rect {
+  transition: stroke 0.12s, filter 0.12s;
+}
+.lattice-node.highlight rect {
+  stroke: var(--accent) !important;
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 6px rgba(88, 166, 255, 0.55));
+}
+.lattice-row.highlight td {
+  background: var(--accent-soft) !important;
+}
+
 /* Config & Logs */
 .config-toolbar,
 .log-toolbar {

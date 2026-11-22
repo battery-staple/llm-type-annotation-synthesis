@@ -194,6 +194,30 @@
     timeout: "Per-stage agent timeout",
   };
 
+  function saveUrlState() {
+    const params = new URLSearchParams();
+    if (state.selectedRunId) params.set("run", state.selectedRunId);
+    if (state.activeRunTab) params.set("tab", state.activeRunTab);
+    if (state.selectedStepName) params.set("stage", state.selectedStepName);
+    if (state.activeStageTab) params.set("stageTab", state.activeStageTab);
+    const hash = `#${params.toString()}`;
+    if (window.location.hash !== hash) {
+      history.replaceState(null, "", hash);
+    }
+  }
+
+  function readUrlState() {
+    const raw = window.location.hash.replace(/^#/, "");
+    if (!raw) return {};
+    const params = new URLSearchParams(raw);
+    return {
+      run: params.get("run") || null,
+      tab: params.get("tab") || null,
+      stage: params.get("stage") || null,
+      stageTab: params.get("stageTab") || null,
+    };
+  }
+
   async function apiGet(url) {
     const res = await fetch(url);
     const data = await res.json();
@@ -227,7 +251,14 @@
         await selectRun(state.selectedRunId, true);
       }
     } else if (!state.selectedRunId && state.runs.length > 0) {
-      await selectRun(state.runs[0].run_id, false);
+      const saved = readUrlState();
+      const targetRun = saved.run && state.runs.some((r) => r.run_id === saved.run)
+        ? saved.run
+        : state.runs[0].run_id;
+      if (saved.tab) state.activeRunTab = saved.tab;
+      if (saved.stage) state.selectedStepName = saved.stage;
+      if (saved.stageTab) state.activeStageTab = saved.stageTab;
+      await selectRun(targetRun, Boolean(saved.run && targetRun === saved.run && (saved.stage || saved.tab || saved.stageTab)));
     }
   }
 
@@ -409,6 +440,7 @@
 
   function switchRunTab(tabName) {
     state.activeRunTab = tabName;
+    saveUrlState();
     document.querySelectorAll(".run-tab").forEach((b) => {
       b.classList.toggle("active", b.dataset.runTab === tabName);
     });
@@ -546,6 +578,7 @@
 
   function switchStageTab(tabName) {
     state.activeStageTab = tabName;
+    saveUrlState();
     document.querySelectorAll(".stage-tab").forEach((b) => {
       b.classList.toggle("active", b.dataset.stageTab === tabName);
     });
@@ -561,6 +594,118 @@
       case "tests": container.innerHTML = renderStageTests(step); break;
       case "guardrails": container.innerHTML = renderStageGuardrails(step); break;
     }
+  }
+
+  function renderLatticeGraph(qualifiers) {
+    if (!qualifiers || qualifiers.length === 0) return "";
+
+    const norm = (s) => String(s || "").trim().replace(/^@+/, "");
+    const byName = new Map();
+    for (const q of qualifiers) {
+      byName.set(norm(q.qualifier_name), q);
+    }
+
+    // Parse parent edges (subtypes_of can be a single name or comma-separated)
+    const parentsOf = new Map();
+    for (const q of qualifiers) {
+      const name = norm(q.qualifier_name);
+      const parents = (q.subtypes_of || "")
+        .split(",")
+        .map(norm)
+        .filter((p) => p && byName.has(p));
+      parentsOf.set(name, parents);
+    }
+
+    // Compute topological depth (TOP at 0, children below)
+    const depth = new Map();
+    const visiting = new Set();
+    function getDepth(name) {
+      if (depth.has(name)) return depth.get(name);
+      if (visiting.has(name)) return 0; // cycle guard
+      visiting.add(name);
+      const parents = parentsOf.get(name) || [];
+      const d = parents.length === 0 ? 0 : 1 + Math.max(...parents.map(getDepth));
+      visiting.delete(name);
+      depth.set(name, d);
+      return d;
+    }
+    for (const q of qualifiers) getDepth(norm(q.qualifier_name));
+
+    const maxDepth = Math.max(0, ...depth.values());
+    const layers = Array.from({ length: maxDepth + 1 }, () => []);
+    for (const q of qualifiers) {
+      layers[depth.get(norm(q.qualifier_name))].push(q);
+    }
+
+    const nodeW = 164;
+    const nodeH = 36;
+    const hGap = 24;
+    const vGap = 46;
+    const padX = 24;
+    const padY = 20;
+
+    const maxCols = Math.max(1, ...layers.map((l) => l.length));
+    const width = Math.max(360, padX * 2 + maxCols * nodeW + (maxCols - 1) * hGap);
+    const height = padY * 2 + layers.length * nodeH + (layers.length - 1) * vGap;
+
+    const pos = new Map();
+    layers.forEach((layer, li) => {
+      const rowW = layer.length * nodeW + (layer.length - 1) * hGap;
+      const startX = (width - rowW) / 2;
+      const y = padY + li * (nodeH + vGap);
+      layer.forEach((q, idx) => {
+        pos.set(norm(q.qualifier_name), {
+          x: startX + idx * (nodeW + hGap),
+          y,
+          cx: startX + idx * (nodeW + hGap) + nodeW / 2,
+          cy: y + nodeH / 2,
+        });
+      });
+    });
+
+    const edgesSvg = [];
+    for (const q of qualifiers) {
+      const name = norm(q.qualifier_name);
+      const childPos = pos.get(name);
+      for (const pName of (parentsOf.get(name) || [])) {
+        const parentPos = pos.get(pName);
+        if (!parentPos || !childPos) continue;
+        const x1 = childPos.cx;
+        const y1 = childPos.y;
+        const x2 = parentPos.cx;
+        const y2 = parentPos.y + nodeH;
+        edgesSvg.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#58a6ff" stroke-opacity="0.65" stroke-width="1.5" marker-end="url(#latticeArrow)" />`);
+      }
+    }
+
+    const nodesSvg = qualifiers.map((q) => {
+      const name = norm(q.qualifier_name);
+      const p = pos.get(name);
+      const fill = q.is_top ? "#1b2b3a" : (q.is_bottom ? "#2b1f36" : "#1c222b");
+      const stroke = q.is_top ? "#58a6ff" : (q.is_bottom ? "#a371f7" : "#30363d");
+      const role = q.is_top ? "TOP" : (q.is_bottom ? "BOTTOM" : "");
+      return `
+        <g class="lattice-node" data-qual="${esc(name)}">
+          <rect x="${p.x}" y="${p.y}" width="${nodeW}" height="${nodeH}" rx="7" fill="${fill}" stroke="${stroke}" stroke-width="1.5" />
+          <text x="${p.cx}" y="${p.y + (role ? 15 : 22)}" text-anchor="middle" fill="#e6edf3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11.5" font-weight="600">@${esc(name)}</text>
+          ${role ? `<text x="${p.cx}" y="${p.y + 28}" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="9.5">${role}</text>` : ""}
+        </g>
+      `;
+    }).join("");
+
+    return `
+      <div style="margin-bottom:12px;overflow-x:auto;border:1px solid var(--border-subtle);border-radius:8px;background:var(--bg-elev);padding:8px;">
+        <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" style="display:block;margin:0 auto;">
+          <defs>
+            <marker id="latticeArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 1 L 10 5 L 0 9 z" fill="#58a6ff" />
+            </marker>
+          </defs>
+          ${edgesSvg.join("")}
+          ${nodesSvg}
+        </svg>
+      </div>
+    `;
   }
 
   // ---- Stage Tab: Overview & Artifacts ----
@@ -618,6 +763,7 @@
     let stageSpecific = "";
     if ((step.synthesis_runs || []).length > 0 || (step.synthesized_qualifiers || []).length > 0) {
       const sr = step.synthesis_runs[0];
+      const quals = step.synthesized_qualifiers || [];
       stageSpecific += `
         <div class="card">
           <h4>Synthesized Type System</h4>
@@ -628,18 +774,22 @@
               <tr><th>Qualifiers / Helpers / Rules</th><td>${sr.qualifier_count} qualifiers, ${sr.helpers_count} helpers, ${sr.policy_rule_count} policy rules</td></tr>
             </table>
           ` : ""}
-          ${(step.synthesized_qualifiers || []).length > 0 ? `
+          ${quals.length > 0 ? renderLatticeGraph(quals) : ""}
+          ${quals.length > 0 ? `
             <table class="data-table">
               <thead><tr><th>Qualifier</th><th>Target Type</th><th>Subtypes Of</th><th>Top / Bottom</th></tr></thead>
               <tbody>
-                ${step.synthesized_qualifiers.map((q) => `
-                  <tr>
-                    <td><code>@${esc(q.qualifier_name)}</code></td>
+                ${quals.map((q) => {
+                  const qName = String(q.qualifier_name || "").trim().replace(/^@+/, "");
+                  return `
+                  <tr class="lattice-row" data-qual="${esc(qName)}">
+                    <td><code>@${esc(qName)}</code></td>
                     <td><code>${esc(q.target_type)}</code></td>
                     <td><code>${esc(q.subtypes_of || "-")}</code></td>
                     <td>${q.is_top ? "TOP" : ""}${q.is_bottom ? "BOTTOM" : ""}${!q.is_top && !q.is_bottom ? "-" : ""}</td>
                   </tr>
-                `).join("")}
+                `;
+                }).join("")}
               </tbody>
             </table>
           ` : ""}
@@ -682,6 +832,17 @@
   }
 
   function bindArtifactLinks(container, step) {
+    container.querySelectorAll(".lattice-node, .lattice-row").forEach((el) => {
+      const qName = el.dataset.qual;
+      if (!qName) return;
+      el.addEventListener("mouseenter", () => {
+        container.querySelectorAll(`[data-qual="${CSS.escape(qName)}"]`).forEach((m) => m.classList.add("highlight"));
+      });
+      el.addEventListener("mouseleave", () => {
+        container.querySelectorAll(`[data-qual="${CSS.escape(qName)}"]`).forEach((m) => m.classList.remove("highlight"));
+      });
+    });
+
     container.querySelectorAll(".artifact-link").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const relPath = btn.dataset.path;
