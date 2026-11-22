@@ -27,7 +27,7 @@ benchmarks:
     source_compatibility: "21"
     target_compatibility: "21"
     production_roots: ["src"]
-    test_roots: ["test"]
+    test_roots: ["test", "regression/src"]
     build:
       tool: "gradle"
       wrapper_executable: "./gradlew"
