@@ -534,7 +534,20 @@
 
     const cacheBadge = $("stageCacheBadge");
     if (step.cache_hit) {
-      cacheBadge.textContent = "CACHE HIT";
+      if (step.cache_origin) {
+        const orig = step.cache_origin;
+        cacheBadge.innerHTML = `CACHE HIT · <button class="link-btn cache-origin-btn" data-origin-run="${esc(orig.run_id)}" data-origin-stage="${esc(step.step_name)}" title="Jump to original run ${esc(orig.run_id)} (${esc(orig.benchmark_id)})">from ${esc(orig.run_id.slice(0, 8))}</button>`;
+        cacheBadge.title = `Served from CAS cache; originally produced by run ${orig.run_id} (${orig.benchmark_id})`;
+        cacheBadge.querySelector(".cache-origin-btn")?.addEventListener("click", (e) => {
+          e.stopPropagation();
+          state.selectedStepName = step.step_name;
+          state.selectedStepId = null;
+          selectRun(orig.run_id, true);
+        });
+      } else {
+        cacheBadge.textContent = "CACHE HIT";
+        cacheBadge.title = "Served from CAS cache (origin run not found in current DB)";
+      }
       cacheBadge.classList.remove("hidden");
     } else {
       cacheBadge.classList.add("hidden");
@@ -721,6 +734,9 @@
           <tr><th>Attempt</th><td>${esc(step.attempt_number)}</td></tr>
           <tr><th>Success</th><td><span class="badge ${step.success ? "badge-green" : "badge-red"}">${step.success ? "true" : "false"}</span></td></tr>
           <tr><th>Cache Hit</th><td>${step.cache_hit ? "Yes" : "No"}</td></tr>
+          ${step.cache_hit ? `<tr><th>Cache Origin</th><td>${step.cache_origin
+            ? `<button class="link-btn cache-origin-link" data-origin-run="${esc(step.cache_origin.run_id)}">${esc(step.cache_origin.run_id.slice(0, 8))}</button> <span class="muted">(${esc(step.cache_origin.benchmark_id)} · ${esc(fmtTs(step.cache_origin.started_at))})</span>`
+            : `<span class="muted">Not in current DB (loaded from .cache/stages)</span>`}</td></tr>` : ""}
           <tr><th>CAS Key</th><td><code>${esc(step.cas_key || "-")}</code></td></tr>
           <tr><th>Started</th><td>${esc(fmtTs(step.started_at))}</td></tr>
           <tr><th>Completed</th><td>${esc(fmtTs(step.completed_at))}</td></tr>
@@ -832,6 +848,14 @@
   }
 
   function bindArtifactLinks(container, step) {
+    container.querySelectorAll(".cache-origin-link").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.selectedStepName = step.step_name;
+        state.selectedStepId = null;
+        selectRun(btn.dataset.originRun, true);
+      });
+    });
+
     container.querySelectorAll(".lattice-node, .lattice-row").forEach((el) => {
       const qName = el.dataset.qual;
       if (!qName) return;

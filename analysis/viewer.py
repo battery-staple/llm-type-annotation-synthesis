@@ -329,6 +329,22 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
             step["cas_files"] = list_cas_files(cas_dir)
             step["cas_transcript"] = load_cas_transcript(cas_dir)
 
+            if step.get("cache_hit") and step.get("cas_key"):
+                origin = conn.execute(
+                    """
+                    SELECT st.run_id, st.step_id, st.started_at, r.benchmark_id
+                    FROM step_trajectories st
+                    JOIN evaluation_runs r ON st.run_id = r.run_id
+                    WHERE st.step_name = ? AND st.cas_key = ? AND st.cache_hit = 0
+                    ORDER BY st.created_at ASC, st.step_id ASC
+                    LIMIT 1
+                    """,
+                    (step["step_name"], step["cas_key"]),
+                ).fetchone()
+                step["cache_origin"] = dict(origin) if origin is not None else None
+            else:
+                step["cache_origin"] = None
+
             # Fallback patch from CAS (e.g., triage test_patch.diff) if diff_patch is empty
             if not step.get("diff_patch") and cas_dir is not None:
                 for diff_name in ("diff.patch", "patch.diff", "test_patch.diff"):
