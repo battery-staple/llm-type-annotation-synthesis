@@ -194,10 +194,8 @@ the crawler) are not listed unless the code had to interpret the plan.
 35. **`guardrails.mode: "disabled"` is accepted but inert.** Every stage runs
     the AST/filesystem guards regardless, so a disabled-vs-enabled ablation
     currently measures nothing.
-36. **CLI provenance is partly hardcoded.** `config_yaml`/`config_snapshot`
-    read `project_config.yaml` from the process working directory instead of
-    the `--config` path, and `verify-benchmark` delegates to `run` rather than
-    offering a triage-only check.
+36. **`verify-benchmark` delegates to `run` rather than offering a triage-only
+    check.**
 37. **Benchmark contamination is detected, not sandboxed.** Agents are not
     OS-isolated and can reach the benchmark checkout by absolute path; a live
     synthesis run did modify the synthetic submodule. `run` now refuses to
@@ -217,3 +215,23 @@ the crawler) are not listed unless the code had to interpret the plan.
     `verification_missing` even when the stage returned `FULL_SUCCESS`. The
     filtered regression run is now marked explicitly, and the suite filter
     excludes the display name observed in that run.
+
+## Configuration portability
+
+40. **The `project:` section is removed; benchmark identity comes from the
+    resolved `benchmarks.yaml` entry.** This ensures the dirty-tree check and
+    agent-contamination guard watch the selected benchmark repository rather
+    than a single hardcoded repository, fixing incorrect checks when running a
+    different benchmark. Relative `repo_url` values are now resolved against
+    the manifest's directory instead of the process working directory.
+41. **`build:` and Java source/target compatibility moved into each benchmark
+    entry**, with code defaults identical to the previous values.
+42. **Machine-specific paths are environment-driven.** Blank
+    `environment.java_home` and `gradle_user_home` inherit `JAVA_HOME` and
+    `GRADLE_USER_HOME`; blank `checker_framework_home` uses `CHECKERFRAMEWORK`
+    or defaults to `vendor/checker-framework-3.42.0`.
+43. **Configuration paths and provenance follow the selected config file.**
+    Relative paths resolve against the `--config` file's directory, and
+    `config_yaml`/`config_snapshot` read that file. The unused `logging:`
+    section and `sample.seed` key were removed, and `paths.database` replaces
+    the hardcoded `data/pipeline.db`.

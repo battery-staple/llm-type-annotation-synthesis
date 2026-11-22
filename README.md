@@ -68,7 +68,8 @@ Any contributor or autonomous agent working in this repository should adhere to 
 - **`docs/additional_future_improvements.md`**: A ranked research agenda of twenty-six additional experiments.
 - **`deviations.md`**: Places where the implementation intentionally differs from the engineering plan, including environment constraints and bug fixes.
 - **`proposal/Project Proposal.md`**: The original CS 6158 course project proposal document.
-- **`project_config.yaml`** and **`benchmarks.yaml`**: Runtime configuration and the curated benchmark manifest.
+- **`project_config.yaml`**: Global, machine-independent pipeline policy, including paths, environment defaults, guardrails, models, and stage settings.
+- **`benchmarks.yaml`**: Per-benchmark manifest containing repository identity, commit selection, build configuration, and Java compatibility settings.
 - **`analysis/evaluate_metrics.py`**: Offline telemetry report over `data/pipeline.db`.
 - **`analysis/inspect_cache.py`**: Read-only inventory of cached stage bundles, seeds, artifacts, and run associations.
 - **`eval-repos/`**: Directory housing target evaluation repositories:
@@ -82,7 +83,7 @@ Any contributor or autonomous agent working in this repository should adhere to 
 - **Host Environment**: Linux container / macOS. The pipeline requires a JDK 21 toolchain; target repositories compile at their own Java level (17 for the synthetic benchmark).
 - **Pipeline Language**: Kotlin 2.0.21 built with Gradle.
 - **Agent Harness**: OpenCode CLI (v2.2.5 in the current container).
-- **Type Checker**: Java Checker Framework 3.42.0, vendored under `vendor/checker-framework-3.42.0/` (not committed; install it there or update `project_config.yaml`).
+- **Type Checker**: Java Checker Framework 3.42.0; when `environment.checker_framework_home` is blank, its location is resolved from `CHECKERFRAMEWORK`, or defaults to `vendor/checker-framework-3.42.0`.
 - **AST Parsing & Validation**: JavaParser (`com.github.javaparser:javaparser-core:3.26.1`).
 - **Storage & Inspection**: SQLite 3, Datasette (Python), Pandas / Jupyter.
 - **Default LLM**: `opencode-go/deepseek-v4.1-flash`, configurable per stage. The pipeline seeds its isolated OpenCode DB with the global account/credential rows; a blank isolated DB otherwise makes `opencode-go/*` return `provider.no-route`.
@@ -101,6 +102,8 @@ Any contributor or autonomous agent working in this repository should adhere to 
 python3 analysis/evaluate_metrics.py --db data/pipeline.db
 python3 analysis/inspect_cache.py
 ```
+
+**Configuration**: `project_config.yaml` is machine-independent, and its relative paths resolve against the config file. Per-benchmark build and Java compatibility settings live in `benchmarks.yaml`. Set `JAVA_HOME`, `GRADLE_USER_HOME`, and `CHECKERFRAMEWORK` for machine-specific overrides; `--model` overrides the configured model.
 
 Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build output) is gitignored. A fresh checkout needs the Checker Framework vendored before running.
 
