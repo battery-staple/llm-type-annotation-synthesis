@@ -49,6 +49,47 @@ class VerificationVerdictTest {
     }
 
     @Test
+    fun `test patch additions are extracted from both flat and legacy test layouts`() {
+        val patch = Files.createTempDirectory("test-patch").resolve("test_patch.diff").toFile()
+        patch.deleteOnExit()
+        patch.writeText(
+            """
+            diff --git a/test/cms/controller/persistence/FooTest.java b/test/cms/controller/persistence/FooTest.java
+            --- a/test/cms/controller/persistence/FooTest.java
+            +++ b/test/cms/controller/persistence/FooTest.java
+            @@ -1,2 +1,12 @@
+            +    @Test
+            +    public void addedOne() {
+            +        assertThat(true).isTrue();
+            +    }
+            +
+            +    @Test
+            +    @DisplayName("two")
+            +    public void addedTwo() {
+            +    }
+            +
+            +    public void preExisting() {
+            diff --git a/src/test/java/com/example/BarTest.java b/src/test/java/com/example/BarTest.java
+            --- a/src/test/java/com/example/BarTest.java
+            +++ b/src/test/java/com/example/BarTest.java
+            @@ -1,2 +1,6 @@
+            +    @Test
+            +    void addedThree() {
+            +    }
+            """.trimIndent()
+        )
+
+        assertEquals(
+            setOf(
+                TestCoordinate(Fqcn("cms.controller.persistence.FooTest"), "addedOne"),
+                TestCoordinate(Fqcn("cms.controller.persistence.FooTest"), "addedTwo"),
+                TestCoordinate(Fqcn("com.example.BarTest"), "addedThree")
+            ),
+            VerificationStage.testsAddedByPatch(patch)
+        )
+    }
+
+    @Test
     fun `failed regression with valid JUnit evidence is substantive not missing`() {
         val xml = tempXml()
         val result = runResult(xml, listOf(outcome(TestStatus.FAILED)), success = false, exitCode = 1)

@@ -174,12 +174,21 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             val regressionDisplayName = regResult?.outcomes
                 ?.firstOrNull { it.testClass == input.sample.regressionTest.testClass }
                 ?.testMethod
+            // The test patch may add several tests that encode the fixed
+            // behaviour, not just the one designated regression test. They are
+            // part of the benchmark's bug evidence, not pre-existing tests, so
+            // a failing one must not turn TYPE_SUCCESS_RUNTIME_FAIL into
+            // SUITE_FAILURE.
+            val patchTests = testsAddedByPatch(input.sample.testPatchFile)
             val filtered = suiteResult.outcomes.filterNot {
-                it.testClass == input.sample.regressionTest.testClass &&
-                    (
-                        it.testMethod == input.sample.regressionTest.testMethod ||
-                            (regressionDisplayName != null && it.testMethod == regressionDisplayName)
-                        )
+                val isPatched = TestCoordinate(it.testClass, it.testMethod) in patchTests
+                isPatched || (
+                    it.testClass == input.sample.regressionTest.testClass &&
+                        (
+                            it.testMethod == input.sample.regressionTest.testMethod ||
+                                (regressionDisplayName != null && it.testMethod == regressionDisplayName)
+                            )
+                    )
             }
             suiteExecuted = filtered.count { it.status != TestStatus.SKIPPED }
             suiteFailed = filtered.count { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
@@ -524,6 +533,75 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
          * `verification_missing` is reserved for genuinely absent/unusable
          * evidence, never for assertion failures backed by valid reports.
          */
+        /**
+         * Java test methods added by the benchmark's `test_patch.diff`.
+         *
+         * The patch often adds several tests that encode the fixed behaviour.
+         * They are bug evidence, exactly like the designated regression test,
+         * and must be excluded from the "pre-existing suite" counts so a
+         * type-only fix is reported as TYPE_SUCCESS_RUNTIME_FAIL rather than
+         * SUITE_FAILURE.
+         */
+        internal fun testsAddedByPatch(patchFile: File): Set<TestCoordinate> {
+            if (!patchFile.isFile) return emptySet()
+            val tests = linkedSetOf<TestCoordinate>()
+            var currentFile: String? = null
+            var pendingTestAnnotation = false
+            patchFile.readLines().forEach { raw ->
+                when {
+                    raw.startsWith("diff --git ") -> {
+                        val parts = raw.removePrefix("diff --git ").trim().split(' ')
+                            .filter { it.isNotBlank() }
+                        currentFile = parts.lastOrNull()?.removePrefix("b/")
+                        pendingTestAnnotation = false
+                    }
+                    raw.startsWith("+") && !raw.startsWith("+++") -> {
+                        val line = raw.removePrefix("+").trim()
+                        if (line.startsWith("@Test") ||
+                            line.startsWith("@ParameterizedTest") ||
+                            line.startsWith("@RepeatedTest")
+                        ) {
+                            pendingTestAnnotation = true
+                        } else if (pendingTestAnnotation) {
+                            if (line.startsWith("@")) {
+                                // Another annotation (for example @DisplayName)
+                                // may sit between @Test and the method.
+                                return@forEach
+                            }
+                            val method = testMethodName(line)
+                            if (method != null) {
+                                val className = currentFile?.let(::classNameFromTestPath)
+                                if (className != null) {
+                                    tests += TestCoordinate(Fqcn(className), method)
+                                }
+                            }
+                            pendingTestAnnotation = false
+                        }
+                    }
+                }
+            }
+            return tests
+        }
+
+        private fun testMethodName(line: String): String? =
+            Regex(
+                """^(?:(?:public|protected|private|static|final|synchronized|abstract)\s+)*""" +
+                    """(?:void|[\w$.<>\[\], ?]+)\s+(\w+)\s*\("""
+            ).find(line)?.groupValues?.get(1)
+
+        internal fun classNameFromTestPath(path: String): String? {
+            val normalized = path.replace('\\', '/').removePrefix("a/").removePrefix("b/")
+            val relative = when {
+                normalized.contains("/src/test/java/") -> normalized.substringAfter("/src/test/java/")
+                normalized.startsWith("src/test/java/") -> normalized.removePrefix("src/test/java/")
+                normalized.startsWith("test/") -> normalized.removePrefix("test/")
+                else -> return null
+            }
+            val classPath = relative.removeSuffix(".java")
+            if (!classPath.contains('/')) return null
+            return classPath.replace('/', '.')
+        }
+
         fun decideVerdict(
             checkerMissing: Boolean,
             regEvidenceMissing: Boolean,
