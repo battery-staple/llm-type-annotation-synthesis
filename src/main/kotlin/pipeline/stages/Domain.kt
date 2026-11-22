@@ -128,6 +128,7 @@ enum class CommitClassification {
 
 @Serializable
 enum class AgentEventType {
+    @SerialName("initial_prompt") INITIAL_PROMPT,
     @SerialName("step_start") STEP_START,
     @SerialName("tool_call") TOOL_CALL,
     @SerialName("tool_result") TOOL_RESULT,

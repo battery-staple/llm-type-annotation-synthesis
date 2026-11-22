@@ -111,7 +111,14 @@ class CoroutineOpenCodeRunner(
             }
         }, "opencode-stderr").apply { isDaemon = true; start() }
 
-        val transcript = mutableListOf<AgentTranscriptEvent>()
+        val transcript = mutableListOf(
+            AgentTranscriptEvent(
+                timestamp = Instant.now().toString(),
+                eventType = AgentEventType.INITIAL_PROMPT,
+                turnIndex = 0,
+                content = prompt
+            )
+        )
         var turnIndex = 0
         var stepsCounted = 0
         var parsed = 0
