@@ -138,7 +138,14 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             val reportMissing = !result.success || result.xmlPaths.isEmpty()
             regEvidenceMissing = reportMissing || executed.isEmpty()
             regXmlName = snapshotXml(writer, result, ArtifactNames.TEST_RESULTS_XML, input.sample.regressionTest.testClass.value)
-            recordTestTelemetry(ctx, input, result, suiteKind = "regression_test", xmlArtifactName = regXmlName)
+            recordTestTelemetry(
+                ctx,
+                input,
+                result,
+                suiteKind = "regression_test",
+                xmlArtifactName = regXmlName,
+                isRegressionRun = true
+            )
             log.info { "Verification: T_reg passed=$regPassed evidenceMissing=$regEvidenceMissing outcomes=${result.outcomes.size}" }
         } else {
             // Record the missing-evidence run shape with zero counts for forensics.
@@ -154,9 +161,19 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         if (input.verificationScope == VerificationScope.FULL_SUITE) {
             log.info { "Verification: running pre-existing suite" }
             val suiteResult = buildRunner.runTests(worktree, testFilter = null, customQualsJar = input.lattice.customQualsJar)
+            // JUnit XML reports the display name, not the Java method name. The
+            // filtered regression run above tells us which display name belongs
+            // to the regression test, so exclude that exact outcome from the
+            // pre-existing-suite counts.
+            val regressionDisplayName = regResult?.outcomes
+                ?.firstOrNull { it.testClass == input.sample.regressionTest.testClass }
+                ?.testMethod
             val filtered = suiteResult.outcomes.filterNot {
                 it.testClass == input.sample.regressionTest.testClass &&
-                    it.testMethod == input.sample.regressionTest.testMethod
+                    (
+                        it.testMethod == input.sample.regressionTest.testMethod ||
+                            (regressionDisplayName != null && it.testMethod == regressionDisplayName)
+                        )
             }
             suiteExecuted = filtered.count { it.status != TestStatus.SKIPPED }
             suiteFailed = filtered.count { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
@@ -372,7 +389,8 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         input: VerificationInput,
         result: TestRunResult,
         suiteKind: String,
-        xmlArtifactName: String?
+        xmlArtifactName: String?,
+        isRegressionRun: Boolean = false
     ) {
         val outcomes = result.outcomes
         val (passed, failed, skipped) = countStatuses(outcomes)
@@ -405,8 +423,11 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
                 testSuite = outcome.testClass.packageName.ifBlank { outcome.testClass.value },
                 testClass = outcome.testClass.value,
                 testMethod = outcome.testMethod,
-                isRegressionTest = outcome.testClass == input.sample.regressionTest.testClass &&
-                    outcome.testMethod == input.sample.regressionTest.testMethod,
+                isRegressionTest = isRegressionRun ||
+                    (
+                        outcome.testClass == input.sample.regressionTest.testClass &&
+                            outcome.testMethod == input.sample.regressionTest.testMethod
+                        ),
                 status = outcome.status,
                 durationMs = outcome.durationMs,
                 failureMessage = outcome.failureMessage
