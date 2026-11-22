@@ -822,6 +822,7 @@ code, pre {
 
 .event-item.tool_call { border-left-color: var(--accent); }
 .event-item.tool_result { border-left-color: var(--green); }
+.event-item.tool-invocation { background: linear-gradient(90deg, rgba(88, 166, 255, 0.035), var(--bg-elev) 30%); }
 .event-item.guardrail { border-left-color: var(--red); background: rgba(248, 81, 73, 0.06); }
 .event-item.compilation { border-left-color: var(--yellow); background: rgba(210, 153, 34, 0.06); }
 .event-item.text { border-left-color: var(--purple); }
@@ -834,6 +835,90 @@ code, pre {
   margin-bottom: 4px;
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.event-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.event-heading strong {
+  color: var(--text);
+}
+
+.event-heading code {
+  color: var(--accent);
+}
+
+.event-heading .tool-path {
+  max-width: min(60vw, 620px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.tool-call-arguments {
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.tool-args-title {
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.tool-arg-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 150px) minmax(0, 1fr);
+  gap: 10px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+
+.tool-arg-label {
+  color: var(--text-muted);
+}
+
+.tool-arg-value {
+  min-width: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.tool-arg-block {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.tool-arg-block .code-collapse {
+  margin-top: 0;
+  padding: 4px 0 2px;
+}
+
+.tool-arg-block .event-pre {
+  margin-top: 3px;
+  max-height: 300px;
+}
+
+.tool-result-summary {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .event-pre {

@@ -1873,6 +1873,148 @@
     `;
   }
 
+  function parseToolArguments(value) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value !== "string") return null;
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function stringifyToolValue(value) {
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(value, null, 2) ?? String(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  function formatToolResponse(value) {
+    if (typeof value !== "string") return stringifyToolValue(value);
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object") return JSON.stringify(parsed, null, 2);
+    } catch {
+      // Keep ordinary text output unchanged.
+    }
+    return value;
+  }
+
+  function toolArgumentPath(value) {
+    const args = parseToolArguments(value);
+    if (!args) return "";
+    for (const key of ["filePath", "file_path", "path", "target", "file", "filename", "absolutePath"]) {
+      if (typeof args[key] === "string" && args[key].trim()) return args[key].trim();
+    }
+    return "";
+  }
+
+  function toolResultSummary(value) {
+    let result = value;
+    if (typeof value === "string") {
+      try {
+        result = JSON.parse(value);
+      } catch {
+        return "";
+      }
+    }
+    if (!result || typeof result !== "object" || Array.isArray(result)) return "";
+    for (const key of ["title", "message", "summary"]) {
+      if (typeof result[key] === "string" && result[key].trim()) return result[key].trim();
+    }
+    return "";
+  }
+
+  function toolArgumentLabel(key) {
+    const labels = {
+      filePath: "File path",
+      file_path: "File path",
+      path: "Path",
+      oldString: "Replace this text",
+      old_string: "Replace this text",
+      newString: "With this text",
+      new_string: "With this text",
+      replaceAll: "Replace all matches",
+      replace_all: "Replace all matches",
+      workdir: "Working directory",
+      cwd: "Working directory",
+      include: "File filter",
+    };
+    return labels[key] || key.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase());
+  }
+
+  function canonicalToolName(toolName) {
+    const name = String(toolName || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (["write", "writefile", "filewrite"].includes(name)) return "write";
+    if (["edit", "editfile", "fileedit", "replace"].includes(name)) return "edit";
+    if (["read", "readfile", "fileread"].includes(name)) return "read";
+    if (["bash", "shell", "shellcommand", "runcommand"].includes(name)) return "bash";
+    if (["glob", "findfiles"].includes(name)) return "glob";
+    if (["grep", "search", "ripgrep", "rg"].includes(name)) return "search";
+    return "other";
+  }
+
+  function renderToolArgumentField(key, value, toolType) {
+    const label = toolArgumentLabel(key);
+    const text = stringifyToolValue(value);
+    const isEditText = toolType === "edit" && ["oldString", "old_string", "newString", "new_string"].includes(key);
+    const isLongText = typeof value === "string" && (text.length > 150 || text.includes("\n"));
+    const isStructured = value !== null && typeof value === "object";
+    const isWriteContent = toolType === "write" && ["content", "contents", "fileContents", "file_content", "text"].includes(key);
+    const isCommand = toolType === "bash" && key === "command";
+    if (isEditText || isLongText || isStructured || isWriteContent || isCommand) {
+      const lines = text.split(/\r?\n/).length;
+      const open = text.length <= 700 && lines <= 10;
+      return `<div class="tool-arg-block">${renderCollapsibleCode(label, text, open)}</div>`;
+    }
+    return `
+      <div class="tool-arg-row">
+        <span class="tool-arg-label">${esc(label)}</span>
+        <span class="tool-arg-value">${esc(text)}</span>
+      </div>
+    `;
+  }
+
+  function renderToolArguments(toolName, value) {
+    const args = parseToolArguments(value);
+    if (!args) {
+      const text = stringifyToolValue(value);
+      const lines = text.split(/\r?\n/).length;
+      return `<div class="tool-call-arguments"><div class="tool-args-title">Input</div>${renderCollapsibleCode("Value", text, text.length <= 700 && lines <= 10)}</div>`;
+    }
+
+    const toolType = canonicalToolName(toolName);
+    const preferredKeys = {
+      write: ["filePath", "file_path", "path", "file", "content", "contents", "fileContents", "file_content", "text"],
+      edit: ["filePath", "file_path", "path", "oldString", "old_string", "newString", "new_string", "replaceAll", "replace_all"],
+      read: ["filePath", "file_path", "path", "file", "offset", "limit"],
+      bash: ["command", "workdir", "cwd", "timeout", "description"],
+      glob: ["pattern", "path"],
+      search: ["pattern", "path", "include"],
+    }[toolType] || [];
+    const keys = [
+      ...preferredKeys.filter((key) => Object.prototype.hasOwnProperty.call(args, key)),
+      ...Object.keys(args).filter((key) => !preferredKeys.includes(key)),
+    ];
+    const fields = keys.map((key) => renderToolArgumentField(key, args[key], toolType)).join("");
+    return `
+      <div class="tool-call-arguments">
+        <div class="tool-args-title">Arguments</div>
+        ${fields || `<span class="muted">No arguments</span>`}
+      </div>
+    `;
+  }
+
+  function renderToolResponse(value) {
+    const text = formatToolResponse(value);
+    const lines = text.split(/\r?\n/).length;
+    return renderCollapsibleCode("Response", text, text.length <= 700 && lines <= 10);
+  }
+
   function renderTimelineEvent(ev) {
     if (ev.kind === "guardrail") {
       const g = ev.guard;
@@ -1900,28 +2042,39 @@
       `;
     }
 
+    const isToolEvent = ev.kind === "tool_call" || ev.kind === "tool_result" || ev.paired;
     let body = "";
     const thinkingText = ev.thinking || ((ev.kind === "thinking" || ev.kind === "reasoning") ? ev.content : null);
     if (thinkingText) {
       body += renderCollapsibleCode("Thinking", thinkingText, false);
     }
     if (ev.arguments !== undefined && ev.arguments !== null) {
-      const argStr = typeof ev.arguments === "string" ? ev.arguments : JSON.stringify(ev.arguments, null, 2);
-      body += renderCollapsibleCode("Call", argStr);
+      body += isToolEvent
+        ? renderToolArguments(ev.toolName, ev.arguments)
+        : renderCollapsibleCode("Call", stringifyToolValue(ev.arguments));
     }
     if (ev.result !== undefined && ev.result !== null && ev.result !== "") {
-      const resStr = typeof ev.result === "string" ? ev.result : JSON.stringify(ev.result, null, 2);
-      body += renderCollapsibleCode("Result", resStr);
+      if (isToolEvent) {
+        const summary = toolResultSummary(ev.result);
+        if (summary) body += `<div class="tool-result-summary">${esc(summary)}</div>`;
+        body += renderToolResponse(ev.result);
+      } else {
+        body += renderCollapsibleCode("Result", stringifyToolValue(ev.result));
+      }
     }
     if (!body && ev.content && ev.content !== ev.toolName) {
       body += renderCollapsibleCode("Output", ev.content);
     }
 
-    const kindLabel = ev.paired ? "tool_call &rarr; tool_result" : esc(ev.kind);
+    const toolPath = isToolEvent ? toolArgumentPath(ev.arguments) : "";
+    const kindLabel = isToolEvent
+      ? (ev.paired ? "Tool call + response" : ev.kind === "tool_result" ? "Tool response" : "Tool call")
+      : esc(ev.kind);
+    const toolPathHtml = toolPath ? `<code class="tool-path" title="${esc(toolPath)}">${esc(toolPath)}</code>` : "";
     return `
-      <div class="event-item ${esc(ev.kind)}" data-kind="${esc(ev.kind)}">
+      <div class="event-item ${esc(ev.kind)} ${isToolEvent ? "tool-invocation" : ""}" data-kind="${ev.paired ? "tool_call tool_result" : esc(ev.kind)}">
         <div class="event-top">
-          <span><strong>${kindLabel}</strong>${ev.toolName ? ` &middot; <code>${esc(ev.toolName)}</code>` : ""}</span>
+          <span class="event-heading"><strong>${kindLabel}</strong>${ev.toolName ? ` <code>${esc(ev.toolName)}</code>` : ""}${toolPathHtml}</span>
           <span>${esc(fmtTs(ev.timestamp))}</span>
         </div>
         ${body}
@@ -1952,7 +2105,7 @@
       container.querySelectorAll(".turn-group").forEach((tg) => {
         let anyVisible = false;
         tg.querySelectorAll(".event-item").forEach((ev) => {
-          const matchKind = !kind || ev.dataset.kind === kind;
+          const matchKind = !kind || (ev.dataset.kind || "").split(/\s+/).includes(kind);
           const matchQ = !q || ev.textContent.toLowerCase().includes(q);
           const show = matchKind && matchQ;
           ev.classList.toggle("hidden", !show);
