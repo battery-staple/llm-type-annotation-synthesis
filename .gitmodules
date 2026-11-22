@@ -5,3 +5,33 @@
 	path = eval-repos/cmsx
 	url = git@gitlab.cs.cornell.edu:cmsx/cmsx.git
 	branch = master
+[submodule "eval-repos/JSqlParser"]
+	path = eval-repos/JSqlParser
+	url = https://github.com/JSQLParser/JSqlParser.git
+[submodule "eval-repos/RoaringBitmap"]
+	path = eval-repos/RoaringBitmap
+	url = https://github.com/RoaringBitmap/RoaringBitmap.git
+[submodule "eval-repos/wiremock"]
+	path = eval-repos/wiremock
+	url = https://github.com/wiremock/wiremock.git
+[submodule "eval-repos/resilience4j"]
+	path = eval-repos/resilience4j
+	url = https://github.com/resilience4j/resilience4j.git
+[submodule "eval-repos/caffeine"]
+	path = eval-repos/caffeine
+	url = https://github.com/ben-manes/caffeine.git
+[submodule "eval-repos/agrona"]
+	path = eval-repos/agrona
+	url = https://github.com/aeron-io/agrona.git
+[submodule "eval-repos/jobrunr"]
+	path = eval-repos/jobrunr
+	url = https://github.com/jobrunr/jobrunr.git
+[submodule "eval-repos/picocli"]
+	path = eval-repos/picocli
+	url = https://github.com/remkop/picocli.git
+[submodule "eval-repos/JsonPath"]
+	path = eval-repos/JsonPath
+	url = https://github.com/json-path/JsonPath.git
+[submodule "eval-repos/reactor-core"]
+	path = eval-repos/reactor-core
+	url = https://github.com/reactor/reactor-core.git
