@@ -84,8 +84,14 @@ class PipelineOrchestrator(
                 logger.info { "Crawler reached verified commit limit=$limit; stopping" }
                 break
             }
+            // A root commit has no parent, hence no C-1 to triage against.
+            val firstParent = meta.parents.firstOrNull()
+            if (firstParent == null) {
+                logger.info { "Crawler: skipping root commit ${meta.hash.take(8)} (no parent)" }
+                continue
+            }
             val commitHash = CommitHash(meta.hash)
-            val parentHash = CommitHash(meta.parents.firstOrNull() ?: "")
+            val parentHash = CommitHash(firstParent)
             val commitEntry = BenchmarkEntry(
                 benchmarkId = BenchmarkId.of(target.benchmarkId.canonical, commitHash),
                 repoUrl = target.repoUrl,
