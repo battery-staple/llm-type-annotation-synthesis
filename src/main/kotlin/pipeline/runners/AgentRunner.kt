@@ -75,17 +75,18 @@ class CoroutineOpenCodeRunner(
         // A throwaway DB outside cwd keeps pipeline writes off user sessions.
         // It lives outside cwd deliberately: stage code mirrors cwd into the
         // worktree, so anything inside cwd would leak into patches.
-        var ownedDbPath: String? = null
-        if (!env.containsKey("OPENCODE_DB")) {
-            if (databasePath != null) {
-                env["OPENCODE_DB"] = databasePath
-            } else {
-                ownedDbPath = runCatching {
-                    Files.createTempFile("opencode-pipeline-${UUID.randomUUID()}-", ".db")
-                        .toAbsolutePath().toString()
-                }.getOrNull()
-                if (ownedDbPath != null) env["OPENCODE_DB"] = ownedDbPath
-            }
+        // Always override an inherited OPENCODE_DB. A shared DB is never safe
+        // here: concurrent runs, subagents, and SIGKILL during terminateTree()
+        // can corrupt the user's session database.
+        env.remove("OPENCODE_DB")
+        val ownedDbPath: String? = if (databasePath != null) {
+            env["OPENCODE_DB"] = databasePath
+            null
+        } else {
+            Files.createTempFile(
+                "opencode-pipeline-${UUID.randomUUID()}-",
+                ".db"
+            ).toAbsolutePath().toString().also { env["OPENCODE_DB"] = it }
         }
 
         val process = builder.start()
