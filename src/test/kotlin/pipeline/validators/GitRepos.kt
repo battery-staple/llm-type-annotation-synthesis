@@ -29,6 +29,6 @@ internal object GitRepos {
             target.writeText(text)
         }
         runGit(dir, "add", "-A")
-        runGit(dir, "commit", "-q", "-m", "baseline")
+        runGit(dir, "commit", "--no-gpg-sign", "-q", "-m", "baseline")
     }
 }

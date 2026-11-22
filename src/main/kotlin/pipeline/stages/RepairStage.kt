@@ -396,7 +396,7 @@ internal fun commitAnnotatedBaseline(worktree: File) {
         worktree,
         "-c", "user.name=Pipeline",
         "-c", "user.email=pipeline@localhost",
-        "commit", "-m", "annotated baseline",
+        "commit", "--no-gpg-sign", "-m", "annotated baseline",
     )
     if (commit.exitCode != 0) {
         throw RuntimeException("annotated baseline commit failed: ${commit.output.takeLast(2000)}")
