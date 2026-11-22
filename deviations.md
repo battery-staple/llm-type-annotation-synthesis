@@ -80,7 +80,11 @@ the crawler) are not listed unless the code had to interpret the plan.
     shared background OpenCode service serialized/hung pipeline agents and leaked
     the main session's working directory. `--standalone` gives each pipeline
     invocation a private server; closing stdin prevents non-interactive runs from
-    waiting for EOF.
+    waiting for EOF. Every invocation also receives a fresh `OPENCODE_DB` in the
+    system temp directory; an inherited value is unconditionally overridden and
+    the temp database is deleted afterward. This keeps pipeline agents, their
+    subagents, and SIGKILL cleanup off the shared `~/.local/share/opencode/opencode.db`.
+    `AgentRunnerIsolationTest` asserts the override and deletion.
 16. **Seed/temperature are passed through environment variables.** The installed
     OpenCode CLI has no seed/temperature flags. They are still part of every CAS
     key. The CLI does not read them, so generation is **not actually seeded**;
