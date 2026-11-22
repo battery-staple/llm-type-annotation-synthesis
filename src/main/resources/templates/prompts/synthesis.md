@@ -42,7 +42,13 @@ the guide even when the Java sources are already present.
      Annotation declarations with no members only.
 
 2. **A declarative `placement_guide.md`** in the current working directory with
-   exactly these four sections (exact headings required):
+   exactly these five sections (exact headings required):
+
+## Qualifier Semantics
+
+- <one `- ` bullet per qualifier you declared: `@QualifierName` followed by what values it
+  denotes (for example which identifier domain or trust level), and how it relates to the
+  other qualifiers in the lattice (root, child, or bottom). At least one bullet.>
 
 ## Defaulting Invariants
 

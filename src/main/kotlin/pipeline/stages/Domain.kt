@@ -172,7 +172,8 @@ enum class RuleCategory {
     @SerialName("default") DEFAULT,
     @SerialName("source") SOURCE,
     @SerialName("sink") SINK,
-    @SerialName("sanitizer") SANITIZER
+    @SerialName("sanitizer") SANITIZER,
+    @SerialName("semantics") SEMANTICS
 }
 
 @Serializable

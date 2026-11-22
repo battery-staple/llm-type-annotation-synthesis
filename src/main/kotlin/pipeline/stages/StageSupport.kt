@@ -202,6 +202,7 @@ object PlacementGuideParser {
             val line = rawLine.trim()
             if (line.startsWith("#")) {
                 current = when {
+                    line.contains("semantics", ignoreCase = true) -> RuleCategory.SEMANTICS
                     line.contains("default", ignoreCase = true) -> RuleCategory.DEFAULT
                     line.contains("source", ignoreCase = true) || line.contains("introducer", ignoreCase = true) -> RuleCategory.SOURCE
                     line.contains("sink", ignoreCase = true) || line.contains("consumer", ignoreCase = true) -> RuleCategory.SINK
