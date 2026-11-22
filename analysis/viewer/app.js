@@ -21,6 +21,7 @@
     matrixStage: null,
     selectedBatchId: null,
     expandedBatches: new Set(),
+    collapsedBatches: new Set(),
     hideDiscardedInMatrix: false,
     placementDiffText: "",
     placementDiffRequest: 0,
@@ -646,7 +647,10 @@
       const incompleteCount = outcomes.filter((o) => ["failed", "interrupted", "stopped", "unknown"].includes(o.kind)).length;
       const runningCount = outcomes.filter((o) => o.kind === "running").length;
       const hasSelected = runs.some((r) => r.run_id === state.selectedRunId);
-      const isExpanded = searchActive || hasSelected || state.expandedBatches.has(item.batchId);
+      const autoExpanded = searchActive || hasSelected;
+      const isExpanded =
+        state.expandedBatches.has(item.batchId) ||
+        (autoExpanded && !state.collapsedBatches.has(item.batchId));
       const isActiveBatch = state.viewMode === "matrix" && state.selectedBatchId === item.batchId;
 
       const summaryPills = [
@@ -663,11 +667,11 @@
 
       return `
         <div class="batch-group">
-          <div class="batch-card ${isActiveBatch ? "active" : ""}" data-batch-id="${esc(item.batchId)}">
+          <div class="batch-card ${isActiveBatch ? "active" : ""}" data-batch-id="${esc(item.batchId)}" role="button" tabindex="0" aria-expanded="${isExpanded}" title="Click to ${isExpanded ? "collapse" : "expand"} this batch">
             <div class="run-card-top">
-              <button class="batch-toggle-btn" data-toggle-batch="${esc(item.batchId)}" title="${isExpanded ? "Collapse" : "Expand"} commits">${isExpanded ? "&#x25BE;" : "&#x25B8;"}</button>
+              <button class="batch-toggle-btn" data-toggle-batch="${esc(item.batchId)}" tabindex="-1" aria-hidden="true" title="${isExpanded ? "Collapse" : "Expand"} commits">${isExpanded ? "&#x25BE;" : "&#x25B8;"}</button>
               <span class="run-card-bench" title="Crawl batch ${esc(item.batchId)}">${esc(repoLabel)}</span>
-              <span class="badge badge-muted">${runs.length} commits</span>
+              <button class="batch-filter-btn badge badge-muted" data-batch-filter="${esc(item.batchId)}" title="Show this batch in the Stage Matrix">${runs.length} commits</button>
             </div>
             <div class="run-card-id" title="Batch ID: ${esc(item.batchId)}">${esc(item.batchId.slice(0, 8))} &middot; ${esc(fmtTs(first.started_at))}</div>
             <div class="run-card-meta">
@@ -680,22 +684,35 @@
       `;
     }).join("");
 
-    listEl.querySelectorAll(".batch-toggle-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const bid = btn.dataset.toggleBatch;
-        if (state.expandedBatches.has(bid)) {
-          state.expandedBatches.delete(bid);
-        } else {
-          state.expandedBatches.add(bid);
+    function toggleBatch(batchId, currentlyExpanded) {
+      if (currentlyExpanded) {
+        state.expandedBatches.delete(batchId);
+        state.collapsedBatches.add(batchId);
+      } else {
+        state.expandedBatches.add(batchId);
+        state.collapsedBatches.delete(batchId);
+      }
+      renderRunsList();
+    }
+
+    listEl.querySelectorAll(".batch-card").forEach((el) => {
+      const isExpanded = () => el.getAttribute("aria-expanded") === "true";
+      el.addEventListener("click", () => {
+        toggleBatch(el.dataset.batchId, isExpanded());
+      });
+      el.addEventListener("keydown", (e) => {
+        if (e.target !== el) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          toggleBatch(el.dataset.batchId, isExpanded());
         }
-        renderRunsList();
       });
     });
 
-    listEl.querySelectorAll(".batch-card").forEach((el) => {
-      el.addEventListener("click", () => {
-        state.selectedBatchId = el.dataset.batchId;
+    listEl.querySelectorAll(".batch-filter-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        state.selectedBatchId = btn.dataset.batchFilter;
         setViewMode("matrix");
         renderRunsList();
       });

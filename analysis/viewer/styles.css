@@ -1214,13 +1214,30 @@ code, pre {
 }
 
 .batch-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
   background: transparent;
   border: none;
   color: inherit;
   cursor: pointer;
-  padding: 0 4px 0 0;
-  font-size: 12px;
+  padding: 0;
+  font-size: 22px;
   line-height: 1;
+}
+
+.batch-filter-btn {
+  font-family: inherit;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.batch-filter-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
 }
 
 .batch-children {
