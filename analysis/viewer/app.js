@@ -156,6 +156,16 @@
     }
   }
 
+  // A step row is written when the step starts; completed_at stays null until it finishes.
+  function isStepRunning(step) {
+    return !!step && !step.completed_at && !step.success;
+  }
+
+  function stepState(step) {
+    if (isStepRunning(step)) return "running";
+    return step.success ? "ok" : "fail";
+  }
+
   function statusBadgeClass(status) {
     switch (status) {
       case "success": return "badge-green";
@@ -322,9 +332,10 @@
       const matches = (r.steps || []).filter((s) => s.step_name === stName);
       const latest = matches[matches.length - 1];
       if (!latest) return `<span class="stage-mini-dot" title="${esc(stName)}: not run"></span>`;
-      const cls = latest.success ? "ok" : "fail";
+      const cls = stepState(latest);
       const cached = latest.cache_hit ? " cached" : "";
-      return `<span class="stage-mini-dot ${cls}${cached}" title="${esc(stName)}: ${latest.success ? "ok" : "failed"}${latest.cache_hit ? " (cached)" : ""}"></span>`;
+      const stLabel = { ok: "ok", fail: "failed", running: "running" }[cls];
+      return `<span class="stage-mini-dot ${cls}${cached}" title="${esc(stName)}: ${stLabel}${latest.cache_hit ? " (cached)" : ""}"></span>`;
     }).join("");
 
     const triageMode = r.key_config?.triage_mode || "manifest";
@@ -465,7 +476,7 @@
       state.activeStageTab = "overview";
       // Pick the last executed step (or first) by default so failures are immediately visible
       const steps = detail.steps || [];
-      const failed = steps.find((s) => !s.success);
+      const failed = steps.find((s) => !s.success && !isStepRunning(s));
       const target = failed || steps[steps.length - 1] || null;
       state.selectedStepName = target ? target.step_name : null;
       state.selectedStepId = target ? target.step_id : null;
@@ -595,7 +606,7 @@
           </div>
         `;
       }
-      const dotCls = latest.success ? "ok" : "fail";
+      const dotCls = stepState(latest);
       const dur = fmtDuration(latest.started_at, latest.completed_at);
       const turns = latest.turns_taken ? `${latest.turns_taken}t` : "";
       const attBadge = attempts.length > 1 ? ` (${attempts.length} att)` : "";
@@ -606,7 +617,7 @@
             <span class="stage-dot ${dotCls}"></span>
           </div>
           <div class="step-card-sub">
-            <span>${latest.cache_hit ? "cached" : (latest.success ? "passed" : "failed")}</span>
+            <span>${latest.cache_hit ? "cached" : ({ ok: "passed", fail: "failed", running: "running" }[dotCls])}</span>
             <span>${esc(turns)} ${esc(dur)}</span>
           </div>
         </button>
@@ -640,7 +651,7 @@
     }
     insp.classList.remove("hidden");
 
-    $("stageStatusIcon").className = `stage-dot ${step.success ? "ok" : "fail"}`;
+    $("stageStatusIcon").className = `stage-dot ${stepState(step)}`;
     $("stageTitle").textContent = step.step_name;
 
     const cacheBadge = $("stageCacheBadge");
@@ -676,7 +687,7 @@
     if (attempts.length > 1) {
       attWrap.classList.remove("hidden");
       const sel = $("attemptSelector");
-      sel.innerHTML = attempts.map((a) => `<option value="${esc(a.step_id)}">#${a.attempt_number} (${a.success ? "ok" : "fail"})</option>`).join("");
+      sel.innerHTML = attempts.map((a) => `<option value="${esc(a.step_id)}">#${a.attempt_number} (${{ ok: "ok", fail: "fail", running: "running" }[stepState(a)]})</option>`).join("");
       sel.value = step.step_id;
     } else {
       attWrap.classList.add("hidden");
@@ -843,7 +854,7 @@
         <table class="kv-table">
           <tr><th>Step ID</th><td><code>${esc(step.step_id)}</code></td></tr>
           <tr><th>Attempt</th><td>${esc(step.attempt_number)}</td></tr>
-          <tr><th>Success</th><td><span class="badge ${step.success ? "badge-green" : "badge-red"}">${step.success ? "true" : "false"}</span></td></tr>
+          <tr><th>Success</th><td>${isStepRunning(step) ? `<span class="badge badge-yellow">running</span>` : `<span class="badge ${step.success ? "badge-green" : "badge-red"}">${step.success ? "true" : "false"}</span>`}</td></tr>
           <tr><th>Cache Hit</th><td>${step.cache_hit ? "Yes" : "No"}</td></tr>
           ${step.cache_hit ? `<tr><th>Cache Origin</th><td>${step.cache_origin
             ? `<button class="link-btn cache-origin-link" data-origin-run="${esc(step.cache_origin.run_id)}">${esc(step.cache_origin.run_id.slice(0, 8))}</button> <span class="muted">(${esc(step.cache_origin.benchmark_id)} · ${esc(fmtTs(step.cache_origin.started_at))})</span>`
@@ -929,7 +940,7 @@
       const tm = step.triage_metadata || {};
       const kc = r.key_config || {};
       const provenance = tm.source_provenance || kc.triage_mode || "manifest";
-      const triageStatus = r.triage_status || (step.success ? "verified" : "discarded");
+      const triageStatus = r.triage_status || (isStepRunning(step) ? "running" : (step.success ? "verified" : "discarded"));
       const discardReason = r.discard_reason || tm.discard_reason || "-";
       const classification = r.classification || tm.llm_classification || "-";
       const score = r.bugfix_score ?? tm.bugfix_score;
@@ -1889,8 +1900,9 @@
   function renderMatrixCell(run, stageName) {
     const st = latestStep(run, stageName);
     if (!st) return `<td class="matrix-cell"><span class="muted">-</span></td>`;
-    const cls = st.success ? "badge-ok" : "badge-fail";
-    const label = st.success ? "ok" : "fail";
+    const state = stepState(st);
+    const cls = { ok: "badge-ok", fail: "badge-fail", running: "badge-yellow" }[state];
+    const label = state;
     const cached = st.cache_hit ? " (C)" : "";
     const tok = st.total_tokens ? ` · ${fmtNum(st.total_tokens)}t` : "";
     return `
@@ -1982,7 +1994,7 @@
                 <tr class="matrix-focus-row" data-run-id="${esc(r.run_id)}" data-stage="triage">
                   <td><strong>${esc(r.benchmark_id)}</strong> <span class="muted" style="font-size:11px;">${esc((r.commit_hash || "").slice(0, 8))}</span></td>
                   <td><span class="badge badge-muted">${esc(mode)}</span></td>
-                  <td><code>${esc(r.triage_status || (st ? (st.success ? "verified" : "discarded") : "not_run"))}</code></td>
+                  <td><code>${esc(r.triage_status || (st ? (isStepRunning(st) ? "running" : (st.success ? "verified" : "discarded")) : "not_run"))}</code></td>
                   <td><code>${esc(r.classification || "-")}</code></td>
                   <td>${r.bugfix_score !== null && r.bugfix_score !== undefined ? `<code>${esc(r.bugfix_score)}</code>` : "-"}</td>
                   <td><code>${esc(r.discard_reason || "-")}</code></td>
@@ -2015,7 +2027,7 @@
               const st = latestStep(r, stage);
               const statusBadge = !st
                 ? `<span class="muted">not run</span>`
-                : `<span class="badge ${st.success ? "badge-ok" : "badge-fail"}">${st.success ? "ok" : "fail"}</span>`;
+                : `<span class="badge ${{ ok: "badge-ok", fail: "badge-fail", running: "badge-yellow" }[stepState(st)]}">${stepState(st)}</span>`;
               const note = st?.compiler_diagnostics ? st.compiler_diagnostics.slice(0, 80) : (r.verdict || "");
               return `
                 <tr class="matrix-focus-row" data-run-id="${esc(r.run_id)}" data-stage="${esc(stage)}">

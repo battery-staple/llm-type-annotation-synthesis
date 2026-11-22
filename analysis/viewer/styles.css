@@ -230,6 +230,7 @@ code, pre {
 
 .stage-mini-dot.ok { background: var(--green); }
 .stage-mini-dot.fail { background: var(--red); }
+.stage-mini-dot.running { background: var(--yellow); animation: step-pulse 1.2s ease-in-out infinite; }
 .stage-mini-dot.cached { box-shadow: inset 0 0 0 1px var(--accent); }
 
 /* Buttons & Badges */
@@ -507,6 +508,8 @@ code, pre {
 
 .stage-dot.ok { background: var(--green); }
 .stage-dot.fail { background: var(--red); }
+.stage-dot.running { background: var(--yellow); animation: step-pulse 1.2s ease-in-out infinite; }
+@keyframes step-pulse { 50% { opacity: 0.35; } }
 
 .step-card-sub {
   font-size: 11px;
