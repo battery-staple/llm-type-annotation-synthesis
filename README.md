@@ -128,18 +128,33 @@ Crawler mode reads repositories from `repos.yaml`. `triage.depth` (default
 (`--depth 1000` for 1,000 commits). `--limit` is the maximum number of
 verified samples admitted to downstream stages, not a scan limit: all
 non-root crawled commits are ingested and triaged even after the downstream
-limit is reached. Use `--jobs` to bound concurrent crawler commit runners
-(default `1`; crawler mode only):
+limit is reached. Use these independent controls (and their config keys):
+
+- `triage.jobs` / `--jobs` (default `1`): concurrent crawler commit runners.
+- `concurrency.agents` / `--agent-jobs` (default `8`): concurrent agent/LLM
+  calls.
+- `concurrency.builds` / `--build-jobs` (default `2`): concurrent Gradle
+  compile, test, and Checker invocations.
+
+`jobs` still bounds whole per-commit pipelines. Agent and build semaphores are
+nested within those pipelines and independently cap those resource types; they
+do not increase the number of commit runners. For example, on an M2 Max:
 
 ```bash
 ./build/install/pipeline/bin/pipeline run --config project_config.yaml \
   --benchmark synthetic-id-swap --triage-mode crawler \
-  --depth 1000 --jobs 4 --limit 1000
+  --depth 1000 --jobs 8 --agent-jobs 8 --build-jobs 2 --limit 1000
 ```
 
-The current `jobs` bound covers the whole per-commit runner. Agent/LLM and
-Gradle concurrency are not independently controlled yet; separate agent/build
-concurrency is the next recommended change, not an implemented feature.
+Remember that `--depth` defaults to only 20 commits, so raise it explicitly for
+large crawls. `--limit` is downstream-only and does not reduce scanning,
+ingestion, or triage.
+
+For a staged pilot, start with 25/50 commits, then 100/250 commits, using 8
+agents and 2 builds. Increase agents to 12–16 only if the provider is stable;
+keep heavy Checker builds at 1–2. Monitor wall time, agent latency and HTTP
+429s, Gradle/Checker memory, Gradle daemon count, and timeout/retry rate before
+scaling further.
 
 When a verified sample is beyond the downstream gate, its run ends as
 `triage_only`: it has no evaluation verdict, and its triage CAS bundle is
@@ -164,9 +179,13 @@ seed DBs/sidecars, and stale per-invocation temporary DBs.
 Database-operation timing/success telemetry is stored in
 `db_operation_metrics` and summarized by `v_db_operation_summary`. Retry
 attempts and decisions are stored in `retry_events` and summarized by
-`v_retry_summary`. The viewer provides run-level lifecycle context; use SQL
-or the offline `analysis/evaluate_metrics.py` report alongside these views to
-inspect database operations and retries.
+`v_retry_summary`. Subprocess timing telemetry is stored in
+`subprocess_metrics` and summarized by `v_subprocess_summary`; rows record the
+stage, subprocess kind, duration, exit code, timeout status, and success.
+The viewer exposes subprocess summaries, and the `evaluate_metrics.py`
+subprocess section provides offline aggregate timing/outcome reporting. The
+viewer also provides run-level lifecycle context; use these alongside the
+database-operation and retry summaries.
 
 Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build output) is gitignored. A fresh checkout needs the Checker Framework vendored before running.
 
@@ -271,7 +290,6 @@ Run it (from the repository root, after `./gradlew installDist`):
   be raised explicitly for large crawls; `--limit` gates downstream work, not
   ingestion/triage. This remains experimental, not a claim of deterministic or
   production-ready 1,000-commit operation.
-- Operational limits remain: agent/LLM and Gradle concurrency are not
-  separately bounded; output/transcript caps and daemon policy need further
-  work; and larger runs require resource piloting. See `deviations.md`.
+- Operational limits remain: output/transcript caps and daemon policy need
+  further work, and larger runs require resource piloting. See `deviations.md`.
 - Known limitations and implementation gaps are tracked in `deviations.md`.

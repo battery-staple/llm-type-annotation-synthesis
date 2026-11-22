@@ -11,12 +11,14 @@ triage:
   # Maximum verified samples admitted downstream (not a scan cap): all non-root
   # crawled commits are still ingested and triaged.
   # limit: 1000
-  # Concurrent whole per-commit crawler runners; default 1, crawler-only.
-  # Agent/LLM and Gradle concurrency are configured independently below.
+  # Concurrent whole per-commit crawler runners; default 1, crawler mode only.
+  # Nested agent and build limits below are independent resource semaphores.
   # jobs: 1
   bugfix_threshold: 0.75
 
-# Global process limits. One build gate covers compile, test, and checker work.
+# Global process limits: nested independent semaphores within each commit
+# pipeline. Agents are concurrent LLM calls (default 8); builds covers Gradle
+# compile/test/Checker invocations (default 2). triage.jobs bounds whole runners.
 concurrency:
   agents: 8
   builds: 2

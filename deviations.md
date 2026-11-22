@@ -334,13 +334,15 @@ the crawler) are not listed unless the code had to interpret the plan.
     `v_evaluation_verdicts`, `outcome_kind='triage_only'` distinguishes this
     from evaluation failure; its verdict is NULL. The viewer/offline metrics
     report expose the outcome as not evaluated, not as a failed evaluation.
-54. **Crawler concurrency is not independently partitioned by resource type.**
-    `jobs` currently bounds the whole commit runner; it does not separately
-    limit agent/LLM calls and Gradle builds. Separate agent/build concurrency
-    controls are recommended next, but are not implemented. This scheduler is
-    not a guarantee of deterministic behavior or production readiness for
-    1,000-commit crawls; output/transcript caps, daemon policy, and resource
-    piloting remain operational limits.
+54. **Crawler, agent, and build concurrency have separate controls.**
+     `triage.jobs` / `--jobs` (default 1) bounds concurrent whole per-commit
+     crawler runners. Nested, independent semaphores bound agent/LLM calls via
+     `concurrency.agents` / `--agent-jobs` (default 8) and Gradle compile,
+     test, and Checker invocations via `concurrency.builds` / `--build-jobs`
+     (default 2). The nested limits do not replace the whole-pipeline bound.
+     This scheduler is not a guarantee of deterministic behavior or production
+     readiness for 1,000-commit crawls; output/transcript caps, daemon policy,
+     and resource piloting remain operational limits.
 55. **Run worktree/scratch retention follows lifecycle outcome.** Successful
     and `triage_only` runs remove their run worktrees and scratch data. Failures,
     discards, and `--stop-after` runs are retained for debugging. Per-run
@@ -350,11 +352,14 @@ the crawler) are not listed unless the code had to interpret the plan.
     after 14 days or above 2,000 files, orphaned CAS staging directories,
     stale OpenCode seed databases/sidecars, and stale per-invocation temporary
     databases.
-56. **Database and retry telemetry has dedicated tables and summaries.**
-    `db_operation_metrics` records database operation duration, success,
-    affected rows, and errors; `v_db_operation_summary` groups calls, failures,
-    and latency by operation. `retry_events` captures attempts, retry decision,
-    delay, and error details; `v_retry_summary` groups attempts/retries by
-    stage and error class. The viewer exposes run lifecycle/verdict context;
-    `analysis/evaluate_metrics.py` reports verdicts and other offline telemetry,
-    while these new table/view summaries are directly queryable in SQLite.
+56. **Database, retry, and subprocess telemetry have dedicated tables and
+     summaries.**
+     `db_operation_metrics` records database operation duration, success,
+     affected rows, and errors; `v_db_operation_summary` groups calls, failures,
+     and latency by operation. `retry_events` captures attempts, retry decision,
+     delay, and error details; `v_retry_summary` groups attempts/retries by
+     stage and error class. `subprocess_metrics` records subprocess stage, kind,
+     duration, exit code, timeout status, and success; `v_subprocess_summary`
+     summarizes these outcomes and timings. The viewer exposes subprocess
+     summaries, and `analysis/evaluate_metrics.py` includes an offline
+     subprocess section; all table/view summaries are also queryable in SQLite.
