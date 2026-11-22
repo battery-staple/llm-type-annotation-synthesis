@@ -198,8 +198,13 @@ the crawler) are not listed unless the code had to interpret the plan.
 35. **`guardrails.mode: "disabled"` is accepted but inert.** Every stage runs
     the AST/filesystem guards regardless, so a disabled-vs-enabled ablation
     currently measures nothing.
-36. **`verify-benchmark` delegates to `run` rather than offering a triage-only
-    check.**
+36. **`verify-benchmark` delegates to `run` rather than offering a dedicated
+    triage-only check.** Triage-only execution is available through
+    `run --stop-after triage`, which finalizes the run as
+    `stopped_after_triage` (an `evaluation_runs.status` value outside the
+    plan's `running`/`success`/`failed`/`interrupted` set), records no verdict,
+    and leaves the triage bundle in the CAS for reuse. `verify-benchmark`
+    remains a thin alias for `run`.
 37. **Benchmark contamination is detected, not sandboxed.** Agents are not
     OS-isolated and can reach the benchmark checkout by absolute path; a live
     synthesis run did modify the synthetic submodule. `run` now refuses to

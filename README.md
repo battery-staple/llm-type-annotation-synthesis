@@ -110,6 +110,17 @@ python3 analysis/inspect_cache.py
 
 **Configuration**: `project_config.yaml` is machine-independent, and its relative paths resolve against the config file. Per-benchmark build and Java compatibility settings live in `benchmarks.yaml`. Set `JAVA_HOME`, `GRADLE_USER_HOME`, and `CHECKERFRAMEWORK` for machine-specific overrides; `--model` overrides the configured model.
 
+**Stopping early**: `--stop-after <stage>` ends the run as soon as that stage succeeds and skips every later stage:
+
+```bash
+./build/install/pipeline/bin/pipeline run \
+  --config project_config.yaml \
+  --benchmark synthetic-id-swap \
+  --stop-after triage        # ingestion + triage only
+```
+
+The run is finalized with the database lifecycle status `stopped_after_<stage>` (the CLI prints `lifecycle_status: stopped` plus the `stopped_after` line) and records no evaluation verdict. Completed stages are still published to the CAS, so re-running the same command without the flag reuses their bundles instead of repeating the work. Accepted values are `ingestion|triage|synthesis|application|repair|verification`; `verification` is the same as omitting the flag, and an unknown value is rejected with that list. A discard or halt in the named stage still ends the run as `discarded`/`failed`, regardless of the stop point.
+
 Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build output) is gitignored. A fresh checkout needs the Checker Framework vendored before running.
 
 ### Local environment

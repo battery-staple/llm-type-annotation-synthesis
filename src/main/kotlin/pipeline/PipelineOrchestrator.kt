@@ -29,7 +29,13 @@ data class PipelineRunOutcome(
     val runId: RunId,
     val result: VerificationResult,
     val discarded: Boolean = false,
-    val haltMessage: String? = null
+    val haltMessage: String? = null,
+    /**
+     * Stage after which `--stop-after` ended the run. The completed prefix is
+     * a success, but no verdict was evaluated, so [result] is an
+     * incomplete/verification-missing summary.
+     */
+    val stoppedAfter: StageName? = null
 )
 
 /**
@@ -47,7 +53,13 @@ class PipelineOrchestrator(
     private val database: DatabasePort,
     private val config: ProjectConfig,
     private val maxTransientAttempts: Int = 3,
-    private val automatedTriage: AutomatedTriageStage? = null
+    private val automatedTriage: AutomatedTriageStage? = null,
+    /**
+     * When set, the run stops once this stage succeeds and every later stage
+     * is skipped. `null` (or [StageName.VERIFICATION]) runs the full pipeline.
+     * Discards and halts still take precedence over the stop point.
+     */
+    private val stopAfter: StageName? = null
 ) {
     suspend fun crawlAndRun(target: pipeline.config.CrawlerRepoTarget, sampleSeed: Int): List<PipelineRunOutcome> {
         val autoTriage = automatedTriage
@@ -90,7 +102,7 @@ class PipelineOrchestrator(
             )
             val outcome = runSingleSampleCrawler(commitEntry, meta, sampleSeed, autoTriage)
             outcomes += outcome
-            if (!outcome.discarded) {
+            if (countsAsVerified(outcome)) {
                 verifiedCount++
             }
         }
@@ -102,6 +114,7 @@ class PipelineOrchestrator(
         return withRunHandling(runId) {
             val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
                 ?: return@withRunHandling finishDiscarded(runId, "triage preconditions failed during ingestion")
+            stopIfDue(runId, StageName.INGESTION)?.let { return@withRunHandling it }
             val sample = stageOrDiscard(
                 baseCtx, 2, triage,
                 ManifestTriageInput(entry.benchmarkId, worktree, entry.regressionTest, entry.testPatchFile)
@@ -131,6 +144,7 @@ class PipelineOrchestrator(
             }
             val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
                 ?: return@withRunHandling finishDiscarded(runId, "triage preconditions failed during ingestion")
+            stopIfDue(runId, StageName.INGESTION)?.let { return@withRunHandling it }
             val sample = stageOrDiscard(
                 baseCtx, 2, autoTriage,
                 AutomatedTriageInput(entry.benchmarkId, worktree, meta)
@@ -223,11 +237,17 @@ class PipelineOrchestrator(
         baseCtx: RunContext,
         worktreeBase: File
     ): PipelineRunOutcome {
+        // Triage is the first boundary: every downstream stage starts from a
+        // verified sample, so a stop requested here must also skip the
+        // production-diff work below.
+        stopIfDue(runId, StageName.TRIAGE)?.let { return it }
+
         val productionDiff = productionDiff(entry)
         val lattice = requireStage(
             baseCtx, 3, synthesis,
             SynthesisInput(entry.toBugContext(commitDiff = productionDiff))
         )
+        stopIfDue(runId, StageName.SYNTHESIS)?.let { return it }
 
         val applicationWorktree = worktreeBase.resolve("application")
         materializeC1(entry, applicationWorktree)
@@ -235,6 +255,7 @@ class PipelineOrchestrator(
             baseCtx, 4, application,
             ApplicationInput(ApplicationTarget(sample.parentHash, applicationWorktree), lattice)
         )
+        stopIfDue(runId, StageName.APPLICATION)?.let { return it }
 
         val repairWorktree = worktreeBase.resolve("repair")
         materializeC1(entry, repairWorktree)
@@ -255,6 +276,7 @@ class PipelineOrchestrator(
                 annotated.annotationsPatch
             )
         )
+        stopIfDue(runId, StageName.REPAIR)?.let { return it }
 
         val verificationWorktree = worktreeBase.resolve("verification")
         materializeC1(entry, verificationWorktree)
@@ -279,6 +301,25 @@ class PipelineOrchestrator(
     private suspend fun finishDiscarded(runId: RunId, message: String): PipelineRunOutcome {
         database.finishRun(runId, "failed")
         return PipelineRunOutcome(runId, incompleteResult(runId, message), discarded = true, haltMessage = message)
+    }
+
+    /**
+     * Ends the run when [completed] is the requested `--stop-after` stage.
+     *
+     * A stopped run is not a failure: the requested prefix succeeded, and the
+     * `evaluation_runs` lifecycle status records where it stopped
+     * (`stopped_after_triage`, ...). No verdict is recorded, because nothing
+     * was evaluated; the incomplete summary carries the stop point instead.
+     */
+    private suspend fun stopIfDue(runId: RunId, completed: StageName): PipelineRunOutcome? {
+        if (!stopsAfter(completed, stopAfter)) return null
+        database.finishRun(runId, stoppedRunStatus(completed))
+        logger.info { "Run $runId stopped after ${completed.identifier} (--stop-after)" }
+        return PipelineRunOutcome(
+            runId = runId,
+            result = incompleteResult(runId, "stopped after ${completed.identifier}"),
+            stoppedAfter = completed
+        )
     }
 
     private suspend fun <I, O> requireStage(
@@ -541,6 +582,31 @@ class PipelineOrchestrator(
     }
 
     companion object {
+        /**
+         * True when the run should end after [completed] finishes.
+         *
+         * `--stop-after verification` is the full pipeline, so it is never a
+         * stop; this keeps the default value behavior-identical to no flag.
+         */
+        internal fun stopsAfter(completed: StageName, stopAfter: StageName?): Boolean =
+            stopAfter != null && completed == stopAfter && completed != StageName.VERIFICATION
+
+        /**
+         * `evaluation_runs.status` for a run that stopped after [stage]. The
+         * plan's status set has no "stopped" value, so the stop point is
+         * encoded in the label itself.
+         */
+        internal fun stoppedRunStatus(stage: StageName): String = "stopped_after_${stage.identifier}"
+
+        /**
+         * Crawler budget accounting: only commits that reached and passed
+         * triage consume `triage.limit`. Discards never do, and a run stopped
+         * after ingestion never got that far. Runs stopped at triage or later
+         * did pass triage.
+         */
+        internal fun countsAsVerified(outcome: PipelineRunOutcome): Boolean =
+            !outcome.discarded && outcome.stoppedAfter != StageName.INGESTION
+
         /**
          * Keeps only the diff blocks that touch at least one production path.
          *
