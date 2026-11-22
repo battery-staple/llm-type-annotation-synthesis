@@ -511,7 +511,11 @@ internal fun writeCheckerInitScript(workspace: File, checker: CheckerConfig, ctx
                     def main = project.sourceSets.main
                     project.tasks.register('checkerPass', JavaCompile) {
                         source = main.allJava
-                        classpath = project.files(main.compileClasspath, checkerQualJar, customQualJar)
+                        // Include compiled output so annotation-processor
+                        // generated classes (AutoValue, JPA weaving) resolve;
+                        // the normal compile runs those processors.
+                        classpath = project.files(main.output, main.compileClasspath, checkerQualJar, customQualJar)
+                        dependsOn project.tasks.named('compileJava')
                         destinationDirectory.set(project.layout.buildDirectory.dir('checker-classes'))
                         sourceCompatibility = sourceCompat
                         targetCompatibility = targetCompat

@@ -81,7 +81,15 @@ allprojects { project ->
             def main = project.sourceSets.main
             project.tasks.register('checkerPass', JavaCompile) {
                 source = main.allJava
-                classpath = project.files(main.compileClasspath, checkerQualJar, customQualJar, extraFiles)
+                // `main.output` makes classes produced by the project's own
+                // annotation processors (for example AutoValue's generated
+                // `AutoValue_*` subclasses) and static weaving available to the
+                // post-pass. Without it, recompiling `main.allJava` with only
+                // the checker processor fails on sources that reference
+                // generated types. The task therefore also depends on the
+                // normal compile, which runs those processors.
+                classpath = project.files(main.output, main.compileClasspath, checkerQualJar, customQualJar, extraFiles)
+                dependsOn project.tasks.named('compileJava')
                 destinationDirectory.set(project.layout.buildDirectory.dir('checker-classes'))
                 sourceCompatibility = sourceCompat
                 targetCompatibility = targetCompat
