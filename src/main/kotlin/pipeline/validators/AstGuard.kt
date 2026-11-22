@@ -50,7 +50,7 @@ object AstGuard {
     private fun ensureLanguageLevel() {
         runCatching {
             StaticJavaParser.getParserConfiguration()
-                .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17)
+                .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21)
         }
     }
 

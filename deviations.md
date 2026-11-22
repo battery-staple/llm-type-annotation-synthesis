@@ -126,13 +126,17 @@ the crawler) are not listed unless the code had to interpret the plan.
 23. **The synthetic benchmark uses the provided submodule.** The live
     `benchmarks.yaml` from the repository is authoritative
     (`C = 4d49e20…`, `C-1 = 56aa665…`). Triage derives `test_patch.diff` from
-    `git diff C-1..C -- src/test` because the manifest does not pin a patch file.
-24. **CMSX is present and usable, but no curated CMSX benchmark entry exists.**
-    The submodule checkout initially carried a host-relative `gitdir`; the
-    container path was corrected to the mounted host gitdir
-    (`.../worktrees/happy-meadow/modules/eval-repos/cmsx`). The current
-    `benchmarks.yaml` only contains `synthetic-id-swap`, so CMSX is not run
-    end-to-end until a curated `(C, C-1, T_reg)` entry is supplied.
+    `git diff C-1..C` limited to the benchmark's configured test roots
+    (`:(glob)**/src/test/**` for the synthetic entry) because the manifest does
+    not pin a patch file.
+24. **CMSX has a curated benchmark entry, `cmsx-assignment-extension`.**
+    It pins the extension-acceptance fix (`C = be6f19da…`, `C-1 = 7ee122ff…`)
+    with regression test
+    `cms.controller.persistence.AssignmentControllerImplTest#getSubmissionStatus_assignmentGraded_pastDue_hasExtension_accept`,
+    `production_roots: ["src"]`, `test_roots: ["test", "regression/src"]`, and
+    Java compatibility 21. The submodule checkout initially carried a
+    host-relative `gitdir`; the container path was corrected to the mounted
+    host gitdir (`.../worktrees/happy-meadow/modules/eval-repos/cmsx`).
 
 ## Bug fixes to the implementation itself
 
@@ -240,3 +244,43 @@ the crawler) are not listed unless the code had to interpret the plan.
     values only for keys absent from the process environment, and those values
     are forwarded to child Gradle/OpenCode processes. The file is parsed
     literally, not sourced, so shell expansion does not apply.
+
+## CMSX benchmark support
+
+45. **Benchmark entries declare `production_roots` / `test_roots`** (defaulting
+    to the legacy `src/main` / `src/test`). `RunContext` carries the resolved
+    roots, and triage patch discovery/auditing, the synthesis
+    production-diff filter, sanitized workspace export and test read-only
+    handling, prompt wording, and the application/repair filesystem and AST
+    guards all follow them. Single-segment roots are repository-root anchored
+    (`^src/`, `^test/`), so a bare `src` does not classify `regression/src` or
+    `cmsx-ui/src` as production and a bare `test` does not match CMSX
+    production helpers under `src/.../api/test/`. Multi-segment roots still
+    match as trailing segments at any depth, preserving legacy multi-module
+    `module/src/test` layouts. Test roots win on overlap (the fail-closed
+    direction), and the legacy `*Test.java` filename signal is retained
+    unchanged as a fallback. CMSX lists `regression/src` as a test root so the
+    `:regression` subproject's test utilities are also read-only.
+46. **JavaParser is 3.28.2 and the guards parse at `JAVA_21`.** The plan pins
+    3.26.1 / Java 17, which cannot parse record patterns
+    (`instanceof Some(var x)`) used across CMSX. 3.28.2 parses them at
+    `JAVA_21`; the curated CMSX files parse, and all existing guard tests
+    pass unchanged on the new version.
+47. **Gradle tasks are project-qualified (`:compileJava`, `:cleanTest`,
+    `:test`).** An empty `subproject` previously emitted an unqualified task
+    name, which Gradle expands across every subproject. On CMSX a filtered
+    `test --tests ...` therefore also ran `:regression:test`, found no matching
+    tests, and exited non-zero even though the root regression test passed.
+    Root project tasks are now explicit; `TestRunResult.success` also requires
+    a zero exit code rather than merely the presence of JUnit XML. Test-patch
+    discovery uses the same anchoring as path classification instead of a
+    broad `**/<root>/**` glob.
+48. **The unused `build.single_test_cmd` manifest key is removed.** It was
+    never executed (only hashed into the triage cache key) and described a
+    command the pipeline did not run. The README now documents the actual
+    regression invocation.
+49. **The synthesis production-diff filter fails closed.** A diff block whose
+    paths cannot be parsed is dropped instead of retained, and test detection
+    uses the full `isTestPath` signal (including the `*Test.java` fallback)
+    rather than directory roots alone. Git's C-quoted paths in `diff --git`
+    headers are parsed without splitting on embedded spaces.

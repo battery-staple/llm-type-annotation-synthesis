@@ -34,10 +34,10 @@ Non-triviality hint enabled: {{tell_non_triviality_error}}
   return types, type arguments, local types governed by the same lattice).
 - ONLY imports for those qualifier annotations (qualifier packages or
   `org.checkerframework.*`).
-- A new `src/main/**/package-info.java` is allowed ONLY if it carries Checker
-  defaulting annotations (`DefaultQualifier`, `DefaultQualifierInHierarchy`,
-  `QualifierDefaults`) plus package/import statements. No code, no other
-  declarations.
+- A new `package-info.java` under {{production_globs}} is allowed ONLY if it
+  carries Checker defaulting annotations (`DefaultQualifier`,
+  `DefaultQualifierInHierarchy`, `QualifierDefaults`) plus package/import
+  statements. No code, no other declarations.
 
 ## What you must never do
 
@@ -45,8 +45,8 @@ Non-triviality hint enabled: {{tell_non_triviality_error}}
   declarations, initializers, or control flow.
 - Never add `@SuppressWarnings`, `@AssumeAssertion`, casts to silence the
   checker, or utility bypasses.
-- Never modify build scripts, `.astub` files, or files outside `src/main/**`
-  and `src/test/**`. Test sources may receive ONLY qualifier annotations and
+- Never modify build scripts, `.astub` files, or files outside {{production_globs}}
+  and {{test_globs}}. Test sources may receive ONLY qualifier annotations and
   qualifier imports; executable test logic is immutable.
 - Do not read `.git`, do not inspect test patches, test results, or report files.
 - Do not spawn subagents. Write only inside the current working directory; never

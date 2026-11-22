@@ -23,12 +23,12 @@ data class PathAuditResult(
  *
  * Validates repository-relative paths extracted from a staged Git diff
  * (`git add -N` + `git diff --cached`). Never parses file contents.
+ *
+ * Production/test roots are benchmark-configurable ([SourceRoots]); the
+ * default overloads preserve the legacy `src/main` / `src/test` behavior for
+ * benchmarks that omit the new configuration.
  */
 object FilesystemGuard {
-
-    private val srcMainRoot = Regex("(^|/)src/main/")
-    private val srcTestRoot = Regex("(^|/)src/test/")
-    private val testFileName = Regex(".*Test\\.java$")
 
     private val buildScriptPatterns = listOf(
         Regex("(^|/)build\\.gradle[^/]*$"),
@@ -41,16 +41,33 @@ object FilesystemGuard {
     fun isPackageInfo(path: String): Boolean =
         path.replace('\\', '/').substringAfterLast('/').let { it == "package-info.java" }
 
-    /** package-info.java is only ever legitimate under `src/main/**/`. */
+    /** package-info.java is only ever legitimate under a production root. */
     fun packageInfoAllowedPath(path: String): Boolean =
-        Regex("(^|/)src/main/(.*/)?package-info\\.java$").containsMatchIn(normalize(path))
+        packageInfoAllowedPath(path, SourceRoots.DEFAULT_PRODUCTION_ROOTS)
 
+    fun packageInfoAllowedPath(path: String, productionRoots: List<String>): Boolean =
+        SourceRoots.packageInfoAllowedPath(path, productionRoots)
+
+    /** Legacy entry point: audits against the default `src/main` / `src/test` roots. */
     fun audit(
         worktree: File,
         changedPaths: List<ChangedPath>,
         stage: StageName,
         allowPackageInfoAddition: Boolean,
         allowTestEdits: Boolean
+    ): PathAuditResult = audit(
+        worktree, changedPaths, stage, allowPackageInfoAddition, allowTestEdits,
+        SourceRoots.DEFAULT_PRODUCTION_ROOTS, SourceRoots.DEFAULT_TEST_ROOTS
+    )
+
+    fun audit(
+        worktree: File,
+        changedPaths: List<ChangedPath>,
+        stage: StageName,
+        allowPackageInfoAddition: Boolean,
+        allowTestEdits: Boolean,
+        productionRoots: List<String>,
+        testRoots: List<String>
     ): PathAuditResult {
         val violations = mutableListOf<GuardViolation>()
         val isRepair = (stage == StageName.REPAIR)
@@ -91,15 +108,18 @@ object FilesystemGuard {
             }
 
             val pkgInfo = isPackageInfo(path)
-            val isTest = srcTestRoot.containsMatchIn(path) || testFileName.matches(path)
+            // Directory roots rule; test roots win on overlap so a broad
+            // production root can never make a test source editable. The
+            // legacy `*Test.java` filename signal is retained as a fallback.
+            val isTest = SourceRoots.isTestPath(path, testRoots)
 
             // 4. package-info.java: banned in repair outright; in application it
-            // must live under src/main/ and content is checked by AstGuard.
+            // must live under a production root and content is checked by AstGuard.
             if (pkgInfo) {
-                if (!packageInfoAllowedPath(path)) {
+                if (!packageInfoAllowedPath(path, productionRoots)) {
                     violations += GuardViolation(
                         GuardrailViolationCategory.PACKAGE_INFO_CHANGE, raw,
-                        "package-info.java is only permitted under src/main/: $raw"
+                        "package-info.java is only permitted under ${SourceRoots.display(productionRoots)}: $raw"
                     )
                     continue
                 }
@@ -139,29 +159,29 @@ object FilesystemGuard {
             }
 
             // 6. Production confinement.
-            val underMain = srcMainRoot.containsMatchIn(path)
-            val underTest = srcTestRoot.containsMatchIn(path)
+            val underProd = SourceRoots.isUnderRoots(path, productionRoots)
+            val underTestDir = SourceRoots.isTestDir(path, testRoots)
             if (isRepair) {
-                if (!underMain) {
+                if (!underProd) {
                     violations += GuardViolation(
                         if (isTest) GuardrailViolationCategory.TEST_TAMPERING
                         else GuardrailViolationCategory.FILESYSTEM,
-                        raw, "Repair edits are confined to (single/multi-module) src/main/: $raw"
+                        raw, "Repair edits are confined to production roots (${SourceRoots.display(productionRoots)}): $raw"
                     )
                     continue
                 }
             } else {
-                if (!underMain && !underTest) {
+                if (!underProd && !underTestDir) {
                     violations += GuardViolation(
                         GuardrailViolationCategory.FILESYSTEM, raw,
-                        "Path is outside sanctioned src/main|src/test roots: $raw"
+                        "Path is outside sanctioned production/test roots (${SourceRoots.display(productionRoots)}|${SourceRoots.display(testRoots)}): $raw"
                     )
                     continue
                 }
             }
 
             // 7. File operations: only in-place modifications pass. The single
-            // permitted addition (a new src/main/**/package-info.java in
+            // permitted addition (a new production-root package-info.java in
             // application) was handled above.
             when {
                 cp.isAddition -> violations += GuardViolation(
@@ -194,7 +214,7 @@ object FilesystemGuard {
             val line = rawLine.trimEnd()
             when {
                 line.startsWith("diff --git ") -> {
-                    val parts = line.removePrefix("diff --git ").split(' ').filter { it.isNotBlank() }
+                    val parts = splitQuoted(line.removePrefix("diff --git ")).filter { it.isNotBlank() }
                     if (parts.size >= 2) {
                         stripGitPrefix(parts[parts.size - 2])?.let { touched += it }
                         stripGitPrefix(parts[parts.size - 1])?.let { touched += it }
@@ -226,6 +246,43 @@ object FilesystemGuard {
             else -> t.trim('"')
         }
         return cleanPath(stripped)
+    }
+
+    /**
+     * Splits a Git header line on unquoted spaces. Git C-quotes paths that
+     * contain spaces (for example `diff --git "a/foo bar" "b/foo bar"`), so a
+     * naive `split(' ')` would corrupt both paths.
+     */
+    private fun splitQuoted(line: String): List<String> {
+        val tokens = mutableListOf<String>()
+        val current = StringBuilder()
+        var inQuotes = false
+        var escaped = false
+        line.forEach { ch ->
+            when {
+                escaped -> {
+                    current.append(ch)
+                    escaped = false
+                }
+                ch == '\\' && inQuotes -> {
+                    current.append(ch)
+                    escaped = true
+                }
+                ch == '"' -> {
+                    current.append(ch)
+                    inQuotes = !inQuotes
+                }
+                ch == ' ' && !inQuotes -> {
+                    if (current.isNotEmpty()) {
+                        tokens += current.toString()
+                        current.clear()
+                    }
+                }
+                else -> current.append(ch)
+            }
+        }
+        if (current.isNotEmpty()) tokens += current.toString()
+        return tokens
     }
 
     private fun headerPath(token: String): String? {

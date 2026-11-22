@@ -8,6 +8,7 @@ import pipeline.config.BuildSection
 import pipeline.config.ProjectConfig
 import pipeline.db.TelemetryProjection
 import pipeline.ports.DatabasePort
+import pipeline.validators.SourceRoots
 
 // --- Strongly-Typed Domain Primitives & Value Classes ---
 
@@ -256,6 +257,10 @@ data class RunContext(
     val worktreeDir: File,
     val agentWorkspaceDir: File,
     val database: DatabasePort,
+    // Benchmark-specific source roots (benchmarks.yaml production_roots /
+    // test_roots). Defaults preserve the legacy src/main + src/test layout.
+    val productionRoots: List<String> = SourceRoots.DEFAULT_PRODUCTION_ROOTS,
+    val testRoots: List<String> = SourceRoots.DEFAULT_TEST_ROOTS,
     // Set per stage attempt by the orchestrator. Orchestrator-only data.
     val stepId: String = "",
     val stepNumber: Int = 0,
@@ -332,7 +337,11 @@ data class BenchmarkEntry(
     val defaultBranch: String = "main",
     val build: BuildSection = BuildSection(),
     val sourceCompatibility: String = "17",
-    val targetCompatibility: String = "17"
+    val targetCompatibility: String = "17",
+    // Benchmark-specific source roots. Defaults preserve the legacy
+    // src/main (production) + src/test (tests) layout.
+    val productionRoots: List<String> = SourceRoots.DEFAULT_PRODUCTION_ROOTS,
+    val testRoots: List<String> = SourceRoots.DEFAULT_TEST_ROOTS
 ) {
     // `commitDiff` must already be filtered to production paths; test-file hunks,
     // the test patch, and test coordinates are intentionally not part of BugContext.

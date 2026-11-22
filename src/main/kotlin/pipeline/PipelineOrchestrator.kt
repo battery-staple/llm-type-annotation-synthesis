@@ -98,7 +98,9 @@ class PipelineOrchestrator(
             casDir = File(config.cache.stagesDir),
             worktreeDir = worktreeBase.resolve("ingestion"),
             agentWorkspaceDir = scratchBase,
-            database = database
+            database = database,
+            productionRoots = entry.productionRoots,
+            testRoots = entry.testRoots
         )
 
         try {
@@ -398,9 +400,7 @@ class PipelineOrchestrator(
     private fun productionDiff(entry: BenchmarkEntry): String {
         val repo = resolveMetadataRepo(entry)
         val diff = Git.diffBetween(repo, entry.parentHash.hash, entry.commitHash.hash)
-        return diff.split(Regex("(?=diff --git )"))
-            .filter { block -> block.isNotBlank() && !block.lineSequence().first().contains("/src/test/") }
-            .joinToString("\n")
+        return filterProductionDiff(diff, entry.testRoots)
     }
 
     private fun resolveMetadataRepo(entry: BenchmarkEntry): File {
@@ -435,5 +435,32 @@ class PipelineOrchestrator(
             suiteResultsXml = null,
             verificationSummaryFile = summary
         )
+    }
+
+    companion object {
+        /**
+         * Keeps only the diff blocks that touch at least one production path.
+         *
+         * Test-blindness fails closed: a block whose paths cannot be parsed is
+         * dropped, and every parsed path is checked with the full test signal
+         * ([pipeline.validators.SourceRoots.isTestPath]), including the legacy
+         * `*Test.java` filename fallback. Directory-only checks would let a
+         * test file under a production root leak into the synthesis prompt.
+         */
+        internal fun filterProductionDiff(
+            diff: String,
+            testRoots: List<String>
+        ): String =
+            diff.split(Regex("(?=diff --git )"))
+                .filter { block ->
+                    if (block.isBlank()) return@filter false
+                    val paths = pipeline.validators.FilesystemGuard.auditPatchPaths(block)
+                    if (paths.isEmpty()) {
+                        logger.warn { "productionDiff: dropping diff block with no parseable paths" }
+                        return@filter false
+                    }
+                    paths.any { !pipeline.validators.SourceRoots.isTestPath(it, testRoots) }
+                }
+                .joinToString("\n")
     }
 }

@@ -8,6 +8,7 @@ import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.isDirectory
 import kotlin.io.path.isRegularFile
+import pipeline.validators.SourceRoots
 
 // --- Process execution -------------------------------------------------------
 
@@ -183,12 +184,16 @@ object FileOps {
      * Copies a repository tree into a sanitized agent workspace. Symlinks are
      * skipped, VCS metadata and pipeline-owned directories are excluded, and
      * patch/report artifacts are never copied.
+     *
+     * Test roots are benchmark-configurable; the default preserves the legacy
+     * `src/test` layout.
      */
     fun exportSanitized(
         sourceRoot: File,
         destination: File,
         excludeTests: Boolean = false,
-        testReadOnly: Boolean = false
+        testReadOnly: Boolean = false,
+        testRoots: List<String> = SourceRoots.DEFAULT_TEST_ROOTS
     ) {
         deleteRecursively(destination)
         destination.mkdirs()
@@ -200,7 +205,7 @@ object FileOps {
                 val first = relative.getName(0).toString()
                 if (Files.isSymbolicLink(path)) return@forEach
                 if (first in DEFAULT_EXCLUDED_DIRS) return@forEach
-                if (excludeTests && relative.toString().replace('\\', '/').let { it.contains("/src/test/") || it.startsWith("src/test/") }) {
+                if (excludeTests && isUnderTestRoots(relative.toString(), testRoots)) {
                     return@forEach
                 }
                 val target = destination.toPath().resolve(relative)
@@ -215,7 +220,7 @@ object FileOps {
             }
         }
         makeGradleWrapperExecutable(destination)
-        if (testReadOnly) makeTestsReadOnly(destination)
+        if (testReadOnly) makeTestsReadOnly(destination, testRoots)
     }
 
     fun copyTree(sourceRoot: File, destination: File, excludeNames: Set<String> = emptySet()) {
@@ -264,13 +269,26 @@ object FileOps {
         }
     }
 
-    fun makeTestsReadOnly(root: File) {
+    /**
+     * Matches a relative path against directory-anchored test roots
+     * ([SourceRoots.isTestDir]). Single-segment roots are anchored at the
+     * repository root, so CMSX production helpers nested under a `test`-named
+     * segment are not mistaken for tests; multi-segment roots preserve the
+     * legacy multi-module `module/src/test` behavior.
+     */
+    private fun isUnderTestRoots(relative: String, testRoots: List<String>): Boolean =
+        SourceRoots.isTestDir(relative.replace('\\', '/'), testRoots)
+
+    fun makeTestsReadOnly(
+        root: File,
+        testRoots: List<String> = SourceRoots.DEFAULT_TEST_ROOTS
+    ) {
         val testDirs = mutableListOf<File>()
         root.walkTopDown().forEach { file ->
-            val normalized = file.path.replace('\\', '/')
-            if (file.isDirectory && (normalized.endsWith("/src/test") || normalized == "${root.path.replace('\\', '/')}/src/test")) {
-                testDirs += file
-            }
+            if (!file.isDirectory) return@forEach
+            val relative = file.relativeTo(root).invariantSeparatorsPath
+            if (relative.isEmpty()) return@forEach
+            if (isUnderTestRoots(relative, testRoots)) testDirs += file
         }
         testDirs.forEach { dir ->
             dir.walkBottomUp().forEach { f ->

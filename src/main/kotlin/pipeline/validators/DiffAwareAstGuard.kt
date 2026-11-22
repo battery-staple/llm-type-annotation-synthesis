@@ -57,9 +57,6 @@ data class RepairAuditResult(
 object DiffAwareAstGuard {
 
     private val suppressionNames = setOf("SuppressWarnings", "AssumeAssertion")
-    private val srcMainRoot = Regex("(^|/)src/main/")
-    private val srcTestRoot = Regex("(^|/)src/test/")
-    private val testFileName = Regex(".*Test\\.java$")
     private val buildScriptPatterns = listOf(
         Regex("(^|/)build\\.gradle[^/]*$"),
         Regex("(^|/)settings\\.gradle[^/]*$"),
@@ -71,15 +68,28 @@ object DiffAwareAstGuard {
     private fun ensureLanguageLevel() {
         runCatching {
             StaticJavaParser.getParserConfiguration()
-                .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_17)
+                .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21)
         }
     }
 
+    /** Legacy entry point: validates against the default `src/main` / `src/test` roots. */
     fun validate(
         worktree: File,
         changedPaths: List<ChangedPath>,
         baselineRef: String,
         localAnnotationPolicy: LocalAnnotationPolicy
+    ): RepairAuditResult = validate(
+        worktree, changedPaths, baselineRef, localAnnotationPolicy,
+        SourceRoots.DEFAULT_PRODUCTION_ROOTS, SourceRoots.DEFAULT_TEST_ROOTS
+    )
+
+    fun validate(
+        worktree: File,
+        changedPaths: List<ChangedPath>,
+        baselineRef: String,
+        localAnnotationPolicy: LocalAnnotationPolicy,
+        productionRoots: List<String>,
+        testRoots: List<String>
     ): RepairAuditResult {
         ensureLanguageLevel()
         val violations = mutableListOf<RepairViolation>()
@@ -92,8 +102,9 @@ object DiffAwareAstGuard {
 
             // Guard 6 (filesystem surface): test sources are read-only in
             // repair, package-info is frozen, and only in-place modifications
-            // under src/main/ are admissible. The full path audit remains
-            // FilesystemGuard's job; these violations feed the same audit log.
+            // under the production roots are admissible. The full path audit
+            // remains FilesystemGuard's job; these violations feed the same
+            // audit log.
             if (FilesystemGuard.isPackageInfo(relPath)) {
                 violations += RepairViolation(
                     GuardrailViolationCategory.PACKAGE_INFO_CHANGE, "filesystem_guard",
@@ -101,7 +112,7 @@ object DiffAwareAstGuard {
                 )
                 continue
             }
-            if (srcTestRoot.containsMatchIn(relPath) || testFileName.matches(relPath)) {
+            if (SourceRoots.isTestPath(relPath, testRoots)) {
                 violations += RepairViolation(
                     GuardrailViolationCategory.TEST_TAMPERING, "filesystem_guard",
                     relPath, null, "Test sources are read-only in repair: $relPath"
@@ -115,10 +126,10 @@ object DiffAwareAstGuard {
                 )
                 continue
             }
-            if (!srcMainRoot.containsMatchIn(relPath)) {
+            if (!SourceRoots.isUnderRoots(relPath, productionRoots)) {
                 violations += RepairViolation(
                     GuardrailViolationCategory.FILESYSTEM, "filesystem_guard",
-                    relPath, null, "Repair edits are confined to src/main/: $relPath"
+                    relPath, null, "Repair edits are confined to production roots (${SourceRoots.display(productionRoots)}): $relPath"
                 )
                 continue
             }

@@ -26,14 +26,15 @@ import pipeline.util.PipelineJson
  * Curated benchmark verification and triage (manifest mode, MVP).
  *
  * Materializes two disposable sandboxes (clean C-1 and fixed C), audits the
- * test patch so it only touches `(^|/)src/test/` paths, requires the
- * regression test to fail at runtime on C-1 and pass on C, then emits a
- * [VerifiedSample] plus `triage_metadata.json`.
+ * test patch so it only touches the benchmark's configured test-root paths,
+ * requires the regression test to fail at runtime on C-1 and pass on C, then
+ * emits a [VerifiedSample] plus `triage_metadata.json`.
  *
- * Filesystem path auditing is implemented locally in [auditTestPatch] because
- * there is no shared `FilesystemGuard` validator in the tree yet; the rules
- * mirror implementation-plan §4.2 (reject absolute paths, `..` traversal,
- * and any path outside `(^|/)src/test/`).
+ * Patch auditing reuses the shared [pipeline.validators.SourceRoots] rules and
+ * mirrors implementation-plan §4.2: absolute paths, `..` traversal, and any
+ * path outside the configured test roots are rejected. The orchestrator's
+ * `FilesystemGuard.auditPatchPaths` performs the same path extraction for
+ * staged agent diffs.
  *
  * Both sandboxes are removed in a `finally` block so no T_reg classes, JUnit
  * XML, or Gradle reports can leak into synthesis, application, or repair.
@@ -55,8 +56,9 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
         )
         val configSlice = mapOf(
             "verification_test_task" to ctx.build.testTask,
-            "single_test_cmd" to ctx.build.singleTestCmd,
-            "verification_scope" to ctx.config.verification.scope.name.lowercase()
+            "verification_scope" to ctx.config.verification.scope.name.lowercase(),
+            "production_roots" to ctx.productionRoots.sorted(),
+            "test_roots" to ctx.testRoots.sorted()
         )
         return CacheKeys.compute(
             ctx = ctx,
@@ -90,11 +92,18 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
                 input.testPatchFile.readBytes()
             } else {
                 val generated = runCatching {
+                    // Mirror SourceRoots path matching: a bare test root (CMSX
+                    // `test`) is repository-root anchored, while multi-segment
+                    // roots may appear under any module. A broad
+                    // `**/<root>/**` glob would also match production
+                    // directories named `test` (for example CMSX
+                    // `src/cms/www/action/actions/api/test/`).
+                    val specs = pipeline.validators.SourceRoots.gitPathspecs(ctx.testRoots)
                     Git.diffBetween(
                         repoAnchor,
                         input.worktree.parentHash.hash,
                         input.worktree.commitHash.hash,
-                        listOf("--", ":(glob)**/src/test/**")
+                        listOf("--") + specs
                     )
                 }.getOrElse {
                     return discardWithMetadata(ctx, input, null, DiscardReason.NO_TEST_FOUND, "discarded_no_test", "no_test_found", "Cannot derive test patch from ${input.worktree.parentHash}..${input.worktree.commitHash}: ${it.message}")
@@ -106,8 +115,8 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
             }
             val patchText = String(patchBytes, Charsets.UTF_8)
 
-            // c. Audit every patched path: only (^|/)src/test/ allowed.
-            val audit = auditTestPatch(patchText)
+            // c. Audit every patched path: only test-root paths allowed.
+            val audit = auditTestPatch(patchText, ctx.testRoots)
             if (!audit.valid) {
                 log.warn { "Triage ${input.benchmarkId}: invalid test patch: ${audit.reason}" }
                 return discardWithMetadata(ctx, input, patchBytes, DiscardReason.INVALID_TEST_PATCH, "discarded_invalid_test_patch", "invalid_test_patch", audit.reason, pathAudit = "rejected: ${audit.reason}")
@@ -167,10 +176,11 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
             val cStatus = when {
                 cResult.compileFailed -> "compile_failed"
                 cResult.testsFound == 0 -> "no_test_found"
+                cResult.exitCode != 0 -> "gradle_failed"
                 cPassed && !cFailed -> "passed"
                 else -> "failed"
             }
-            if (!(cPassed && !cFailed)) {
+            if (!(cPassed && !cFailed && cResult.exitCode == 0)) {
                 return discardWithMetadata(ctx, input, patchBytes, DiscardReason.REGRESSION_DOES_NOT_PASS_ON_FIXED_COMMIT, "discarded_regression_not_passing_on_fixed_commit", "regression_does_not_pass_on_fixed_commit", "T_reg does not pass on C (status=$cStatus)", c1BuildStatus = "ok", c1TestStatus = "failed_as_expected", cTestStatus = cStatus)
             }
 
@@ -376,7 +386,37 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
     data class PatchAudit(val valid: Boolean, val reason: String)
 
     companion object {
-        private val TEST_ROOT = Regex("(^|/)src/test/")
+        /**
+         * Legacy entry point: audits against the default `src/test` root,
+         * exactly like a benchmark that omits the roots configuration.
+         */
+        fun auditTestPatch(patchText: String): PatchAudit =
+            auditTestPatch(patchText, pipeline.validators.SourceRoots.DEFAULT_TEST_ROOTS)
+
+        /**
+         * Every touched path must live under a configured test root; absolute
+         * paths, `..` traversal, and non-test paths are rejected. Test roots
+         * are repository-root anchored for single-segment roots (CMSX `test`),
+         * so production directories named `test` are not accepted.
+         */
+        fun auditTestPatch(
+            patchText: String,
+            testRoots: List<String>
+        ): PatchAudit {
+            val paths = extractPatchedPaths(patchText)
+            if (paths.isEmpty()) return PatchAudit(false, "test patch touches no files")
+            paths.forEach { path ->
+                if (path.startsWith("/")) return PatchAudit(false, "absolute path rejected: $path")
+                if (path.split('/').any { it == ".." }) return PatchAudit(false, "path traversal rejected: $path")
+                if (!pipeline.validators.SourceRoots.isTestDir(path, testRoots)) {
+                    return PatchAudit(
+                        false,
+                        "non-test path rejected (must match test roots ${pipeline.validators.SourceRoots.display(testRoots)}): $path"
+                    )
+                }
+            }
+            return PatchAudit(true, "accepted (${paths.size} test path(s))")
+        }
 
         /** Extracts candidate touched paths from unified-diff headers. */
         fun extractPatchedPaths(patchText: String): List<String> {
@@ -406,23 +446,6 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
                 }
             }
             return paths.filter { it.isNotEmpty() && it != "/dev/null" }.distinct()
-        }
-
-        /**
-         * Every touched path must live under `(^|/)src/test/`; absolute paths,
-         * `..` traversal, and production/build paths are rejected.
-         */
-        fun auditTestPatch(patchText: String): PatchAudit {
-            val paths = extractPatchedPaths(patchText)
-            if (paths.isEmpty()) return PatchAudit(false, "test patch touches no files")
-            paths.forEach { path ->
-                if (path.startsWith("/")) return PatchAudit(false, "absolute path rejected: $path")
-                if (path.split('/').any { it == ".." }) return PatchAudit(false, "path traversal rejected: $path")
-                if (!TEST_ROOT.containsMatchIn(path)) {
-                    return PatchAudit(false, "non-test path rejected (must match (^|/)src/test/): $path")
-                }
-            }
-            return PatchAudit(true, "accepted (${paths.size} test path(s))")
         }
 
         fun countOutcomes(outcomes: List<TestOutcome>): Triple<Int, Int, Int> {

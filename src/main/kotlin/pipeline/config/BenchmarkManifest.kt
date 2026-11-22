@@ -24,7 +24,9 @@ data class BenchmarkManifestEntry(
     @SerialName("default_branch") val defaultBranch: String = "main",
     val build: BuildSection = BuildSection(),
     @SerialName("source_compatibility") val sourceCompatibility: String? = null,
-    @SerialName("target_compatibility") val targetCompatibility: String? = null
+    @SerialName("target_compatibility") val targetCompatibility: String? = null,
+    @SerialName("production_roots") val productionRoots: List<String>? = null,
+    @SerialName("test_roots") val testRoots: List<String>? = null
 )
 
 @Serializable
@@ -59,7 +61,13 @@ object BenchmarkManifestLoader {
                 defaultBranch = row.defaultBranch,
                 build = row.build,
                 sourceCompatibility = source,
-                targetCompatibility = target
+                targetCompatibility = target,
+                productionRoots = pipeline.validators.SourceRoots.withDefaults(
+                    row.productionRoots, pipeline.validators.SourceRoots.DEFAULT_PRODUCTION_ROOTS
+                ),
+                testRoots = pipeline.validators.SourceRoots.withDefaults(
+                    row.testRoots, pipeline.validators.SourceRoots.DEFAULT_TEST_ROOTS
+                )
             )
         }
     }

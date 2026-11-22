@@ -67,6 +67,8 @@ class ApplicationStage(
             "checker_category" to checkerCategoryName(ctx.config.checker.category),
             "checker_quals" to ctx.config.checker.quals,
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
+            "production_roots" to ctx.productionRoots.sorted(),
+            "test_roots" to ctx.testRoots.sorted(),
         )
         return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template)
     }
@@ -106,6 +108,10 @@ class ApplicationStage(
                 "qualifier_import_prefixes" to importPrefixes.joinToString(", "),
                 "custom_quals_jar_path" to ".agent-libs/custom-quals.jar",
                 "tell_non_triviality_error" to ctx.config.prompt.tellNonTrivialityError.toString(),
+                "production_roots" to pipeline.validators.SourceRoots.display(ctx.productionRoots),
+                "production_globs" to pipeline.validators.SourceRoots.displayGlobs(ctx.productionRoots),
+                "test_roots" to pipeline.validators.SourceRoots.display(ctx.testRoots),
+                "test_globs" to pipeline.validators.SourceRoots.displayGlobs(ctx.testRoots),
             ),
         )
 
@@ -151,7 +157,10 @@ class ApplicationStage(
                     (agentFailureMessage(runResult)?.let { "\n$it" } ?: "")
                 continue
             }
-            val pathAudit = FilesystemGuard.audit(worktree, changed, StageName.APPLICATION, true, true)
+            val pathAudit = FilesystemGuard.audit(
+                worktree, changed, StageName.APPLICATION, true, true,
+                ctx.productionRoots, ctx.testRoots
+            )
             val astAudit = AstGuard.validate(worktree, changed, lattice, true)
             if (!pathAudit.valid || !astAudit.valid) {
                 appendViolationEvents(ctx, guardrailEvents, attempt, "filesystem_guard", pathAudit.violations)
@@ -395,7 +404,10 @@ internal fun resetWorktree(worktree: File) {
 }
 
 internal fun prepareWorkspace(worktree: File, workspace: File, lattice: SynthesizedLattice, ctx: RunContext) {
-    FileOps.exportSanitized(worktree, workspace, excludeTests = false)
+    FileOps.exportSanitized(
+        worktree, workspace, excludeTests = false,
+        testRoots = ctx.testRoots
+    )
     val agentLibs = workspace.resolve(".agent-libs")
     Files.createDirectories(agentLibs.toPath())
     if (lattice.customQualsJar.isFile) {

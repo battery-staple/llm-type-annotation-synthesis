@@ -16,7 +16,7 @@ Maximum checker invocations: {{max_checker_invocations}}
 
 ## What you may change
 
-- Method bodies in production sources under `src/main/**` ONLY.
+- Method bodies in production sources under {{production_globs}} ONLY.
 - Re-run the checker with `./run-checker.sh` (provided in the working directory)
   to confirm convergence. It is rate-limited to the configured maximum
   invocations; spend them wisely and stop at zero remaining errors.

@@ -74,7 +74,12 @@ Any contributor or autonomous agent working in this repository should adhere to 
 - **`analysis/inspect_cache.py`**: Read-only inventory of cached stage bundles, seeds, artifacts, and run associations.
 - **`eval-repos/`**: Directory housing target evaluation repositories:
   - `eval-repos/synthetic-id-swap/`: A minimal synthetic Java project with a known ID-conflation bug for rapid local debugging.
-  - `eval-repos/cmsx/`: Cornell CMSX codebase (submodule present, but no curated benchmark entry yet).
+  - `eval-repos/cmsx/`: Cornell CMSX codebase (submodule). Curated benchmark
+    `cmsx-assignment-extension` pins the extension-acceptance fix
+    (`be6f19da`, parent `7ee122ff`) with regression test
+    `cms.controller.persistence.AssignmentControllerImplTest#getSubmissionStatus_assignmentGraded_pastDue_hasExtension_accept`.
+    CMSX uses a flat layout, so the entry declares `production_roots: ["src"]`
+    and `test_roots: ["test", "regression/src"]` (see "CMSX benchmark" below).
 
 ---
 
@@ -84,7 +89,7 @@ Any contributor or autonomous agent working in this repository should adhere to 
 - **Pipeline Language**: Kotlin 2.0.21 built with Gradle.
 - **Agent Harness**: OpenCode CLI (v2.2.5 in the current container).
 - **Type Checker**: Java Checker Framework 3.42.0; when `environment.checker_framework_home` is blank, its location is resolved from `CHECKERFRAMEWORK`, or defaults to `vendor/checker-framework-3.42.0`.
-- **AST Parsing & Validation**: JavaParser (`com.github.javaparser:javaparser-core:3.26.1`).
+- **AST Parsing & Validation**: JavaParser (`com.github.javaparser:javaparser-core:3.28.2`), parsing at language level `JAVA_21` so CMSX sources (including record patterns such as `instanceof Some(var x)`) parse in the guards.
 - **Storage & Inspection**: SQLite 3, Datasette (Python), Pandas / Jupyter.
 - **Default LLM**: `opencode-go/deepseek-v4.1-flash`, configurable per stage. The pipeline seeds its isolated OpenCode DB with the global account/credential rows; a blank isolated DB otherwise makes `opencode-go/*` return `provider.no-route`.
 
@@ -130,6 +135,64 @@ The template covers the JDK path, Checker Framework location, optional Gradle ca
 
 Everything in `project_config.yaml` and `benchmarks.yaml` stays shared across machines. `--seed` selects the sample index, and `--model` overrides the configured model for a run.
 
+### CMSX benchmark
+
+The `cmsx-assignment-extension` entry runs the pipeline against the real CMSX
+codebase, which differs from the synthetic project in two ways the pipeline
+now handles per benchmark entry:
+
+- **Flat source layout.** Production lives under `src/` while tests live under
+  `test/` (the root project) and `regression/src/` (the `:regression`
+  subproject), not `src/main` / `src/test`. The entry sets
+  `production_roots: ["src"]` and `test_roots: ["test", "regression/src"]`;
+  triage patch discovery/auditing, the synthesis production-diff filter, agent
+  workspace isolation, prompt wording, and the application/repair filesystem
+  and AST guards all follow these roots.
+  Single-segment roots are anchored at the repository root, so a bare `src`
+  does not sweep in `regression/src` or `cmsx-ui/src`, and a bare `test` does
+  not match CMSX production helpers under
+  `src/cms/www/action/actions/api/test/`. Multi-segment roots still match at
+  any depth (`module/src/test`), preserving multi-module legacy layouts.
+  Test roots win if both roots match, so a broad production root can never make
+  test sources editable. Benchmarks that omit the roots keep the legacy
+  `src/main` / `src/test` behavior unchanged.
+- **Java 21.** CMSX compiles with `options.release = 21`; the JavaParser
+  guards parse at language level `JAVA_21`, and the entry sets
+  `source_compatibility: "21"` / `target_compatibility: "21"`.
+
+Prerequisites:
+
+1. Cornell GitLab access over SSH, then:
+   `git submodule update --init eval-repos/cmsx`
+   (the synthetic submodule needs no special access).
+2. JDK 21 for the pipeline and the CMSX Gradle toolchain, plus Checker
+   Framework 3.42.0 at `vendor/checker-framework-3.42.0/` (or set
+   `CHECKERFRAMEWORK`).
+3. Expect a heavy first build: CMSX resolves a large dependency set and its
+   `compileTestJava` runs JPA weaving.
+
+The pipeline runs project-qualified Gradle tasks, so an empty `subproject`
+means exactly the root project:
+
+- Triage runs only the regression test:
+  `./gradlew :cleanTest :test --tests <test_class>.<test_method>`.
+- Verification runs the same regression test, plus the pre-existing suite
+  (`:test` without `--tests`) when `verification.scope` is `full_suite`.
+
+CMSX's `:regression` subproject is intentionally outside the benchmark and is
+not invoked; its test sources are still classified as tests and kept
+read-only. A filter applied to the aggregate `test` task would otherwise make
+`:regression:test` fail with "No tests found for given includes".
+
+Run it (from the repository root, after `./gradlew installDist`):
+
+```bash
+./build/install/pipeline/bin/pipeline run \
+  --config project_config.yaml \
+  --benchmark cmsx-assignment-extension \
+  --seed 0
+```
+
 ## 7. Current Status
 
 - The synthetic `synthetic-id-swap` benchmark completed end-to-end with verdict
@@ -137,5 +200,12 @@ Everything in `project_config.yaml` and `benchmarks.yaml` stays shared across ma
   conflated `debit`/`credit` call sites, the blind fixer resolved them in one
   turn, the final checker reported 0 errors, the regression test passed, and the
   seven pre-existing tests passed.
-- CMSX is present as a submodule but has no curated benchmark entry yet.
+- CMSX has a curated benchmark entry, `cmsx-assignment-extension` (extension
+  acceptance for graded assignments; `be6f19da` / parent `7ee122ff`,
+  `AssignmentControllerImplTest#getSubmissionStatus_assignmentGraded_pastDue_hasExtension_accept`).
+  Triage was verified manually against the pinned revisions: the derived test
+  patch touches only `test/cms/.../AssignmentControllerImplTest.java`, the
+  regression test **fails on C-1** (`expected ACCEPT but was REJECT`) and
+  **passes on C**. A full end-to-end LLM run has not been attempted (no LLM
+  run is claimed).
 - Known limitations and implementation gaps are tracked in `deviations.md`.

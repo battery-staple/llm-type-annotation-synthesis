@@ -64,6 +64,8 @@ class RepairStage(
             "max_checker_invocations" to ctx.config.agent.maxCheckerInvocations,
             "local_variable_annotations" to ctx.config.repair.localVariableAnnotations.name.lowercase(),
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
+            "production_roots" to ctx.productionRoots.sorted(),
+            "test_roots" to ctx.testRoots.sorted(),
             "checker" to checkerSlice,
         )
         return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template)
@@ -102,6 +104,8 @@ class RepairStage(
                 "processor" to checker.processor,
                 "custom_quals_jar_path" to ".agent-libs/custom-quals.jar",
                 "max_checker_invocations" to ctx.config.agent.maxCheckerInvocations.toString(),
+                "production_roots" to pipeline.validators.SourceRoots.display(ctx.productionRoots),
+                "production_globs" to pipeline.validators.SourceRoots.displayGlobs(ctx.productionRoots),
             ),
         )
 
@@ -151,12 +155,17 @@ class RepairStage(
                 continue
             }
             treeChangedSinceChecker = true
-            val pathAudit = FilesystemGuard.audit(worktree, changed, StageName.REPAIR, false, false)
+            val pathAudit = FilesystemGuard.audit(
+                worktree, changed, StageName.REPAIR, false, false,
+                ctx.productionRoots, ctx.testRoots
+            )
             val repairAudit = DiffAwareAstGuard.validate(
                 worktree,
                 changed,
                 "HEAD",
                 ctx.config.repair.localVariableAnnotations,
+                ctx.productionRoots,
+                ctx.testRoots
             )
             lastAuditValid = pathAudit.valid && repairAudit.valid
             lastAuditViolations = violationTexts(pathAudit.violations) + violationTexts(repairAudit.violations)
@@ -415,7 +424,10 @@ internal fun resetToBaseline(worktree: File) {
 
 /** Re-exports the annotated baseline into the agent workspace and restores helper files. */
 internal fun prepareRepairWorkspace(worktree: File, workspace: File, checker: CheckerConfig, ctx: RunContext) {
-    FileOps.exportSanitized(worktree, workspace, testReadOnly = true)
+    FileOps.exportSanitized(
+        worktree, workspace, testReadOnly = true,
+        testRoots = ctx.testRoots
+    )
     val agentLibs = workspace.resolve(".agent-libs")
     Files.createDirectories(agentLibs.toPath())
     if (checker.customQualsJar.isFile) {

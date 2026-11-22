@@ -22,7 +22,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
     implementation("com.github.ajalt.clikt:clikt:4.3.0")
-    implementation("com.github.javaparser:javaparser-core:3.26.1")
+    implementation("com.github.javaparser:javaparser-core:3.28.2")
     implementation("org.xerial:sqlite-jdbc:3.45.1.0")
     implementation("com.charleskorn.kaml:kaml:0.56.0")
 

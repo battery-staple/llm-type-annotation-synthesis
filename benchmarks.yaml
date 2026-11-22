@@ -16,4 +16,22 @@ benchmarks:
       compile_task: "compileJava"
       test_task: "test"
       checker_task: "checkerPass"
-      single_test_cmd: "./gradlew test --tests {test_class}.{test_method}"
+  - id: "cmsx-assignment-extension"
+    repo_url: "eval-repos/cmsx"
+    commit_hash: "be6f19da0008342cf559b66175fdf1acd3a02b0e"
+    parent_hash: "7ee122ff1fee70414fd1c717a2f089955ccbec5a"
+    regression_test_class: "cms.controller.persistence.AssignmentControllerImplTest"
+    regression_test_method: "getSubmissionStatus_assignmentGraded_pastDue_hasExtension_accept"
+    description: "Submissions with a valid extension must be ACCEPTed even after the due date when the assignment is graded; previously any graded assignment REJECTed outright."
+    default_branch: "master"
+    source_compatibility: "21"
+    target_compatibility: "21"
+    production_roots: ["src"]
+    test_roots: ["test"]
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: ""
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"

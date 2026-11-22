@@ -108,7 +108,7 @@ class GradleBuildRunner(
             output.contains("cannot find symbol")
         val compileFailed = result.exitCode != 0 && (noXml || mentionsCompileFailure)
         return TestRunResult(
-            success = xmlFiles.isNotEmpty(),
+            success = result.exitCode == 0 && !result.timedOut && xmlFiles.isNotEmpty(),
             exitCode = result.exitCode,
             outcomes = outcomes,
             xmlPaths = xmlFiles,
@@ -179,7 +179,11 @@ class GradleBuildRunner(
 
     private fun prefixed(task: String): String {
         val sub = build.subproject.trim().trim(':')
-        return if (sub.isEmpty()) task else ":$sub:$task"
+        // An empty subproject means the repository root project. Qualify the
+        // task explicitly so `test` does not fan out to unrelated subprojects
+        // (CMSX includes `:regression`, where a `--tests` filter matches no
+        // tests and fails the whole invocation).
+        return if (sub.isEmpty()) ":$task" else ":$sub:$task"
     }
 
     private fun baseEnv(): Map<String, String> = buildMap {

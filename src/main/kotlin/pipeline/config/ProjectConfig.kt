@@ -105,8 +105,7 @@ data class BuildSection(
     val subproject: String = "",
     @SerialName("compile_task") val compileTask: String = "compileJava",
     @SerialName("test_task") val testTask: String = "test",
-    @SerialName("checker_task") val checkerTask: String = "checkerPass",
-    @SerialName("single_test_cmd") val singleTestCmd: String = "./gradlew test --tests {test_class}.{test_method}"
+    @SerialName("checker_task") val checkerTask: String = "checkerPass"
 )
 
 @Serializable
