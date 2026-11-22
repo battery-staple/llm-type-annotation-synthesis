@@ -15,10 +15,61 @@ class DatabaseTelemetryTest {
             db.transaction("successful_test") { it.createStatement().executeUpdate("INSERT INTO repositories(repo_id,name,git_url,default_branch,config_yaml) VALUES('r','r','u','main','')") }
             runCatching { db.transaction("failed_test") { throw IllegalStateException("expected failure") } }
             runCatching { db.read("failed_read") { throw IllegalArgumentException("bad read") } }
-            val rows = db.read { c -> c.createStatement().executeQuery("SELECT operation,success FROM db_operation_metrics ORDER BY metric_id").use { rs -> buildList { while (rs.next()) add(rs.getString(1) to rs.getInt(2)) } } }
+            db.flushOperationMetrics()
+            val rows = db.jdbc.createStatement().executeQuery("SELECT operation,success FROM db_operation_metrics ORDER BY metric_id").use { rs ->
+                buildList { while (rs.next()) add(rs.getString(1) to rs.getInt(2)) }
+            }
             assertTrue(rows.any { it == "successful_test" to 1 })
             assertTrue(rows.any { it == "failed_test" to 0 })
             assertTrue(rows.any { it == "failed_read" to 0 })
+        }
+        dir.deleteRecursively()
+    }
+
+    @Test fun finishRunAndCloseFlushBufferedMetrics() = runBlocking {
+        val dir = Files.createTempDirectory("db-metrics-flush").toFile()
+        val dbFile = File(dir, "test.db")
+        SQLiteDatabaseManager(dbFile).use { db ->
+            db.transaction("before_finish") { }
+            db.finishRun(RunId("missing-run"), "failed")
+            val afterFinish = db.jdbc.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM db_operation_metrics WHERE operation IN ('before_finish','finish_run')"
+            ).use { rs -> rs.next(); rs.getInt(1) }
+            assertEquals(2, afterFinish)
+
+            db.transaction("before_close") { }
+        }
+        SQLiteDatabaseManager(dbFile).use { reopened ->
+            val afterClose = reopened.jdbc.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM db_operation_metrics WHERE operation='before_close'"
+            ).use { rs -> rs.next(); rs.getInt(1) }
+            assertEquals(1, afterClose)
+        }
+        dir.deleteRecursively()
+    }
+
+    @Test fun metricBufferFlushesAtThreshold() = runBlocking {
+        val dir = Files.createTempDirectory("db-metrics-threshold").toFile()
+        SQLiteDatabaseManager(File(dir, "test.db")).use { db ->
+            repeat(200) { db.read("threshold_read") { } }
+            val flushed = db.jdbc.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM db_operation_metrics WHERE operation='threshold_read'"
+            ).use { rs -> rs.next(); rs.getInt(1) }
+            assertEquals(200, flushed)
+        }
+        dir.deleteRecursively()
+    }
+
+    @Test fun telemetryWritesDoNotCreateDbOperationMetrics() = runBlocking {
+        val dir = Files.createTempDirectory("db-metrics-no-recursion").toFile()
+        SQLiteDatabaseManager(File(dir, "test.db")).use { db ->
+            db.recordRetry(RetryEvent("id", "run", "step", "triage", 1, 3, true, 2000, "Timeout", "temporary"))
+            db.recordSubprocess(SubprocessMetricRecord("m1", RunId("run"), "step", "verification", "test", "gradle", 10, 0, false, true, null))
+            db.flushOperationMetrics()
+            val rows = db.jdbc.createStatement().executeQuery(
+                "SELECT COUNT(*) FROM db_operation_metrics WHERE operation IN ('record_retry','record_subprocess')"
+            ).use { rs -> rs.next(); rs.getInt(1) }
+            assertEquals(0, rows)
         }
         dir.deleteRecursively()
     }

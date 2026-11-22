@@ -15,6 +15,19 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
     // view per call, which would defeat confinement and add allocation overhead.
     private val dbDispatcher = Dispatchers.IO.limitedParallelism(1)
     private var inTransaction = false // guarded by mutex + dbDispatcher
+    private val pendingOperationMetrics = ArrayDeque<OperationMetric>() // guarded by mutex + dbDispatcher
+
+    private data class OperationMetric(
+        val operation: String,
+        val durationMs: Double,
+        val success: Boolean,
+        val errorMessage: String?
+    )
+
+    private companion object {
+        // One extra commit per 200 operations instead of one per operation.
+        const val METRIC_FLUSH_THRESHOLD = 200
+    }
 
     init {
         connection.createStatement().use { statement ->
@@ -88,7 +101,11 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
         return columns
     }
 
-    suspend fun <T> transaction(operation: String = "transaction", block: (Connection) -> T): T =
+    suspend fun <T> transaction(
+        operation: String = "transaction",
+        recordMetric: Boolean = true,
+        block: (Connection) -> T
+    ): T =
         mutex.withLock {
             withContext(dbDispatcher) {
                 val started = System.nanoTime()
@@ -114,36 +131,95 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
                     throw t
                 } finally {
                     inTransaction = false
-                    recordOperationMetric(operation, (System.nanoTime() - started) / 1_000_000.0, success, error)
+                    if (recordMetric) {
+                        enqueueOperationMetric(
+                            operation,
+                            (System.nanoTime() - started) / 1_000_000.0,
+                            success,
+                            error
+                        )
+                    }
                 }
             }
         }
 
     /** Serialized read on the same single connection (MVP intentionally has no reader pool). */
-    suspend fun <T> read(operation: String = "read", block: (Connection) -> T): T =
+    suspend fun <T> read(
+        operation: String = "read",
+        recordMetric: Boolean = true,
+        block: (Connection) -> T
+    ): T =
         mutex.withLock {
             withContext(dbDispatcher) {
                 val started = System.nanoTime()
                 var success = false
                 var error: Throwable? = null
-                try { block(connection).also { success = true } }
-                catch (t: Throwable) { error = t; throw t }
-                finally { recordOperationMetric(operation, (System.nanoTime() - started) / 1_000_000.0, success, error) }
+                try {
+                    block(connection).also { success = true }
+                } catch (t: Throwable) {
+                    error = t
+                    throw t
+                } finally {
+                    if (recordMetric) {
+                        enqueueOperationMetric(
+                            operation,
+                            (System.nanoTime() - started) / 1_000_000.0,
+                            success,
+                            error
+                        )
+                    }
+                }
             }
         }
 
-    private fun recordOperationMetric(operation: String, durationMs: Double, success: Boolean, error: Throwable?) {
+    private fun enqueueOperationMetric(operation: String, durationMs: Double, success: Boolean, error: Throwable?) {
+        pendingOperationMetrics.addLast(
+            OperationMetric(operation, durationMs, success, error?.message?.take(300))
+        )
+        if (pendingOperationMetrics.size >= METRIC_FLUSH_THRESHOLD) {
+            flushOperationMetricsLocked()
+        }
+    }
+
+    /** Persists buffered operation metrics in one transaction; caller must hold the DB mutex. */
+    private fun flushOperationMetricsLocked() {
+        if (pendingOperationMetrics.isEmpty() || inTransaction) return
+        val batch = pendingOperationMetrics.toList()
+        pendingOperationMetrics.clear()
         runCatching {
-            connection.prepareStatement("INSERT INTO db_operation_metrics(operation,duration_ms,success,error_message) VALUES(?,?,?,?)").use { s ->
-                s.setString(1, operation); s.setDouble(2, durationMs); s.setInt(3, if (success) 1 else 0)
-                s.setString(4, error?.message?.take(300)); s.executeUpdate()
+            connection.createStatement().use { it.execute("BEGIN IMMEDIATE") }
+            connection.prepareStatement(
+                "INSERT INTO db_operation_metrics(operation,duration_ms,success,error_message) VALUES(?,?,?,?)"
+            ).use { statement ->
+                batch.forEach { metric ->
+                    statement.setString(1, metric.operation)
+                    statement.setDouble(2, metric.durationMs)
+                    statement.setInt(3, if (metric.success) 1 else 0)
+                    statement.setString(4, metric.errorMessage)
+                    statement.addBatch()
+                }
+                statement.executeBatch()
             }
-        }.onFailure { logger.warn(it) { "Could not record database operation metric" } }
+            connection.createStatement().use { it.execute("COMMIT") }
+        }.onFailure { error ->
+            runCatching { connection.createStatement().use { it.execute("ROLLBACK") } }
+            logger.warn(error) { "Could not flush ${batch.size} database operation metrics" }
+        }
+    }
+
+    /** Flushes buffered DB operation metrics. Failure is logged but never fails the caller. */
+    suspend fun flushOperationMetrics() {
+        mutex.withLock {
+            withContext(dbDispatcher) {
+                flushOperationMetricsLocked()
+            }
+        }
     }
 
     val jdbc: Connection get() = connection
 
     override fun close() {
+        flushOperationMetricsLocked()
         connection.close()
     }
 }

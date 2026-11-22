@@ -23,7 +23,9 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
     pipeline.ports.DatabasePort {
 
     override suspend fun recordRetry(event: RetryEvent) {
-        transaction("record_retry") { c ->
+        // The retry row is already telemetry; measuring its own insert would add
+        // a second commit per retry without useful signal.
+        transaction("record_retry", recordMetric = false) { c ->
             c.prepareStatement("""INSERT INTO retry_events(retry_id,run_id,step_id,stage,attempt_number,max_attempts,will_retry,delay_ms,error_class,error_message) VALUES(?,?,?,?,?,?,?,?,?,?)""").use { s ->
                 s.setString(1, event.retryId); s.setString(2, event.runId); s.setString(3, event.stepId)
                 s.setString(4, event.stage); s.setInt(5, event.attemptNumber); s.setInt(6, event.maxAttempts)
@@ -34,7 +36,8 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
     }
 
     override suspend fun recordSubprocess(metric: SubprocessMetricRecord) {
-        transaction("record_subprocess") { c ->
+        // The subprocess row is telemetry; don't double-commit to measure itself.
+        transaction("record_subprocess", recordMetric = false) { c ->
             c.prepareStatement("""INSERT INTO subprocess_metrics(metric_id,run_id,step_id,stage,kind,tool,duration_ms,exit_code,timed_out,success,error_message) VALUES(?,?,?,?,?,?,?,?,?,?,?)""").use { s ->
                 s.setString(1, metric.metricId); s.setString(2, metric.runId.value); s.setString(3, metric.stepId)
                 s.setString(4, metric.stage); s.setString(5, metric.kind); s.setString(6, metric.tool)
@@ -242,6 +245,9 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
                         s.executeUpdate()
                     }
             }
+            // Make this run's buffered metrics visible without waiting for the
+            // global threshold or process shutdown.
+            flushOperationMetrics()
         }
     }
 
