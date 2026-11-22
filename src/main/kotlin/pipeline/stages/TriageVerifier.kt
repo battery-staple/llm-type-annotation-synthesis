@@ -13,6 +13,7 @@ import pipeline.db.TelemetryProjection
 import pipeline.db.TestExecutionRecord
 import pipeline.db.TestRunRecord
 import pipeline.ports.BuildRunner
+import pipeline.runners.BuildMetrics
 import pipeline.ports.TestRunResult
 import pipeline.ports.TestStatus
 import pipeline.util.FileOps
@@ -98,7 +99,8 @@ internal object TriageVerifier {
             }
 
             log.info { "Triage ${req.benchmarkId}: compiling unpatched C-1 sandbox" }
-            val c1Build = buildRunner.compile(c1Sandbox)
+            val metrics = BuildMetrics(ctx, buildRunner)
+            val c1Build = metrics.compile("C-1 compile", c1Sandbox)
             if (!c1Build.success) {
                 if (c1Build.timedOut) return StageResult.TransientFailure(
                     RuntimeException("C-1 compile timed out: ${c1Build.output.take(2000)}"), 0, emptyList()
@@ -129,7 +131,7 @@ internal object TriageVerifier {
             }
 
             log.info { "Triage ${req.benchmarkId}: running T_reg on C-1 (expecting runtime failure)" }
-            val c1Result = buildRunner.runTests(c1Sandbox, testFilter = req.regressionTest)
+            val c1Result = metrics.tests("C-1 regression test", c1Sandbox, testFilter = req.regressionTest)
             recordTriageTestTelemetry(ctx, req, c1Result, suiteKind = "regression_test", xmlPath = null)
             if (c1Result.timedOut) return StageResult.TransientFailure(
                 RuntimeException("C-1 regression test timed out: ${c1Result.output.take(2000)}"), 0, emptyList()
@@ -169,7 +171,7 @@ internal object TriageVerifier {
                     c1BuildStatus = "ok", c1TestStatus = "failed_as_expected"
                 )
             }
-            val cResult = buildRunner.runTests(cSandbox, testFilter = req.regressionTest)
+            val cResult = metrics.tests("C regression test", cSandbox, testFilter = req.regressionTest)
             recordTriageTestTelemetry(ctx, req, cResult, suiteKind = "regression_test", xmlPath = null)
             if (cResult.timedOut) return StageResult.TransientFailure(
                 RuntimeException("C regression test timed out: ${cResult.output.take(2000)}"), 0, emptyList()

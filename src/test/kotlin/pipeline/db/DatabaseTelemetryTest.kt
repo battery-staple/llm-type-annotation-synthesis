@@ -6,6 +6,7 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import pipeline.stages.RunId
 
 class DatabaseTelemetryTest {
     @Test fun metricsCaptureSuccessfulAndFailedOperationsWithoutNesting() = runBlocking {
@@ -28,6 +29,19 @@ class DatabaseTelemetryTest {
             db.recordRetry(RetryEvent("id", "run", "step", "triage", 3, 3, false, 0, "Timeout", "x".repeat(1500)))
             db.read { c -> c.createStatement().executeQuery("SELECT will_retry,error_message FROM retry_events WHERE retry_id='id'").use { rs ->
                 assertTrue(rs.next()); assertEquals(0, rs.getInt(1)); assertEquals(1000, rs.getString(2).length)
+            } }
+        }
+        dir.deleteRecursively()
+    }
+
+    @Test fun subprocessMetricsPersistAndAggregate() = runBlocking {
+        val dir = Files.createTempDirectory("db-subprocess").toFile()
+        SQLiteDatabaseManager(File(dir, "test.db")).use { db ->
+            db.recordSubprocess(SubprocessMetricRecord("m1", RunId("run"), "step", "verification", "test", "gradle", 10, 1, true, false, "timeout"))
+            db.recordSubprocess(SubprocessMetricRecord("m2", RunId("run"), "step", "verification", "test", "gradle", 30, 0, false, true, null))
+            db.read { c -> c.createStatement().executeQuery("SELECT calls,failures,timeouts,avg_duration_ms,max_duration_ms,total_duration_ms FROM v_subprocess_summary WHERE stage='verification' AND kind='test'").use { rs ->
+                assertTrue(rs.next()); assertEquals(2, rs.getInt(1)); assertEquals(1, rs.getInt(2)); assertEquals(1, rs.getInt(3))
+                assertEquals(20.0, rs.getDouble(4)); assertEquals(30, rs.getLong(5)); assertEquals(40, rs.getLong(6))
             } }
         }
         dir.deleteRecursively()

@@ -15,6 +15,7 @@ import pipeline.db.TelemetryProjection
 import pipeline.db.TestExecutionRecord
 import pipeline.db.TestRunRecord
 import pipeline.ports.BuildRunner
+import pipeline.runners.BuildMetrics
 import pipeline.ports.CheckerResult
 import pipeline.ports.TestOutcome
 import pipeline.ports.TestRunResult
@@ -113,7 +114,9 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
 
         // b. Final checker run (main sources only, via BuildRunner).
         log.info { "Verification: running final checker ${input.lattice.processor}" }
-        val checker = buildRunner.runChecker(
+        val metrics = BuildMetrics(ctx, buildRunner)
+        val checker = metrics.checker(
+            "final checker",
             worktreeDir = worktree,
             checkerHome = File(ctx.config.environment.checkerFrameworkHome),
             customQualsJar = input.lattice.customQualsJar,
@@ -144,7 +147,7 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         var regXmlName: String? = null
         if (testPatchOk) {
             log.info { "Verification: running T_reg ${input.sample.regressionTest}" }
-            val result = buildRunner.runTests(worktree, testFilter = input.sample.regressionTest, customQualsJar = input.lattice.customQualsJar)
+            val result = metrics.tests("regression test", worktree, testFilter = input.sample.regressionTest, customQualsJar = input.lattice.customQualsJar)
             regResult = result
             val hasPassed = result.outcomes.any { it.status == TestStatus.PASSED }
             val hasFailure = result.outcomes.any { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
@@ -178,7 +181,7 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         var suiteXmlName: String? = null
         if (input.verificationScope == VerificationScope.FULL_SUITE) {
             log.info { "Verification: running pre-existing suite" }
-            val suiteResult = buildRunner.runTests(worktree, testFilter = null, customQualsJar = input.lattice.customQualsJar)
+            val suiteResult = metrics.tests("full suite", worktree, testFilter = null, customQualsJar = input.lattice.customQualsJar)
             if (suiteResult.timedOut) {
                 recordTestTelemetry(ctx, input, suiteResult, "pre_existing_suite", null)
                 return StageResult.TransientFailure(RuntimeException("Verification suite timed out"), 0, emptyList())

@@ -26,6 +26,7 @@ import pipeline.db.TestExecutionRecord
 import pipeline.db.TestRunRecord
 import pipeline.ports.AgentRunner
 import pipeline.ports.BuildRunner
+import pipeline.runners.BuildMetrics
 import pipeline.ports.TestStatus
 import pipeline.util.FileOps
 import pipeline.util.Git
@@ -174,14 +175,15 @@ class ApplicationStage(
                 prepareWorkspace(worktree, workspace, lattice, ctx)
                 continue
             }
-            val compile = buildRunner.compile(worktree, lattice.customQualsJar)
+            val metrics = BuildMetrics(ctx, buildRunner)
+            val compile = metrics.compile("application compile", worktree, lattice.customQualsJar)
             if (!compile.success) {
                 feedback = "Compilation of the annotated tree failed:\n" + compile.output.take(8000)
                 resetWorktree(worktree)
                 prepareWorkspace(worktree, workspace, lattice, ctx)
                 continue
             }
-            val tests = buildRunner.runTests(worktree, null, lattice.customQualsJar)
+            val tests = metrics.tests("pre-existing suite", worktree, null, lattice.customQualsJar)
             val runId = TelemetryIds.id()
             testRun = TestRunRecord(
                 runId,
@@ -228,7 +230,8 @@ class ApplicationStage(
                 prepareWorkspace(worktree, workspace, lattice, ctx)
                 continue
             }
-            val checker = buildRunner.runChecker(
+            val checker = metrics.checker(
+                "application checker",
                 worktree,
                 File(ctx.config.environment.checkerFrameworkHome),
                 lattice.customQualsJar,

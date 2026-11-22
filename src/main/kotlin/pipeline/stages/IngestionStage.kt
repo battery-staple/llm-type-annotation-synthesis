@@ -10,6 +10,7 @@ import pipeline.cas.CasEngine
 import pipeline.cas.StageArtifactWriter
 import pipeline.db.CommitTriageUpdate
 import pipeline.ports.BuildRunner
+import pipeline.runners.BuildMetrics
 import pipeline.util.FileOps
 import pipeline.util.Git
 import pipeline.util.Hashing
@@ -110,7 +111,7 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
 
         log.info { "Ingestion: pre-warming Gradle cache via ${ctx.build.compileTask}" }
         val prewarm = try {
-            buildRunner.compile(ctx.worktreeDir)
+            BuildMetrics(ctx, buildRunner).compile("pre-warm", ctx.worktreeDir)
         } catch (t: Throwable) {
             log.warn { "Ingestion: pre-warm threw (transient): ${t.message}" }
             return StageResult.TransientFailure(

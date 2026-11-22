@@ -22,6 +22,7 @@ import pipeline.db.GuardrailEventRecord
 import pipeline.db.TelemetryProjection
 import pipeline.ports.AgentRunner
 import pipeline.ports.BuildRunner
+import pipeline.runners.BuildMetrics
 import pipeline.util.FileOps
 import pipeline.util.Git
 import pipeline.util.Hashing
@@ -339,7 +340,8 @@ class RepairStage(
         checkerRuns: MutableList<CheckerRunRecord>,
         checkerDiagnostics: MutableList<CheckerDiagnosticRecord>,
     ): pipeline.ports.CheckerResult {
-        val result = buildRunner.runChecker(
+        val result = BuildMetrics(ctx, buildRunner).checker(
+            "$stage checker",
             worktree,
             File(ctx.config.environment.checkerFrameworkHome),
             checker.customQualsJar,
