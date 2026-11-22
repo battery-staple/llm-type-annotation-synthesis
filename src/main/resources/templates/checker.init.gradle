@@ -30,8 +30,11 @@ allprojects { project ->
             // Match the project's Java level. The harness supplies these from
             // project_config.yaml (environment.source_compatibility/target_compatibility);
             // the project's Java extension is the fallback when the env vars are absent.
-            def projectSourceCompat = String.valueOf(project.sourceCompatibility ?: org.gradle.api.JavaVersion.current())
-            def projectTargetCompat = String.valueOf(project.targetCompatibility ?: project.sourceCompatibility ?: org.gradle.api.JavaVersion.current())
+            // Read from the `java` extension: the Project-level `sourceCompatibility`
+            // convention property was removed in Gradle 9.
+            def javaExt = project.extensions.findByType(org.gradle.api.plugins.JavaPluginExtension)
+            def projectSourceCompat = String.valueOf(javaExt?.sourceCompatibility ?: org.gradle.api.JavaVersion.current())
+            def projectTargetCompat = String.valueOf(javaExt?.targetCompatibility ?: javaExt?.sourceCompatibility ?: org.gradle.api.JavaVersion.current())
             def sourceCompat = optional(project, 'CF_SOURCE_COMPATIBILITY', projectSourceCompat)
             def targetCompat = optional(project, 'CF_TARGET_COMPATIBILITY', projectTargetCompat)
 
@@ -79,6 +82,12 @@ allprojects { project ->
                 .inject(project.files()) { acc, f -> acc + f }
 
             def main = project.sourceSets.main
+            // The qualifier jars and checker-qual are plain classpath entries. With a
+            // module-info.java in the main source set, javac compiles in module mode and
+            // a named module cannot read classpath types, so qualifier imports and the
+            // checker's own qual classes would not resolve. Compile such projects as
+            // classic classpath projects; the repository's files are left untouched.
+            main.java.exclude('**/module-info.java')
             project.tasks.register('checkerPass', JavaCompile) {
                 source = main.allJava
                 // `main.output` makes classes produced by the project's own
@@ -94,6 +103,13 @@ allprojects { project ->
                 sourceCompatibility = sourceCompat
                 targetCompatibility = targetCompat
                 options.fork = true
+                // Keep every jar (checker-qual, qualifiers) and main.output on the plain
+                // classpath even if a module-info.class sits in the build outputs.
+                modularity.inferModulePath.set(false)
+                // Gradle's forked compiler worker defaults to a 512m heap, which the
+                // Checker Framework exhausts on large or generated sources (e.g. a JavaCC
+                // parser). Override with CF_FORK_MAX_HEAP.
+                options.forkOptions.memoryMaximumSize = optional(project, 'CF_FORK_MAX_HEAP', '4g')
                 options.forkOptions.jvmArgs.addAll(jvmArgs)
                 options.annotationProcessorPath = project.files(checkerJar, customQualJar)
 
