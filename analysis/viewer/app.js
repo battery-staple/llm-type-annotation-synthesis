@@ -1035,7 +1035,7 @@
         // The pipeline deletes the stream once the durable transcript is saved:
         // the step finished, so reload and show the final transcript.
         stopLivePolling();
-        await selectRun(state.selectedRunId, true);
+        await loadRuns(true); // refreshes the sidebar list and the selected run
         return;
       }
       if (data.reset || data.events.length) {

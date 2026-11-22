@@ -1360,7 +1360,14 @@ class ViewerHandler(BaseHTTPRequestHandler):
 
         try:
             if path == "/api/health":
-                mtime = self.db_path.stat().st_mtime if self.db_path.exists() else None
+                # The pipeline DB runs in WAL mode: writes land in the -wal file and
+                # leave the main file's mtime unchanged until a checkpoint.
+                mtimes = [
+                    p.stat().st_mtime
+                    for p in (self.db_path, Path(f"{self.db_path}-wal"))
+                    if p.exists()
+                ]
+                mtime = max(mtimes) if mtimes else None
                 self.send_json({"ok": True, "db_path": str(self.db_path), "db_mtime": mtime})
                 return
 
