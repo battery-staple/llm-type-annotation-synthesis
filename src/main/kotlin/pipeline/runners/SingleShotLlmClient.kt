@@ -63,10 +63,13 @@ class OpenCodeSingleShotLlmClient(
                 )
             }
         }
-        val value = decodeLastClassification(result.transcript.mapNotNull { it.content })
+        val messageContents = result.transcript
+            .filter { it.eventType == AgentEventType.MESSAGE }
+            .mapNotNull { it.content }
+        val value = decodeLastClassification(messageContents)
             ?: throw IllegalStateException(
                 "Single-shot LLM produced no parseable TriageClassification JSON " +
-                    "(exit=${result.exitCode}, events=${result.transcript.size})"
+                    "(exit=${result.exitCode}, messages=${messageContents.size}, totalEvents=${result.transcript.size})"
             )
         return SingleShotLlmResponse(value = value, usage = usage, latencyMs = latencyMs)
     }

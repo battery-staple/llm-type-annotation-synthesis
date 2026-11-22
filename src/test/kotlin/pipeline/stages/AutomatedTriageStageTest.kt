@@ -339,4 +339,48 @@ class AutomatedTriageStageTest {
             tmp.deleteRecursively()
         }
     }
+
+    @Test
+    fun `OpenCodeSingleShotLlmClient ignores JSON inside INITIAL_PROMPT`() = runBlocking {
+        val fakeRunner = object : pipeline.ports.AgentRunner {
+            override suspend fun runAgent(
+                prompt: String,
+                cwd: File,
+                agentRole: String,
+                model: String,
+                maxSteps: Int,
+                timeoutSeconds: Long,
+                seed: Long,
+                temperature: Double,
+                environment: Map<String, String>,
+                onEvent: (suspend (AgentTranscriptEvent) -> Unit)?
+            ): pipeline.ports.AgentRunResult = pipeline.ports.AgentRunResult(
+                exitCode = 1,
+                stepsCounted = 0,
+                transcript = listOf(
+                    AgentTranscriptEvent(
+                        timestamp = "2026-01-01T00:00:00Z",
+                        eventType = AgentEventType.INITIAL_PROMPT,
+                        turnIndex = 0,
+                        content = """{"isBugfix": true, "bugfixScore": 0.87, "category": "bugfix", "rationale": "example", "regressionTest": {"testClass": "com.example.FooTest", "testMethod": "testBar"}}"""
+                    ),
+                    AgentTranscriptEvent(
+                        timestamp = "2026-01-01T00:00:01Z",
+                        eventType = AgentEventType.MESSAGE,
+                        turnIndex = 1,
+                        content = "stderr: error"
+                    )
+                ),
+                timedOut = false
+            )
+        }
+        val client = pipeline.runners.OpenCodeSingleShotLlmClient(agentRunner = fakeRunner)
+        var threw = false
+        try {
+            client.classifyCommit("prompt", "model", 0.0)
+        } catch (_: IllegalStateException) {
+            threw = true
+        }
+        assertTrue(threw)
+    }
 }
