@@ -99,6 +99,7 @@ Any contributor or autonomous agent working in this repository should adhere to 
   --seed 0
 
 python3 analysis/evaluate_metrics.py --db data/pipeline.db
+python3 analysis/inspect_cache.py
 ```
 
 Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build output) is gitignored. A fresh checkout needs the Checker Framework vendored before running.
