@@ -23,6 +23,7 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
             statement.execute("PRAGMA foreign_keys=ON")
         }
         migrateTestRunColumns()
+        migrateEvaluationRunColumns()
         connection.createStatement().use { statement ->
             // JDBC's execute() only runs the first statement in a multi-statement string.
             Schema.DDL.split(';').forEach { ddl ->
@@ -33,12 +34,7 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
 
     /** Add evidence metadata to databases created by earlier pipeline versions. */
     private fun migrateTestRunColumns() {
-        val columns = mutableSetOf<String>()
-        connection.createStatement().use { statement ->
-            statement.executeQuery("PRAGMA table_info(test_runs)").use { rs ->
-                while (rs.next()) columns += rs.getString("name")
-            }
-        }
+        val columns = tableColumns("test_runs")
         if (columns.isEmpty()) return // Fresh database; the DDL creates the current schema.
 
         connection.createStatement().use { statement ->
@@ -51,6 +47,32 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
                 statement.execute("UPDATE test_runs SET reported_failed_count = failed_count")
             }
         }
+    }
+
+    /**
+     * `evaluation_runs.batch_id` was added after the first databases were
+     * created. `CREATE TABLE IF NOT EXISTS` does not add columns to an
+     * existing table, and the schema's index on `batch_id` would otherwise
+     * fail with "no such column" before any run can start.
+     */
+    private fun migrateEvaluationRunColumns() {
+        val columns = tableColumns("evaluation_runs")
+        if (columns.isEmpty()) return // Fresh database; the DDL creates the current schema.
+        if ("batch_id" !in columns) {
+            connection.createStatement().use { statement ->
+                statement.execute("ALTER TABLE evaluation_runs ADD COLUMN batch_id TEXT")
+            }
+        }
+    }
+
+    private fun tableColumns(table: String): Set<String> {
+        val columns = mutableSetOf<String>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info($table)").use { rs ->
+                while (rs.next()) columns += rs.getString("name")
+            }
+        }
+        return columns
     }
 
     suspend fun <T> transaction(block: (Connection) -> T): T =
