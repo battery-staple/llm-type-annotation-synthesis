@@ -17,6 +17,9 @@ import pipeline.cas.CacheKeys
 class AutomatedTriageStage : PipelineStage<BenchmarkEntry, VerifiedSample> {
     override val stageName: StageName = StageName.TRIAGE
 
+    /** LLM classifier output is sample-dependent once this stage is implemented. */
+    override val isDeterministic: Boolean = false
+
     private val log = KotlinLogging.logger {}
 
     override fun computeCacheKey(ctx: RunContext, input: BenchmarkEntry): CasKey {
@@ -38,7 +41,8 @@ class AutomatedTriageStage : PipelineStage<BenchmarkEntry, VerifiedSample> {
             stageInput = stageInput,
             upstreamKeys = emptyList(),
             configSlice = configSlice,
-            promptTemplate = null
+            promptTemplate = null,
+            includeSampleIdentity = !isDeterministic
         )
     }
 

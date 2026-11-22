@@ -68,7 +68,7 @@ class RepairStage(
             "test_roots" to ctx.testRoots.sorted(),
             "checker" to checkerSlice,
         )
-        return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template)
+        return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template, includeSampleIdentity = !isDeterministic)
     }
 
     override suspend fun execute(ctx: RunContext, input: RepairInput): StageResult<RepairResult> {

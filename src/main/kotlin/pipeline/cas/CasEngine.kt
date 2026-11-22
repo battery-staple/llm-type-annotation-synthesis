@@ -298,7 +298,8 @@ object CacheKeys {
         upstreamKeys: List<CasKey>,
         configSlice: Map<String, Any?>,
         promptTemplate: String?,
-        extra: Map<String, Any?> = emptyMap()
+        extra: Map<String, Any?> = emptyMap(),
+        includeSampleIdentity: Boolean = true
     ): CasKey {
         val runtime = mapOf(
             "java_version" to System.getProperty("java.version"),
@@ -309,18 +310,23 @@ object CacheKeys {
             "target_compatibility" to ctx.targetCompatibility,
             "gradle_wrapper" to ctx.build.wrapperExecutable
         )
-        val fields = mapOf(
-            "stage_name" to stage.identifier,
-            "stage_input" to Hashing.canonicalHash(stageInput),
-            "upstream_artifacts" to upstreamKeys.map { it.toString() },
-            "config_slice" to Hashing.canonicalHash(configSlice),
-            "prompt_template" to (promptTemplate?.let { Hashing.sha256(it) } ?: ""),
-            "stage_code" to StageCodeFingerprint.forStage(stage),
-            "sample_seed" to ctx.sampleIndex,
-            "sample_temperature" to ctx.sampleTemperature,
-            "runtime_environment" to Hashing.canonicalHash(runtime),
-            "extra" to Hashing.canonicalHash(extra)
-        )
+        // Deterministic stages omit sample identity: a different seed cannot
+        // change their output, so including it would only create duplicate
+        // bundles for byte-identical artifacts.
+        val fields: Map<String, Any?> = buildMap {
+            put("stage_name", stage.identifier)
+            put("stage_input", Hashing.canonicalHash(stageInput))
+            put("upstream_artifacts", upstreamKeys.map { it.toString() })
+            put("config_slice", Hashing.canonicalHash(configSlice))
+            put("prompt_template", promptTemplate?.let { Hashing.sha256(it) } ?: "")
+            put("stage_code", StageCodeFingerprint.forStage(stage))
+            if (includeSampleIdentity) {
+                put("sample_seed", ctx.sampleIndex)
+                put("sample_temperature", ctx.sampleTemperature)
+            }
+            put("runtime_environment", Hashing.canonicalHash(runtime))
+            put("extra", Hashing.canonicalHash(extra))
+        }
         return CasKey.fromHex(Hashing.canonicalHash(fields))
     }
 }

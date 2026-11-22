@@ -70,7 +70,7 @@ class ApplicationStage(
             "production_roots" to ctx.productionRoots.sorted(),
             "test_roots" to ctx.testRoots.sorted(),
         )
-        return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template)
+        return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template, includeSampleIdentity = !isDeterministic)
     }
 
     override suspend fun execute(ctx: RunContext, input: ApplicationInput): StageResult<AnnotatedRepo> {

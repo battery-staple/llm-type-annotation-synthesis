@@ -284,3 +284,17 @@ the crawler) are not listed unless the code had to interpret the plan.
     uses the full `isTestPath` signal (including the `*Test.java` fallback)
     rather than directory roots alone. Git's C-quoted paths in `diff --git`
     headers are parsed without splitting on embedded spaces.
+50. **Deterministic stages do not include sample identity in cache keys.**
+    `CacheKeys.compute` previously mixed `sample_seed`/`sample_temperature`
+    into every stage's key, so ingestion, triage, and verification produced a
+    separate bundle per seed even though their outputs are byte-identical.
+    `PipelineStage.isDeterministic` now controls this: ingestion, manifest
+    triage, and verification omit sample identity, so their bundles are shared
+    across seeds (ingestion still re-materializes the per-run worktree from the
+    cached commit hashes). Synthesis, application, repair, and the deferred
+    automated triage keep it, because their LLM output is sample-dependent.
+    Deterministic bundles also record `sample_index=0` /
+    `sample_temperature=0.0` in their manifest, since a shared bundle is not
+    owned by any one sample; per-run provenance remains in the `runs` and
+    `steps` tables. This changes deterministic-stage cache keys, so existing
+    deterministic bundles become misses once (LLM-stage keys are unchanged).

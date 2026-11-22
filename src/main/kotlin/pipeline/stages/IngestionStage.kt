@@ -31,6 +31,9 @@ import pipeline.util.PipelineJson
 class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<IngestionInput, IngestionWorktree> {
     override val stageName: StageName = StageName.INGESTION
 
+    /** Git worktree allocation and Gradle pre-warm depend only on commit ids and config. */
+    override val isDeterministic: Boolean = true
+
     private val log = KotlinLogging.logger {}
 
     override fun computeCacheKey(ctx: RunContext, input: IngestionInput): CasKey {
@@ -52,7 +55,8 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
             stageInput = stageInput,
             upstreamKeys = emptyList(),
             configSlice = configSlice,
-            promptTemplate = null
+            promptTemplate = null,
+            includeSampleIdentity = !isDeterministic
         )
     }
 
@@ -147,8 +151,10 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
             stageName = stageName,
             bundleDir = stagingDir,
             upstreamKeys = emptyList(),
-            sampleIndex = ctx.sampleIndex,
-            sampleTemperature = ctx.sampleTemperature
+            // Deterministic bundle: not owned by any one sample, so it must not
+            // claim a sample's identity when reused across seeds.
+            sampleIndex = 0,
+            sampleTemperature = 0.0
         )
         val cwd = File(System.getProperty("user.dir"))
         val relativeWorktree = runCatching {

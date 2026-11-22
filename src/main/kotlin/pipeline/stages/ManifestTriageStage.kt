@@ -42,6 +42,9 @@ import pipeline.util.PipelineJson
 class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<ManifestTriageInput, VerifiedSample> {
     override val stageName: StageName = StageName.TRIAGE
 
+    /** Patch audit and C-1/C test replay are deterministic; no agent or sampling. */
+    override val isDeterministic: Boolean = true
+
     private val log = KotlinLogging.logger {}
 
     override fun computeCacheKey(ctx: RunContext, input: ManifestTriageInput): CasKey {
@@ -66,7 +69,8 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
             stageInput = stageInput,
             upstreamKeys = emptyList(),
             configSlice = configSlice,
-            promptTemplate = null
+            promptTemplate = null,
+            includeSampleIdentity = !isDeterministic
         )
     }
 
@@ -191,8 +195,10 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
                 stageName = stageName,
                 bundleDir = stagingDir,
                 upstreamKeys = emptyList(),
-                sampleIndex = ctx.sampleIndex,
-                sampleTemperature = ctx.sampleTemperature
+                // Deterministic bundle: not owned by any one sample, so it must
+                // not claim a sample's identity when reused across seeds.
+                sampleIndex = 0,
+                sampleTemperature = 0.0
             )
             writer.writeBytes(ArtifactNames.TEST_PATCH, patchBytes)
             val patchFileRef = stagingDir.resolve(ArtifactNames.TEST_PATCH)
@@ -304,8 +310,10 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
             stageName = stageName,
             bundleDir = stagingDir,
             upstreamKeys = emptyList(),
-            sampleIndex = ctx.sampleIndex,
-            sampleTemperature = ctx.sampleTemperature
+            // Deterministic bundle: not owned by any one sample, so it must not
+            // claim a sample's identity when reused across seeds.
+            sampleIndex = 0,
+            sampleTemperature = 0.0
         )
         if (patchBytes != null) runCatching { writer.writeBytes(ArtifactNames.TEST_PATCH, patchBytes) }
         writer.writeJson(

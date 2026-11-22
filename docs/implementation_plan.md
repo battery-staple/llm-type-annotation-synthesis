@@ -79,7 +79,7 @@ To enable rapid experimentation, parameter ablations, and cost minimization with
 ### 1. Deterministic Cache Key Formula
 Each pipeline stage is an immutable node in a directed acyclic graph. Cache keys are computed deterministically via SHA-256:
 
-$$K_{\text{stage}} = \text{SHA-256}(\text{stage\_name} + H(\text{stage\_input}) + H(\text{upstream\_artifacts}) + H(\text{config\_slice}) + H(\text{prompt\_template}) + H(\text{stage\_code}) + \text{sample\_seed} + \text{sample\_temperature} + H(\text{runtime\_environment}))$$
+$$K_{\text{stage}} = \text{SHA-256}(\text{stage\_name} + H(\text{stage\_input}) + H(\text{upstream\_artifacts}) + H(\text{config\_slice}) + H(\text{prompt\_template}) + H(\text{stage\_code}) + [\text{sample\_seed} + \text{sample\_temperature}]_{\text{stochastic}} + H(\text{runtime\_environment}))$$
 
 Where:
 - $\text{stage\_name}$: Canonical enum identifier from `StageName` (`"ingestion"`, `"triage"`, `"synthesis"`, `"application"`, `"repair"`, `"verification"`).
@@ -88,7 +88,7 @@ Where:
 - $H(\text{config\_slice})$: Canonical JSON hash of configuration parameters governing this specific stage, including model, seed, temperature, and checker processor/quals/category.
 - $H(\text{prompt\_template})$: SHA-256 hash of the markdown prompt template used for agent instructions.
 - $H(\text{stage\_code})$: SHA-256 fingerprint of the compiled stage and validator bytecode, or an equivalent versioned source fingerprint (module/class build ID plus source revision). A hand-maintained version string is not sufficient.
-- $\text{sample\_seed}$ / $\text{sample\_temperature}$: Deterministic sampling parameters for the run.
+- $\text{sample\_seed}$ / $\text{sample\_temperature}$: Deterministic sampling parameters for the run. Included only for stochastic (LLM-backed) stages; deterministic stages omit them so a seed change cannot fork an identical bundle.
 - $H(\text{runtime\_environment})$: Hash of the runtime inputs that can change behavior (JDK version, Checker Framework version, Gradle wrapper version, relevant environment variables), with secrets excluded.
 
 All $H(\cdot)$ inputs are serialized with a **canonical, length-prefixed JSON encoding** (UTF-8, lexicographically sorted keys, explicit type tags, and a length prefix per field) before hashing. Plain string concatenation is not used, because it permits ambiguous collisions such as `("ab", "c")` and `("a", "bc")`. File-valued fields are represented by content hashes; filesystem paths inside stage inputs are normalized to commit-relative paths (or content hashes), and absolute worktree paths must never enter a cache key.

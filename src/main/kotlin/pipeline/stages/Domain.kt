@@ -296,6 +296,18 @@ sealed class StageResult<out T> {
 
 interface PipelineStage<in TIn, TOut> {
     val stageName: StageName
+
+    /**
+     * True when [execute] is a pure function of the stage input, configuration,
+     * and stage code: no LLM sampling or other seed-dependent behaviour.
+     *
+     * The orchestrator passes this through to [pipeline.cas.CacheKeys.compute],
+     * which omits sample identity from the cache key for deterministic stages
+     * so their bundles are shared across seeds. Sample-dependent stages must
+     * leave this false.
+     */
+    val isDeterministic: Boolean get() = false
+
     fun computeCacheKey(ctx: RunContext, input: TIn): CasKey
     suspend fun execute(ctx: RunContext, input: TIn): StageResult<TOut>
 

@@ -38,6 +38,9 @@ import pipeline.util.PipelineJson
 class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<VerificationInput, VerificationResult> {
     override val stageName: StageName = StageName.VERIFICATION
 
+    /** Checker and test replay are deterministic given the applied patches and scope. */
+    override val isDeterministic: Boolean = true
+
     private val log = KotlinLogging.logger {}
 
     override fun computeCacheKey(ctx: RunContext, input: VerificationInput): CasKey {
@@ -70,7 +73,8 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             stageInput = stageInput,
             upstreamKeys = emptyList(),
             configSlice = configSlice,
-            promptTemplate = null
+            promptTemplate = null,
+            includeSampleIdentity = !isDeterministic
         )
     }
 
@@ -95,8 +99,10 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             stageName = stageName,
             bundleDir = stagingDir,
             upstreamKeys = emptyList(),
-            sampleIndex = ctx.sampleIndex,
-            sampleTemperature = ctx.sampleTemperature
+            // Deterministic bundle: not owned by any one sample, so it must not
+            // claim a sample's identity when reused across seeds.
+            sampleIndex = 0,
+            sampleTemperature = 0.0
         )
 
         // b. Final checker run (main sources only, via BuildRunner).

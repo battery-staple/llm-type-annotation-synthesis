@@ -62,7 +62,7 @@ class SynthesisStage(
             "checker_quals" to ctx.config.checker.quals,
             "agent_steps_synthesis" to ctx.config.agent.steps.synthesis,
         )
-        return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template)
+        return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template, includeSampleIdentity = !isDeterministic)
     }
 
     override suspend fun execute(ctx: RunContext, input: SynthesisInput): StageResult<SynthesizedLattice> {
