@@ -32,7 +32,11 @@ import pipeline.stages.TokenUsage
  */
 class CoroutineOpenCodeRunner(
     private val executable: String = "opencode",
-    private val baseEnvironment: Map<String, String> = emptyMap()
+    private val baseEnvironment: Map<String, String> = emptyMap(),
+    // A pre-seeded per-run OpenCode DB. Unlike the blank temporary fallback,
+    // this DB contains the OpenCode Go account/credential rows copied by
+    // OpenCodeDb, so provider routing resolves opencode-go/* models.
+    private val databasePath: String? = null
 ) : AgentRunner {
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
@@ -71,15 +75,18 @@ class CoroutineOpenCodeRunner(
         // A throwaway DB outside cwd keeps pipeline writes off user sessions.
         // It lives outside cwd deliberately: stage code mirrors cwd into the
         // worktree, so anything inside cwd would leak into patches.
-        // Always override an inherited OPENCODE_DB. A shared DB is never safe
-        // here: concurrent runs, subagents, and SIGKILL during terminateTree()
-        // can corrupt the user's session database.
-        env.remove("OPENCODE_DB")
-        val ownedDbPath = Files.createTempFile(
-            "opencode-pipeline-${UUID.randomUUID()}-",
-            ".db"
-        ).toAbsolutePath().toString()
-        env["OPENCODE_DB"] = ownedDbPath
+        var ownedDbPath: String? = null
+        if (!env.containsKey("OPENCODE_DB")) {
+            if (databasePath != null) {
+                env["OPENCODE_DB"] = databasePath
+            } else {
+                ownedDbPath = runCatching {
+                    Files.createTempFile("opencode-pipeline-${UUID.randomUUID()}-", ".db")
+                        .toAbsolutePath().toString()
+                }.getOrNull()
+                if (ownedDbPath != null) env["OPENCODE_DB"] = ownedDbPath
+            }
+        }
 
         val process = builder.start()
         // No interactive stdin: the CLI must see EOF or it may wait indefinitely.
@@ -174,7 +181,7 @@ class CoroutineOpenCodeRunner(
                     if (process.waitFor(5, TimeUnit.SECONDS)) process.exitValue() else -1
                 }.getOrDefault(-1)
             }
-            deleteIsolatedDb(ownedDbPath)
+            ownedDbPath?.let { deleteIsolatedDb(it) }
         }
 
         val stderrText = synchronized(stderrBuffer) { stderrBuffer.toString() }.trim()

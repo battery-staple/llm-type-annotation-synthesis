@@ -19,13 +19,13 @@ guardrails:
   mode: "lenient"
 
 model:
-  # `opencode-go/*` routes are unavailable to the standalone CLI in this
-  # container (provider.no-route); the Console-routed free model is reachable.
-  default: "opencode/deepseek-v4.1-flash-free"
-  triage: "opencode/deepseek-v4.1-flash-free"
-  synthesis: "opencode/deepseek-v4.1-flash-free"
-  application: "opencode/deepseek-v4.1-flash-free"
-  repair: "opencode/deepseek-v4.1-flash-free"
+  # The pipeline seeds its isolated OpenCode DB with the global account and
+  # credential rows, so opencode-go/* routes resolve normally.
+  default: "opencode-go/deepseek-v4.1-flash"
+  triage: "opencode-go/deepseek-v4.1-flash"
+  synthesis: "opencode-go/deepseek-v4.1-flash"
+  application: "opencode-go/deepseek-v4.1-flash"
+  repair: "opencode-go/deepseek-v4.1-flash"
 
 agent:
   steps:

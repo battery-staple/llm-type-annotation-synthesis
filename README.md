@@ -84,7 +84,7 @@ Any contributor or autonomous agent working in this repository should adhere to 
 - **Type Checker**: Java Checker Framework 3.42.0, vendored under `vendor/checker-framework-3.42.0/` (not committed; install it there or update `project_config.yaml`).
 - **AST Parsing & Validation**: JavaParser (`com.github.javaparser:javaparser-core:3.26.1`).
 - **Storage & Inspection**: SQLite 3, Datasette (Python), Pandas / Jupyter.
-- **Default LLM**: `opencode/deepseek-v4.1-flash-free`, configurable per stage. In this container the `opencode-go/*` routes return `provider.no-route` from the standalone CLI, so the Console-routed model is used.
+- **Default LLM**: `opencode-go/deepseek-v4.1-flash`, configurable per stage. The pipeline seeds its isolated OpenCode DB with the global account/credential rows; a blank isolated DB otherwise makes `opencode-go/*` return `provider.no-route`.
 
 ## 6. Build and Run
 

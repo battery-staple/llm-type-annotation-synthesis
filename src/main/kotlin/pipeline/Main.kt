@@ -17,6 +17,7 @@ import pipeline.db.SQLiteDatabaseManager
 import pipeline.runners.CoroutineOpenCodeRunner
 import pipeline.runners.GradleBuildRunner
 import pipeline.runners.JavacRunner
+import pipeline.runners.OpenCodeDb
 import pipeline.stages.ApplicationStage
 import pipeline.stages.IngestionStage
 import pipeline.stages.ManifestTriageStage
@@ -35,7 +36,8 @@ private fun database(config: ProjectConfig): SQLiteDatabaseManager =
 
 private fun buildOrchestrator(config: ProjectConfig, db: SQLiteDatabaseManager, cas: CasEngine): PipelineOrchestrator {
     val buildRunner = GradleBuildRunner(config)
-    val agentRunner = CoroutineOpenCodeRunner()
+    val openCodeDb = OpenCodeDb.prepare()
+    val agentRunner = CoroutineOpenCodeRunner(databasePath = openCodeDb?.absolutePath)
     val javac = JavacRunner()
     return PipelineOrchestrator(
         ingestion = IngestionStage(buildRunner),

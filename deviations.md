@@ -80,11 +80,8 @@ the crawler) are not listed unless the code had to interpret the plan.
     shared background OpenCode service serialized/hung pipeline agents and leaked
     the main session's working directory. `--standalone` gives each pipeline
     invocation a private server; closing stdin prevents non-interactive runs from
-    waiting for EOF. Every invocation also receives a fresh `OPENCODE_DB` in the
-    system temp directory; an inherited value is unconditionally overridden and
-    the temp database is deleted afterward. This keeps pipeline agents, their
-    subagents, and SIGKILL cleanup off the shared `~/.local/share/opencode/opencode.db`.
-    `AgentRunnerIsolationTest` asserts the override and deletion.
+    waiting for EOF. The runner also uses a per-run OpenCode DB seeded from the
+    global DB; `--standalone` alone does not isolate provider credentials.
 16. **Seed/temperature are passed through environment variables.** The installed
     OpenCode CLI has no seed/temperature flags. They are still part of every CAS
     key. The CLI does not read them, so generation is **not actually seeded**;
@@ -119,11 +116,13 @@ the crawler) are not listed unless the code had to interpret the plan.
     in the live `project_config.yaml`.** The plan's defaults (25/20/50) were
     consumed by exploration before edits on this harness; the budgets remain
     configuration values and the plan's defaults are unchanged in code.
-22. **Default model is `opencode/deepseek-v4.1-flash-free` in
-    `project_config.yaml`.** In this container the standalone CLI rejects
-    `opencode-go/*` routes with `provider.no-route`; the Console-routed free
-    model accepts tools and was smoke-tested with a file edit. The model is a
-    configuration value and every stage can override it independently.
+22. **Default model is `opencode-go/deepseek-v4.1-flash` in
+    `project_config.yaml`.** An earlier apparent outage (`provider.no-route`)
+    was caused by the runner's blank isolated OpenCode DB: the OpenCode Go
+    account and credential rows live in the global DB, so a blank DB had no
+    provider route. The runner now seeds its per-run DB from the global schema
+    and auth rows; the model is a configuration value and every stage can
+    override it independently.
 23. **The synthetic benchmark uses the provided submodule.** The live
     `benchmarks.yaml` from the repository is authoritative
     (`C = 4d49e20…`, `C-1 = 56aa665…`). Triage derives `test_patch.diff` from
@@ -206,3 +205,9 @@ the crawler) are not listed unless the code had to interpret the plan.
     if it detects a post-invocation change. Prompts also forbid subagents and
     writes outside the stage workspace. A real filesystem sandbox remains
     future work.
+38. **The isolated OpenCode DB is seeded from the global DB.** A blank
+    `OPENCODE_DB` has no `account`, `account_state`, or `credential` rows, so
+    `opencode-go/*` fails with `provider.no-route`. `OpenCodeDb` creates a
+    per-run DB from the global schema and copies only auth, migration, and
+    catalog rows (never chat history). If the global DB is unavailable, the
+    runner falls back to the shared DB and logs a warning.
