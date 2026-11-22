@@ -70,6 +70,7 @@ Any contributor or autonomous agent working in this repository should adhere to 
 - **`proposal/Project Proposal.md`**: The original CS 6158 course project proposal document.
 - **`project_config.yaml`** and **`benchmarks.yaml`**: Runtime configuration and the curated benchmark manifest.
 - **`analysis/evaluate_metrics.py`**: Offline telemetry report over `data/pipeline.db`.
+- **`analysis/inspect_cache.py`**: Read-only inventory of cached stage bundles, seeds, artifacts, and run associations.
 - **`eval-repos/`**: Directory housing target evaluation repositories:
   - `eval-repos/synthetic-id-swap/`: A minimal synthetic Java project with a known ID-conflation bug for rapid local debugging.
   - `eval-repos/cmsx/`: Cornell CMSX codebase (submodule present, but no curated benchmark entry yet).
