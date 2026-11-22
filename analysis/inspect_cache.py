@@ -150,6 +150,7 @@ def main() -> int:
     parser.add_argument("--db", default="data/pipeline.db", help="pipeline SQLite database")
     parser.add_argument("--stage", help="only this stage")
     parser.add_argument("--key", help="only keys beginning with this prefix")
+    parser.add_argument("--run", help="only entries associated with this run id")
     parser.add_argument("--details", action="store_true", help="show manifest and run details")
     parser.add_argument("--full-keys", action="store_true", help="print full 64-character keys")
     parser.add_argument("--orphaned", action="store_true", help="only entries never referenced by the DB")
@@ -162,6 +163,8 @@ def main() -> int:
         entries = [e for e in entries if e["stage"] == args.stage]
     if args.key:
         entries = [e for e in entries if e["key"].startswith(args.key)]
+    if args.run:
+        entries = [e for e in entries if args.run in (e["db"].get("runs") or {})]
     if args.orphaned:
         entries = [e for e in entries if not e["db"]["runs"]]
 
