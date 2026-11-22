@@ -140,6 +140,37 @@ class CoroutineOpenCodeRunner(
         var stepsCounted = 0
         var parsed = 0
         var timedOut = false
+        val startedNanos = System.nanoTime()
+        var cumPrompt = 0L
+        var cumCompletion = 0L
+        var toolsThisTurn = 0
+
+        // Progress logging: one INFO line per finished turn, one DEBUG line per tool call.
+        // (The MDC turn_index is not used here: MDCContext restores the stage's value
+        // each time the coroutine resumes, so the turn is put in the message instead.)
+        fun logProgress(event: AgentTranscriptEvent) {
+            when (event.eventType) {
+                AgentEventType.STEP_START -> toolsThisTurn = 0
+                AgentEventType.TOOL_CALL -> {
+                    toolsThisTurn++
+                    log.debug {
+                        "agent[$agentRole] turn $turnIndex tool=${event.toolName} ${summarizeToolArgs(event.toolArguments)}"
+                    }
+                }
+                AgentEventType.STEP_FINISH -> {
+                    val usage = event.tokenUsage
+                    cumPrompt += usage?.promptTokens ?: 0
+                    cumCompletion += usage?.completionTokens ?: 0
+                    val elapsed = (System.nanoTime() - startedNanos) / 1_000_000_000L
+                    log.info {
+                        "agent[$agentRole] turn $turnIndex/$maxSteps done tools=$toolsThisTurn " +
+                            "tokens in=${usage?.promptTokens ?: 0} out=${usage?.completionTokens ?: 0} " +
+                            "(cum in=$cumPrompt out=$cumCompletion) elapsed=${elapsed / 60}m${"%02d".format(elapsed % 60)}s"
+                    }
+                }
+                else -> {}
+            }
+        }
 
         suspend fun drainAvailable() {
             val batch: List<String> = synchronized(stdoutLines) {
@@ -157,10 +188,12 @@ class CoroutineOpenCodeRunner(
                         turnIndex++
                         stepsCounted++
                         val indexed = event.copy(turnIndex = turnIndex)
+                        logProgress(indexed)
                         transcript.add(indexed)
                         onEvent?.invoke(indexed)
                     } else {
                         val indexed = if (event.turnIndex <= 0) event.copy(turnIndex = maxOf(turnIndex, 1)) else event
+                        logProgress(indexed)
                         if (indexed.eventType == AgentEventType.REASONING) {
                             // Buffer reasoning until the run DB can be reconciled;
                             // OpenCode may expose the same part in both sources.
@@ -297,6 +330,18 @@ class CoroutineOpenCodeRunner(
             runCatching { onEvent?.invoke(event) }
         }
         AgentRunResult(exitCode = finalExit, stepsCounted = stepsCounted, transcript = transcript, timedOut = timedOut)
+    }
+
+    private fun summarizeToolArgs(args: Map<String, JsonElement>?): String {
+        if (args.isNullOrEmpty()) return ""
+        val preferred = listOf("command", "filePath", "path", "pattern", "url")
+            .firstNotNullOfOrNull { key -> args[key]?.let { key to it } }
+            ?: args.entries.first().toPair()
+        val value = (preferred.second as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+            ?: preferred.second.toString()
+        val flat = value.replace(Regex("\\s+"), " ").trim()
+        val clipped = if (flat.length > 120) flat.take(120) + "…" else flat
+        return "${preferred.first}=\"$clipped\""
     }
 
     private fun parseLine(line: String, currentTurn: Int): List<AgentTranscriptEvent> {
