@@ -64,6 +64,11 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
                 statement.execute("ALTER TABLE evaluation_runs ADD COLUMN batch_id TEXT")
             }
         }
+        if ("owner_pid" !in columns) {
+            connection.createStatement().use { statement ->
+                statement.execute("ALTER TABLE evaluation_runs ADD COLUMN owner_pid INTEGER")
+            }
+        }
     }
 
     private fun migrateCheckerRunColumns() {

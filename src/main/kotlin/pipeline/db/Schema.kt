@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS evaluation_runs (
     status TEXT NOT NULL,
     started_at TIMESTAMP NOT NULL,
     completed_at TIMESTAMP,
-    batch_id TEXT
+    batch_id TEXT,
+    owner_pid INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_evaluation_runs_benchmark ON evaluation_runs(benchmark_id);

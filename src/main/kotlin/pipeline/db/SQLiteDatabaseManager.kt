@@ -83,8 +83,8 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
             c.prepareStatement(
                 """INSERT OR IGNORE INTO evaluation_runs
                    (run_id, benchmark_id, commit_hash, sample_index, sample_temperature, cas_cache_key,
-                    config_snapshot, guardrails_mode, verification_scope, status, started_at, batch_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
+                    config_snapshot, guardrails_mode, verification_scope, status, started_at, batch_id, owner_pid)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"""
             ).use { s ->
                 s.setString(1, run.runId.value)
                 s.setString(2, run.benchmarkId)
@@ -98,6 +98,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
                 s.setString(10, run.status)
                 s.setString(11, run.startedAt)
                 s.setString(12, run.batchId)
+                s.setLong(13, ProcessHandle.current().pid())
                 s.executeUpdate()
             }
         }
@@ -159,23 +160,39 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
     }
 
     /**
-     * The MVP executes one sample at a time, so any run still marked `running`
-     * when a new run starts was killed or interrupted. Reconcile those rows so
-     * telemetry does not report phantom live runs.
+     * Reconcile runs left `running` by a process that no longer exists, so
+     * telemetry does not report phantom live runs. Several pipeline processes
+     * may share this database concurrently, so a run is stale only when its
+     * recorded `owner_pid` is dead; legacy rows without an owner are treated
+     * as stale.
      */
     fun markStaleRunningRuns() {
         val now = Instant.now().toString()
-        jdbc.prepareStatement(
-            "UPDATE evaluation_runs SET status='interrupted', completed_at=? WHERE status='running'"
-        ).use { statement ->
-            statement.setString(1, now)
-            statement.executeUpdate()
+        val stale = mutableListOf<String>()
+        jdbc.prepareStatement("SELECT run_id, owner_pid FROM evaluation_runs WHERE status='running'").use { s ->
+            s.executeQuery().use { rs ->
+                while (rs.next()) {
+                    val pid = rs.getLong(2).takeUnless { rs.wasNull() }
+                    val alive = pid != null && ProcessHandle.of(pid).map { it.isAlive }.orElse(false)
+                    if (!alive) stale += rs.getString(1)
+                }
+            }
         }
-        jdbc.prepareStatement(
-            "UPDATE step_trajectories SET success=0, completed_at=? WHERE completed_at IS NULL"
-        ).use { statement ->
-            statement.setString(1, now)
-            statement.executeUpdate()
+        for (runId in stale) {
+            jdbc.prepareStatement(
+                "UPDATE evaluation_runs SET status='interrupted', completed_at=? WHERE run_id=?"
+            ).use { s ->
+                s.setString(1, now)
+                s.setString(2, runId)
+                s.executeUpdate()
+            }
+            jdbc.prepareStatement(
+                "UPDATE step_trajectories SET success=0, completed_at=? WHERE run_id=? AND completed_at IS NULL"
+            ).use { s ->
+                s.setString(1, now)
+                s.setString(2, runId)
+                s.executeUpdate()
+            }
         }
     }
 
