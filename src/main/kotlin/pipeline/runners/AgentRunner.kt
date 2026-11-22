@@ -185,6 +185,12 @@ class CoroutineOpenCodeRunner(
 
         val liveStream = TranscriptStream.current()
 
+        // Each runAgent call is a fresh OpenCode session whose turn counter restarts at 1
+        // (stages call it in a loop for retries/feedback rounds). Mark the boundary in the
+        // log and in the live stream; the durable transcript already starts with this event.
+        log.info { "agent[$agentRole] starting new session (model=$model maxSteps=$maxSteps timeout=${timeoutSeconds}s); turn counter restarts at 1" }
+        liveStream?.append(transcript.first())
+
         suspend fun drainAvailable() {
             val batch: List<String> = synchronized(stdoutLines) {
                 if (parsed >= stdoutLines.size) emptyList()
@@ -194,7 +200,9 @@ class CoroutineOpenCodeRunner(
                 parsed++
                 if (line.isBlank()) continue
                 val metadata = lineMetadata(line)
-                metadata.sessionId?.let(sessionIds::add)
+                metadata.sessionId?.let { id ->
+                    if (sessionIds.add(id)) log.info { "agent[$agentRole] opencode session id=$id" }
+                }
                 val events = parseLine(line, turnIndex)
                 for (event in events) {
                     if (event.eventType == AgentEventType.STEP_START) {
