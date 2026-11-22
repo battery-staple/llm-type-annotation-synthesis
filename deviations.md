@@ -211,3 +211,9 @@ the crawler) are not listed unless the code had to interpret the plan.
     per-run DB from the global schema and copies only auth, migration, and
     catalog rows (never chat history). If the global DB is unavailable, the
     runner falls back to the shared DB and logs a warning.
+39. **Regression-test telemetry is identified explicitly.** JUnit XML reports
+    display names, not Java method names, so `is_regression_test` was zero for
+    every verification row and `v_evaluation_verdicts` reported
+    `verification_missing` even when the stage returned `FULL_SUCCESS`. The
+    filtered regression run is now marked explicitly, and the suite filter
+    excludes the display name observed in that run.

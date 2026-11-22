@@ -101,3 +101,13 @@ python3 analysis/evaluate_metrics.py --db data/pipeline.db
 ```
 
 Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build output) is gitignored. A fresh checkout needs the Checker Framework vendored before running.
+
+## 7. Current Status
+
+- The synthetic `synthetic-id-swap` benchmark completed end-to-end with verdict
+  **`FULL_SUCCESS`**: the synthesized hierarchy produced checker errors at the
+  conflated `debit`/`credit` call sites, the blind fixer resolved them in one
+  turn, the final checker reported 0 errors, the regression test passed, and the
+  seven pre-existing tests passed.
+- CMSX is present as a submodule but has no curated benchmark entry yet.
+- Known limitations and implementation gaps are tracked in `deviations.md`.
