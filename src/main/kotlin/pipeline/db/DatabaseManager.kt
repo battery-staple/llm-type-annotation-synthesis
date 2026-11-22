@@ -22,10 +22,33 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
             statement.execute("PRAGMA busy_timeout=5000")
             statement.execute("PRAGMA foreign_keys=ON")
         }
+        migrateTestRunColumns()
         connection.createStatement().use { statement ->
             // JDBC's execute() only runs the first statement in a multi-statement string.
             Schema.DDL.split(';').forEach { ddl ->
                 if (ddl.isNotBlank()) statement.execute(ddl)
+            }
+        }
+    }
+
+    /** Add evidence metadata to databases created by earlier pipeline versions. */
+    private fun migrateTestRunColumns() {
+        val columns = mutableSetOf<String>()
+        connection.createStatement().use { statement ->
+            statement.executeQuery("PRAGMA table_info(test_runs)").use { rs ->
+                while (rs.next()) columns += rs.getString("name")
+            }
+        }
+        if (columns.isEmpty()) return // Fresh database; the DDL creates the current schema.
+
+        connection.createStatement().use { statement ->
+            if ("timed_out" !in columns) {
+                statement.execute("ALTER TABLE test_runs ADD COLUMN timed_out BOOLEAN NOT NULL DEFAULT 0")
+            }
+            if ("reported_failed_count" !in columns) {
+                statement.execute("ALTER TABLE test_runs ADD COLUMN reported_failed_count INTEGER NOT NULL DEFAULT 0")
+                // Existing failed_count values already reflect the recorded outcomes.
+                statement.execute("UPDATE test_runs SET reported_failed_count = failed_count")
             }
         }
     }

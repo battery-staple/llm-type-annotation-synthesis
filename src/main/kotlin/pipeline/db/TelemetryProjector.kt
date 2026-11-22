@@ -217,8 +217,8 @@ object TelemetryProjector {
             """INSERT OR REPLACE INTO test_runs
                (test_run_id, run_id, step_id, stage, suite_kind, attempt_number, scope,
                 exit_code, compile_failed, tests_found, passed_count, failed_count,
-                skipped_count, success, xml_path)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+                skipped_count, success, timed_out, reported_failed_count, xml_path)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
         ).use { s ->
             s.setString(1, r.testRunId)
             s.setString(2, r.runId.value)
@@ -234,7 +234,9 @@ object TelemetryProjector {
             s.setInt(12, r.failedCount)
             s.setInt(13, r.skippedCount)
             s.setInt(14, if (r.success) 1 else 0)
-            s.setString(15, r.xmlPath)
+            s.setInt(15, if (r.timedOut) 1 else 0)
+            s.setInt(16, r.reportedFailedCount)
+            s.setString(17, r.xmlPath)
             s.executeUpdate()
         }
     }

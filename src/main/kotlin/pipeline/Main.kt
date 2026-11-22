@@ -158,10 +158,18 @@ class VerifyBenchmarkCommand : CliktCommand(name = "verify-benchmark", help = "V
 
 private fun printOutcome(outcome: PipelineRunOutcome) {
     val r = outcome.result
+    // Lifecycle status (orchestration completed) is distinct from the
+    // evaluation verdict (what the repaired code actually achieved).
+    val lifecycle = when {
+        outcome.discarded -> "discarded"
+        outcome.haltMessage != null -> "failed"
+        else -> "success"
+    }
     println("")
     println("run_id:                    ${outcome.runId}")
-    println("verdict:                   ${r.verdict.name.lowercase()}")
-    println("regression_test_passed:    ${r.regressionTestPassed}")
+    println("lifecycle_status:          $lifecycle")
+    println("evaluation_verdict:        ${r.verdict.name.lowercase()}")
+    println("regression_test_passed:    ${r.regressionTestPassed ?: "unknown"}")
     println("original_tests_passed:     ${r.originalTestsPassed ?: "unknown"}")
     println("remaining_checker_errors:  ${r.remainingCheckerErrors ?: "unknown"}")
     println("test_results_xml:          ${r.testResultsXml?.path ?: "-"}")

@@ -97,7 +97,8 @@ data class TestRunResult(
     val xmlPaths: List<File>,
     val compileFailed: Boolean,
     val testsFound: Int,
-    val output: String
+    val output: String,
+    val timedOut: Boolean = false
 )
 
 @Serializable

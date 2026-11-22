@@ -114,7 +114,8 @@ class GradleBuildRunner(
             xmlPaths = xmlFiles,
             compileFailed = compileFailed,
             testsFound = testsFound,
-            output = output
+            output = output,
+            timedOut = result.timedOut
         )
     }
 

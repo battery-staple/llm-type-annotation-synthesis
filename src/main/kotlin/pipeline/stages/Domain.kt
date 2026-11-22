@@ -482,14 +482,37 @@ enum class EvalVerdict {
     FULL_SUCCESS,
     TYPE_SUCCESS_RUNTIME_FAIL,
     PARTIAL_SUCCESS_REGRESSION_ONLY,
-    REGRESSION_INTRODUCED,
+    /**
+     * Checker is clean but at least one pre-existing suite test failed.
+     *
+     * Named without claiming the failure was newly introduced: the pipeline
+     * has no pre-patch baseline comparison for the suite, so this verdict
+     * only records that the suite failed on the repaired tree.
+    */
+    SUITE_FAILURE,
     FIXER_INCOMPLETE,
-    VERIFICATION_MISSING
+    /**
+     * Required verification evidence is genuinely absent, unusable, or
+     * incomplete: no checker invocation/result, no parseable JUnit report,
+     * or no tests found. A nonzero test-task exit caused by assertion
+     * failures alone (with a valid parseable report) is NOT missing
+     * evidence and must map to a substantive runtime/suite verdict.
+     */
+    VERIFICATION_MISSING;
+
+    companion object {
+        /** Resolve stored labels, including the pre-rename suite-failure label. */
+        fun fromStoredName(raw: String?): EvalVerdict? {
+            if (raw.equals("regression_introduced", ignoreCase = true)) return SUITE_FAILURE
+            return entries.firstOrNull { it.name.equals(raw, ignoreCase = true) }
+        }
+    }
 }
 
 data class VerificationResult(
     val verdict: EvalVerdict,
-    val regressionTestPassed: Boolean,
+    /** Null when the test report did not provide usable regression evidence. */
+    val regressionTestPassed: Boolean?,
     val originalTestsPassed: Boolean?,
     val remainingCheckerErrors: Int?,
     val testResultsXml: File?,

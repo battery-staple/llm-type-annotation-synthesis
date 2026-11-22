@@ -428,7 +428,7 @@ class PipelineOrchestrator(
         summary.writeText(PipelineJson.json.encodeToString(JsonElement.serializer(), json))
         return VerificationResult(
             verdict = EvalVerdict.VERIFICATION_MISSING,
-            regressionTestPassed = false,
+            regressionTestPassed = null,
             originalTestsPassed = null,
             remainingCheckerErrors = null,
             testResultsXml = null,

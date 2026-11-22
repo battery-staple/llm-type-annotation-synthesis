@@ -596,8 +596,8 @@ Section 7 covers what happens between an agent's emitted text and an artifact th
 
 - **Definition.** Structural description of each accepted patch: files touched, hunks, added and removed lines, methods touched, and the count of changed lines outside method bodies. Define `body_only = outside_body_lines == 0` for fixer patches, and `annotations_only = (no non-annotation AST delta)` for applier patches, reusing O3's canonicalized comparison rather than raw diff text. Captured from `diff_patch` at acceptance time.
 - **Instrumentation.** Parse the unified diff and map each hunk to its enclosing JavaParser declaration; emit `patch_shape` with `run_id`, `step_name`, `files_touched`, `hunks`, `added_lines`, `removed_lines`, `methods_touched`, `outside_body_lines`. This is deterministic post-processing, independent of any guard that may already have rejected the patch. Because it is computed from diff text rather than AST semantics, it complements O3: a patch can be body-only yet still change behavior.
-- **Justification.** The design forbids signature and field edits and restricts the fixer to method bodies, but nothing records how invasive accepted patches actually are. Broad, multi-file patches raise the chance of collateral regressions (`regression_introduced`) and make the blindness claim harder to defend, since their scope can reveal localization guesses.
-- **Expected learnings.** We expect applier patches to be shallow and repetitive while fixer patches stay local in successful runs. If successful fixes touch many methods, the bug may be structural rather than local, which would change how the localization metric T3 is read. Track whether broad patches predict `regression_introduced`.
+- **Justification.** The design forbids signature and field edits and restricts the fixer to method bodies, but nothing records how invasive accepted patches actually are. Broad, multi-file patches raise the chance of collateral suite failures (`suite_failure`) and make the blindness claim harder to defend, since their scope can reveal localization guesses.
+- **Expected learnings.** We expect applier patches to be shallow and repetitive while fixer patches stay local in successful runs. If successful fixes touch many methods, the bug may be structural rather than local, which would change how the localization metric T3 is read. Track whether broad patches predict `suite_failure`.
 - **Reporting.** Distribution of files-touched and changed-line counts, scatter against `eval.verdict` and `eval.regression_test_passed`; cluster by repo. Threat: rename or move detection can misattribute edits, so normalize paths before counting.
 
 <a id="o3"></a>
@@ -617,7 +617,7 @@ Section 7 covers what happens between an agent's emitted text and an artifact th
 - **Definition.** Compare the helper API synthesized into `custom-quals.jar` against the helper calls the fixer actually makes: `helper_utilization = helpers_called / helpers_defined`, plus a per-helper call count and signature kind (`coercion`, `validator`, `other`). Captured by intersecting the S3 helper inventory with helper call sites in accepted S5 patches.
 - **Instrumentation.** S3 parses the helper source before packaging and emits `helper_defined` with `fq_name`, `param_types`, `return_type`, `kind`, `pure`; S5 emits `helper_call` with `fq_name`, `call_site`, `turn_index`. `synthesis.helpers_count` supplies the headline number, while the two events make utilization and per-helper popularity computable.
 - **Justification.** Helpers are live code, not inert annotations (D-18), so an unused or unsound helper is not free: it enlarges the trusted base and can alter runtime behavior even in `full_success` runs. Utilization also tests the Level 1 plus Level 2 policy, since a fixer that never calls coercions means the synthesized surface was largely decorative. A helper that is defined but never invoked still inflates the API surface a human reviewer must assess.
-- **Expected learnings.** We expect coercions to be used more than flow-refining validators, and a long tail of never-called helpers. A surprising result would be utilization near zero across runs, implying the lattice is checked but not actually used to repair. Relate per-helper purity flags to subsequent `regression_introduced`.
+- **Expected learnings.** We expect coercions to be used more than flow-refining validators, and a long tail of never-called helpers. A surprising result would be utilization near zero across runs, implying the lattice is checked but not actually used to repair. Relate per-helper purity flags to subsequent `suite_failure` outcomes.
 - **Reporting.** Utilization bar per run with a signature-kind table, reporting the helper inventory size beside it. Threat: reflective or indirect calls would be missed by AST call detection, so measured utilization is a lower bound.
 
 <a id="o5"></a>
@@ -715,7 +715,7 @@ The evaluation layer consumes artifacts produced by the earlier stages: the veri
 - **Expected learnings.** We expect `fixer_typed >= fixer_no_types`, so a flat or negative lift would imply the lattice carries no causal load and
   the pipeline is an expensive code-repair prompt. A second hypothesis is that `fixer_builtin_only` absorbs most lift on nullness-flavored bugs,
   leaving custom qualifiers to earn their keep on ID-conflation and unit bugs; a per-bug-class McNemar table would show this. Surprising: negative
-  lift with `regression_introduced`, meaning the lattice forced collateral edits.
+  lift with `suite_failure`, meaning the lattice may have forced collateral edits. This outcome does not prove those failures were newly introduced without a baseline.
 - **Reporting.** Paired arm x outcome table, McNemar on paired binaries, bootstrap CIs clustered by repo, per-sample lift histogram, and both intention-to-treat and valid-run denominators so harness exclusions are visible. Report `lift` (raw zero) and `lift_delta` (zero new errors) side by side. Threat:
   `fixer_builtin_only` is not like-for-like unless it shares the same `--init-script` injection, `guardrails.mode`, turn budget, and a task-equivalent repair prompt; `fixer_no_types` must not stop immediately merely because the Checker is off.
 
@@ -723,9 +723,9 @@ The evaluation layer consumes artifacts produced by the earlier stages: the veri
 ### E2. Outcome vector and partial credit
 **Priority:** Should-have · **Effort:** Low · **Stage:** S6 · **Relation:** extends `eval.verdict` and `eval.regression_test_passed`
 
-- **Definition.** Decompose the single enum into an ordered vector over S6's check sequence (Checker new errors -> existing unit tests -> `T_reg`) while retaining the four verdict values for continuity:
+- **Definition.** Decompose the single enum into an ordered vector over S6's check sequence (Checker new errors -> existing unit tests -> `T_reg`) while retaining the substantive outcome labels:
   `v = (non_trivial, checker_clean, existing_tests_clean, regression_passed)`, plus a weighted
-  `partial_credit = 0.2*non_trivial + 0.2*checker_clean + 0.25*existing_tests_clean + 0.35*regression_passed`. `checker_clean` means raw zero Checker errors, matching `full_success`; `checker_delta_clean` uses T1's zero-new-error definition and is reported in parallel. The vector maps to the four strings as follows: `full_success` = all four true; `fixer_incomplete` = `checker_clean` false (regardless of later checks); `regression_introduced` = `checker_clean` true and `existing_tests_clean` false; `type_success_runtime_fail` = `checker_clean` and `existing_tests_clean` true but `regression_passed` false. `non_trivial` is an S4 property carried into S6, not a fourth S6 check.
+  `partial_credit = 0.2*non_trivial + 0.2*checker_clean + 0.25*existing_tests_clean + 0.35*regression_passed`. `checker_clean` means raw zero Checker errors, matching `full_success`; `checker_delta_clean` uses T1's zero-new-error definition and is reported in parallel. `suite_failure` means the checker is clean but the existing suite failed; it is not a claim that the run introduced those failures. `verification_missing` is an evidence-quality state, not a scored runtime outcome. `non_trivial` is an S4 property carried into S6, not a fourth S6 check.
 - **Instrumentation.** S6 writes `eval.outcome_vector` JSON into `step_trajectories.metrics` for `step_name='verification'`: `checker_new_errors`,
   `existing_tests_failed_count`, `regression_test_result`, `trivial`, `partial_credit`, `check_order`. Because S6 is deterministic the vector is
   recomputable from the stored `diff_patch`, `compiler_diagnostics`, and `test_outcomes` rows.
@@ -1521,7 +1521,7 @@ The metrics only matter if they change what the paper reports. This section spec
 | Figure 4. Leakage and contamination | L1, L2, L3 | Exposure bins, memorization probe, per-channel leakage audit |
 | Appendix. Per-run table | all | One row per run with config hash, manifest hash, verdict, arm, exclusions |
 
-The main results table should be readable without the appendix: one row per arm, columns for N, `full_success`, `type_success_runtime_fail`, `regression_introduced`, `fixer_incomplete`, lift with CI, and median cost per success. A reader should be able to see whether the typed arm beat the no-types arm before reading any prose.
+The main results table should be readable without the appendix: one row per arm, columns for N, `full_success`, `type_success_runtime_fail`, `suite_failure`, `fixer_incomplete`, `verification_missing`, lift with CI, and median cost per success. A reader should be able to see whether the typed arm beat the no-types arm before reading any prose.
 
 ### 17.2 Statistical protocol
 
@@ -1809,7 +1809,7 @@ Several metrics are deliberately adjacent, and the boundary matters:
 | `full_success` | `T_reg` passes, all original unit tests pass, and the Checker reports zero errors under the existing verdict. T1 reports a parallel zero-new-errors `delta_success` without renaming the verdict. |
 | `delta_success` | The full Step 6 success outcome with `residual_new_errors == 0` relative to the pre-placement Checker baseline substituted for raw zero (T1); an analysis quantity, not a replacement for `full_success`. |
 | `type_success_runtime_fail` | The Checker reports zero errors and existing unit tests pass, but `T_reg` fails. |
-| `regression_introduced` | The Checker passed but existing unit tests broke. |
+| `suite_failure` | The Checker passed but one or more existing unit tests failed; without a baseline, this does not assert the run introduced the failures. |
 | `fixer_incomplete` | The fixer did not eliminate all type errors within the turn limit. |
 | Lift | `success(fixer_typed) - success(fixer_no_types)`, the primary causal quantity (E1). |
 | New error | A Checker diagnostic not present in the clean-`C-1` baseline (T1). |

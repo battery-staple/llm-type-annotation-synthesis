@@ -126,6 +126,8 @@ CREATE TABLE IF NOT EXISTS test_runs (
     failed_count INTEGER NOT NULL DEFAULT 0,
     skipped_count INTEGER NOT NULL DEFAULT 0,
     success BOOLEAN NOT NULL DEFAULT 0,
+    timed_out BOOLEAN NOT NULL DEFAULT 0,
+    reported_failed_count INTEGER NOT NULL DEFAULT 0,
     xml_path TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -266,7 +268,8 @@ CREATE TABLE IF NOT EXISTS llm_invocations (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE VIEW IF NOT EXISTS v_evaluation_verdicts AS
+DROP VIEW IF EXISTS v_evaluation_verdicts;
+CREATE VIEW v_evaluation_verdicts AS
 WITH latest_final_checker AS (
     SELECT run_id, checker_run_id, error_count, checker_invoked, success
     FROM (
@@ -281,9 +284,10 @@ WITH latest_final_checker AS (
     WHERE rn = 1
 ),
 latest_regression_run AS (
-    SELECT run_id, test_run_id, success, tests_found
+    SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out, reported_failed_count
     FROM (
-        SELECT run_id, test_run_id, success, tests_found, attempt_number,
+        SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out,
+               reported_failed_count, attempt_number,
                ROW_NUMBER() OVER (
                    PARTITION BY run_id
                    ORDER BY attempt_number DESC, created_at DESC, test_run_id DESC
@@ -294,9 +298,10 @@ latest_regression_run AS (
     WHERE rn = 1
 ),
 latest_suite_run AS (
-    SELECT run_id, test_run_id, success, tests_found
+    SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out, reported_failed_count
     FROM (
-        SELECT run_id, test_run_id, success, tests_found, attempt_number,
+        SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out,
+               reported_failed_count, attempt_number,
                ROW_NUMBER() OVER (
                    PARTITION BY run_id
                    ORDER BY attempt_number DESC, created_at DESC, test_run_id DESC
@@ -310,9 +315,14 @@ regression AS (
     SELECT lr.run_id,
            lr.success AS run_success,
            lr.tests_found AS tests_found,
+           lr.compile_failed AS compile_failed,
+           lr.timed_out AS timed_out,
+           lr.reported_failed_count AS reported_failed_count,
            COUNT(te.execution_id) AS result_rows,
            CASE
-               WHEN COUNT(te.execution_id) = 0 THEN NULL
+               WHEN lr.tests_found = 0 OR lr.compile_failed = 1 OR lr.timed_out = 1
+                    OR (lr.success = 0 AND lr.reported_failed_count = 0)
+                    OR COUNT(te.execution_id) = 0 THEN NULL
                WHEN COUNT(*) FILTER (WHERE te.status IN ('FAILED', 'ERROR')) > 0 THEN 0
                WHEN COUNT(*) FILTER (WHERE te.status = 'PASSED') > 0 THEN 1
                ELSE NULL
@@ -320,19 +330,22 @@ regression AS (
     FROM latest_regression_run lr
     LEFT JOIN test_executions te
       ON te.test_run_id = lr.test_run_id AND te.is_regression_test = 1
-    GROUP BY lr.run_id, lr.success, lr.tests_found
+    GROUP BY lr.run_id, lr.success, lr.tests_found, lr.compile_failed, lr.timed_out, lr.reported_failed_count
 ),
 unit AS (
     SELECT ls.run_id,
            ls.success AS run_success,
            ls.tests_found AS tests_found,
+           ls.compile_failed AS compile_failed,
+           ls.timed_out AS timed_out,
+           ls.reported_failed_count AS reported_failed_count,
            COUNT(*) FILTER (WHERE te.status IN ('PASSED', 'FAILED', 'ERROR')) AS executed,
            COUNT(*) FILTER (WHERE te.status IN ('FAILED', 'ERROR')) AS failed,
            COUNT(*) FILTER (WHERE te.status = 'SKIPPED') AS skipped
     FROM latest_suite_run ls
     LEFT JOIN test_executions te
       ON te.test_run_id = ls.test_run_id AND te.is_regression_test = 0
-    GROUP BY ls.run_id, ls.success, ls.tests_found
+    GROUP BY ls.run_id, ls.success, ls.tests_found, ls.compile_failed, ls.timed_out, ls.reported_failed_count
 )
 SELECT
     r.run_id,
@@ -343,7 +356,12 @@ SELECT
     r.sample_index,
     r.status,
     fc.error_count AS remaining_type_errors,
-    CASE WHEN u.executed > 0 THEN (u.failed = 0) ELSE NULL END AS unit_tests_passed,
+    CASE
+        WHEN u.executed > 0 AND u.tests_found > 0 AND u.compile_failed = 0 AND u.timed_out = 0
+             AND (u.run_success = 1 OR u.reported_failed_count > 0 OR reg.reg_test_passed = 0)
+        THEN (u.failed = 0)
+        ELSE NULL
+    END AS unit_tests_passed,
     reg.reg_test_passed,
     COALESCE(u.skipped, 0) AS skipped_tests,
     CASE
@@ -352,13 +370,22 @@ SELECT
              OR fc.checker_invoked = 0
              OR fc.success = 0 THEN 'verification_missing'
         WHEN reg.reg_test_passed IS NULL
-             OR reg.run_success = 0
-             OR reg.tests_found = 0 THEN 'verification_missing'
+             OR reg.tests_found = 0
+             OR reg.result_rows = 0
+             OR reg.compile_failed = 1
+             OR reg.timed_out = 1
+             OR (reg.run_success = 0 AND reg.reported_failed_count = 0)
+             THEN 'verification_missing'
         WHEN r.verification_scope = 'full_suite'
-             AND (u.run_success IS NULL OR u.run_success = 0 OR u.tests_found = 0)
+             AND (
+                 u.tests_found IS NULL OR u.tests_found = 0 OR
+                 u.executed IS NULL OR u.executed = 0 OR
+                 u.compile_failed = 1 OR u.timed_out = 1 OR
+                 (u.run_success = 0 AND u.reported_failed_count = 0 AND reg.reg_test_passed = 1)
+             )
              THEN 'verification_missing'
         WHEN fc.error_count > 0 THEN 'fixer_incomplete'
-        WHEN r.verification_scope = 'full_suite' AND u.failed > 0 THEN 'regression_introduced'
+        WHEN r.verification_scope = 'full_suite' AND u.failed > 0 THEN 'suite_failure'
         WHEN r.verification_scope = 'regression_only'
              AND reg.reg_test_passed = 1 THEN 'partial_success_regression_only'
         WHEN r.verification_scope = 'full_suite'

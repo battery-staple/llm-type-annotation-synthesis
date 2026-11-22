@@ -368,7 +368,9 @@ class ManifestTriageStage(private val buildRunner: BuildRunner) : PipelineStage<
             failedCount = failed,
             skippedCount = skipped,
             success = result.success,
-            xmlPath = xmlPath
+            xmlPath = xmlPath,
+            timedOut = result.timedOut,
+            reportedFailedCount = failed
         )
         val executions = result.outcomes.map { outcome ->
             TestExecutionRecord(

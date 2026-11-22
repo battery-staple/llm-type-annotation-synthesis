@@ -297,4 +297,13 @@ the crawler) are not listed unless the code had to interpret the plan.
     `sample_temperature=0.0` in their manifest, since a shared bundle is not
     owned by any one sample; per-run provenance remains in the `runs` and
     `steps` tables. This changes deterministic-stage cache keys, so existing
-    deterministic bundles become misses once (LLM-stage keys are unchanged).
+     deterministic bundles become misses once (LLM-stage keys are unchanged).
+51. **Verification distinguishes missing evidence from failed tests.** A
+     nonzero Gradle test task with a parseable report of assertion failures is
+     substantive runtime/suite evidence; compile failures, timeouts, skipped-
+     only reports, and unexplained nonzero exits remain `verification_missing`.
+     Full-suite failures use `suite_failure` because the MVP does not compare
+     against a clean pre-repair suite baseline. Existing databases migrate the
+     test-run evidence columns and rebuild `v_evaluation_verdicts` on open; the
+     old `regression_introduced` stored label remains readable as
+     `suite_failure`.

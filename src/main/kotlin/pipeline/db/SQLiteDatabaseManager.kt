@@ -214,7 +214,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
 
     fun connectionForReads(): Connection = jdbc
 
-    private fun verdictFromString(raw: String): EvalVerdict =
-        EvalVerdict.entries.firstOrNull { it.name.equals(raw, ignoreCase = true) }
-            ?: EvalVerdict.VERIFICATION_MISSING
+    private fun verdictFromString(raw: String): EvalVerdict {
+        return EvalVerdict.fromStoredName(raw) ?: EvalVerdict.VERIFICATION_MISSING
+    }
 }

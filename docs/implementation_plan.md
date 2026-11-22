@@ -612,11 +612,11 @@ data class VerificationInput(
 )
 enum class EvalVerdict {
     FULL_SUCCESS,                        // T_reg passes + all pre-existing tests pass + 0 selected-checker errors
-    TYPE_SUCCESS_RUNTIME_FAIL,           // 0 selected-checker errors, but T_reg still fails at runtime
+    TYPE_SUCCESS_RUNTIME_FAIL,           // 0 selected-checker errors, but T_reg still fails at runtime (valid JUnit evidence)
     PARTIAL_SUCCESS_REGRESSION_ONLY,     // T_reg passes + 0 selected-checker errors, pre-existing suite not run
-    REGRESSION_INTRODUCED,               // Unit tests fail (T_reg may pass)
+    SUITE_FAILURE,                       // 0 checker errors, but pre-existing suite fails (no baseline claim of newly introduced)
     FIXER_INCOMPLETE,                    // Final checker ran and still reports errors > 0
-    VERIFICATION_MISSING                 // Incomplete run: no final checker result could be obtained
+    VERIFICATION_MISSING                 // Required evidence genuinely absent/unusable: no checker result, no parseable JUnit report, or no tests found
 }
 data class VerificationResult(
     val verdict: EvalVerdict,
@@ -702,14 +702,17 @@ The orchestrator executes the pipeline stages as an isolated, content-addressabl
    `./gradlew test --tests <regression_test_class>.<regression_test_method>`
    The JUnit XML is copied to `test_results.xml` immediately, before any other test task can overwrite the report directory.
 4. **Pre-Existing Suite Execution**: Under `verification.scope: "full_suite"`, runs the pre-existing suite in a separate invocation (or with a separate report directory), copies its JUnit XML to `suite_results.xml`, and parses per-test outcomes. `T_reg` is identified by its coordinate and excluded from the pre-existing-suite counts, even if the suite invocation also ran it. `SKIPPED` tests are not counted as failures but are recorded explicitly. Under `verification.scope: "regression_only"`, the suite is not run.
-5. **Verdict Assignment**: Applies this precedence exactly:
-   1. `VERIFICATION_MISSING` if the run is incomplete, its status is `failed`/`timeout` (or still `running`), or no usable final Checker result exists.
+5. **Verdict Assignment**: Applies this precedence exactly. Pipeline lifecycle
+   status (`evaluation_runs.status`) records orchestration completion and is
+   distinct from this evaluation verdict; `success` there means verification
+   executed, even when the verdict below is a substantive failure:
+   1. `VERIFICATION_MISSING` if no usable final Checker result exists, or no parseable JUnit report / no tests found for a required scope. A nonzero test-task exit caused by assertion failures with a valid report is NOT missing evidence.
    2. `FIXER_INCOMPLETE` if final Checker errors > 0.
-   3. `REGRESSION_INTRODUCED` if any pre-existing unit test failed.
+   3. `SUITE_FAILURE` if scope is `full_suite`, the checker is clean, and any pre-existing unit test failed (no baseline comparison, so no newly-introduced claim).
    4. `PARTIAL_SUCCESS_REGRESSION_ONLY` if scope is `regression_only`, $T_{\text{reg}}$ passes, and final Checker errors = 0.
    5. `FULL_SUCCESS` if $T_{\text{reg}}$ passes, all pre-existing tests pass, and final Checker errors = 0.
-   6. `TYPE_SUCCESS_RUNTIME_FAIL` if $T_{\text{reg}}$ fails at runtime but final Checker errors = 0 and no pre-existing test failed.
-6. **Output Generation**: Emits `VerificationResult`, writes `test_results.xml`, `suite_results.xml`, and `verification_summary.json`, and records the projected verdict in SQLite `evaluation_runs` / `v_evaluation_verdicts`.
+   6. `TYPE_SUCCESS_RUNTIME_FAIL` if $T_{\text{reg}}$ fails at runtime (valid JUnit evidence) but final Checker errors = 0 and no pre-existing test failed.
+6. **Output Generation**: Emits `VerificationResult` and writes `test_results.xml`, `suite_results.xml`, and `verification_summary.json`. Pass fields are `NULL`/`unknown` when corresponding evidence is unusable, with regression evidence presence recorded explicitly. The projected verdict is read from `v_evaluation_verdicts` after all rows are written.
 
 ---
 
@@ -1321,11 +1324,13 @@ CREATE TABLE IF NOT EXISTS test_runs (
     scope TEXT NOT NULL,          -- 'full_suite' | 'regression_only'; triage/application use 'regression_only'
     exit_code INTEGER NOT NULL,
     compile_failed BOOLEAN NOT NULL DEFAULT 0,
+    timed_out BOOLEAN NOT NULL DEFAULT 0,
     tests_found INTEGER NOT NULL DEFAULT 0,
     passed_count INTEGER NOT NULL DEFAULT 0,
     failed_count INTEGER NOT NULL DEFAULT 0,
     skipped_count INTEGER NOT NULL DEFAULT 0,
-    success BOOLEAN NOT NULL DEFAULT 0, -- report produced; individual tests may have failed
+    success BOOLEAN NOT NULL DEFAULT 0, -- Gradle completed successfully and produced XML; not an evidence-presence flag
+    reported_failed_count INTEGER NOT NULL DEFAULT 0, -- raw report failures before regression-test filtering
     xml_path TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -1467,10 +1472,11 @@ CREATE TABLE IF NOT EXISTS llm_invocations (
 );
 
 -- Dynamic View for Evaluation Run Verdicts
--- Precedence: verification_missing -> fixer_incomplete -> regression_introduced
+-- Precedence: verification_missing -> fixer_incomplete -> suite_failure
 --             -> partial_success_regression_only -> full_success -> type_success_runtime_fail
 -- Every evaluation_runs row gets a verdict, including empty/incomplete/failed runs.
-CREATE VIEW IF NOT EXISTS v_evaluation_verdicts AS
+DROP VIEW IF EXISTS v_evaluation_verdicts;
+CREATE VIEW v_evaluation_verdicts AS
 WITH latest_final_checker AS (
     SELECT run_id, checker_run_id, error_count, checker_invoked, success
     FROM (
@@ -1485,9 +1491,10 @@ WITH latest_final_checker AS (
     WHERE rn = 1
 ),
 latest_regression_run AS (
-    SELECT run_id, test_run_id, success, tests_found
+    SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out, reported_failed_count
     FROM (
-        SELECT run_id, test_run_id, success, tests_found, attempt_number,
+        SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out,
+               reported_failed_count, attempt_number,
                ROW_NUMBER() OVER (
                    PARTITION BY run_id
                    ORDER BY attempt_number DESC, created_at DESC, test_run_id DESC
@@ -1498,9 +1505,10 @@ latest_regression_run AS (
     WHERE rn = 1
 ),
 latest_suite_run AS (
-    SELECT run_id, test_run_id, success, tests_found
+    SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out, reported_failed_count
     FROM (
-        SELECT run_id, test_run_id, success, tests_found, attempt_number,
+        SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out,
+               reported_failed_count, attempt_number,
                ROW_NUMBER() OVER (
                    PARTITION BY run_id
                    ORDER BY attempt_number DESC, created_at DESC, test_run_id DESC
@@ -1514,9 +1522,14 @@ regression AS (
     SELECT lr.run_id,
            lr.success AS run_success,
            lr.tests_found AS tests_found,
+           lr.compile_failed AS compile_failed,
+           lr.timed_out AS timed_out,
+           lr.reported_failed_count AS reported_failed_count,
            COUNT(te.execution_id) AS result_rows,
-           CASE
-               WHEN COUNT(te.execution_id) = 0 THEN NULL
+            CASE
+                WHEN lr.tests_found = 0 OR lr.compile_failed = 1 OR lr.timed_out = 1
+                     OR (lr.success = 0 AND lr.reported_failed_count = 0)
+                     OR COUNT(te.execution_id) = 0 THEN NULL
                WHEN COUNT(*) FILTER (WHERE te.status IN ('FAILED', 'ERROR')) > 0 THEN 0
                WHEN COUNT(*) FILTER (WHERE te.status = 'PASSED') > 0 THEN 1
                ELSE NULL -- only SKIPPED rows: unknown, not a failure
@@ -1524,19 +1537,22 @@ regression AS (
     FROM latest_regression_run lr
     LEFT JOIN test_executions te
       ON te.test_run_id = lr.test_run_id AND te.is_regression_test = 1
-    GROUP BY lr.run_id, lr.success, lr.tests_found
+     GROUP BY lr.run_id, lr.success, lr.tests_found, lr.compile_failed, lr.timed_out, lr.reported_failed_count
 ),
 unit AS (
     SELECT ls.run_id,
            ls.success AS run_success,
            ls.tests_found AS tests_found,
+           ls.compile_failed AS compile_failed,
+           ls.timed_out AS timed_out,
+           ls.reported_failed_count AS reported_failed_count,
            COUNT(*) FILTER (WHERE te.status IN ('PASSED', 'FAILED', 'ERROR')) AS executed,
            COUNT(*) FILTER (WHERE te.status IN ('FAILED', 'ERROR')) AS failed,
            COUNT(*) FILTER (WHERE te.status = 'SKIPPED') AS skipped
     FROM latest_suite_run ls
     LEFT JOIN test_executions te
       ON te.test_run_id = ls.test_run_id AND te.is_regression_test = 0
-    GROUP BY ls.run_id, ls.success, ls.tests_found
+     GROUP BY ls.run_id, ls.success, ls.tests_found, ls.compile_failed, ls.timed_out, ls.reported_failed_count
 )
 SELECT
     r.run_id,
@@ -1547,28 +1563,42 @@ SELECT
     r.sample_index,
     r.status,
     fc.error_count AS remaining_type_errors,
-    CASE WHEN u.executed > 0 THEN (u.failed = 0) ELSE NULL END AS unit_tests_passed,
+    CASE
+        WHEN u.executed > 0 AND u.tests_found > 0 AND u.compile_failed = 0 AND u.timed_out = 0
+             AND (u.run_success = 1 OR u.reported_failed_count > 0 OR reg.reg_test_passed = 0)
+        THEN (u.failed = 0)
+        ELSE NULL
+    END AS unit_tests_passed,
     reg.reg_test_passed,
     COALESCE(u.skipped, 0) AS skipped_tests,
     CASE
-        -- A run that is still running, never finalized, or ended failed/timeout is never a success.
+        -- A run that is still running, never finalized, or ended failed/timeout has
+        -- incomplete verification evidence. Lifecycle status stays distinct from
+        -- the evaluation verdict below: `success` there means verification ran.
         WHEN r.status <> 'success' OR r.completed_at IS NULL THEN 'verification_missing'
         -- Missing/failed final checker evidence (including checker never invoked).
         WHEN fc.checker_run_id IS NULL
              OR fc.checker_invoked = 0
              OR fc.success = 0 THEN 'verification_missing'
-        -- Missing regression evidence, a failed/unreported run, or SKIPPED-only rows.
+        -- Missing regression evidence: unknown outcome, no test rows, compile
+        -- failure, timeout, or nonzero task exit with no reported test failures.
         WHEN reg.reg_test_passed IS NULL
-             OR reg.run_success = 0
-             OR reg.tests_found = 0 THEN 'verification_missing'
-        -- In full_suite mode the pre-existing suite must have produced a report.
-        WHEN r.verification_scope = 'full_suite'
-             AND (u.run_success IS NULL OR u.run_success = 0 OR u.tests_found = 0)
+             OR reg.tests_found = 0
+             OR reg.result_rows = 0
+             OR reg.compile_failed = 1
+             OR reg.timed_out = 1
+             OR (reg.run_success = 0 AND reg.reported_failed_count = 0)
              THEN 'verification_missing'
-        -- Fixer incomplete outranks test regressions.
+        -- In full_suite mode the pre-existing suite must have produced a usable report.
+        WHEN r.verification_scope = 'full_suite'
+             AND (u.tests_found IS NULL OR u.tests_found = 0 OR u.executed IS NULL OR u.executed = 0
+                  OR u.compile_failed = 1 OR u.timed_out = 1
+                  OR (u.run_success = 0 AND u.reported_failed_count = 0 AND reg.reg_test_passed = 1))
+             THEN 'verification_missing'
+        -- Fixer incomplete outranks test failures.
         WHEN fc.error_count > 0 THEN 'fixer_incomplete'
-        -- Any failing/erroring pre-existing test is a regression.
-        WHEN r.verification_scope = 'full_suite' AND u.failed > 0 THEN 'regression_introduced'
+        -- Any failing/erroring pre-existing test is a suite failure (no newly-introduced claim).
+        WHEN r.verification_scope = 'full_suite' AND u.failed > 0 THEN 'suite_failure'
         -- No full suite under regression_only, so success is partial.
         WHEN r.verification_scope = 'regression_only'
              AND reg.reg_test_passed = 1 THEN 'partial_success_regression_only'
@@ -1642,7 +1672,7 @@ Each stage does not hand-write ad-hoc SQL. It emits a typed `StageObservation` t
 
 1. `recordRunStart` inserts the `repositories` and `commits` rows if absent (without overwriting an existing `triage_status`) and inserts the `evaluation_runs` row in one transaction; the commit insert happens first so the `evaluation_runs.commit_hash` foreign key is satisfiable. `EvaluationRunRecord` carries the repo/commit fields (real commit, parent, author date, and commit message from Git). `IngestionStage` then fills/updates the ingestion metadata (author date, message, `triage_status='pending'`) and writes its `step_trajectories` row. A deterministic ingestion build failure writes `commits.triage_status='discarded_build_broken'` / `discard_reason='build_broken_unpatched'`; a transient pre-warm failure leaves the row `pending` and is retried.
 2. Every stage attempt inserts one `step_trajectories` row with a unique `step_id` and an `attempt_number`; retries are separate rows, never overwrites. The table enforces `UNIQUE(run_id, step_name, attempt_number)`.
-3. Typed child rows are written with the same `step_id`: `synthesis_runs` (with `attempt_number`), `synthesized_qualifiers`, `synthesized_helpers`, `compilation_events`, `agent_turns`, `annotation_placements`, `guardrail_events`, `checker_runs` (with `attempt_number`; `VerificationStage` writes `stage='verification_final'`), `checker_diagnostics` (with `severity`), `test_runs` (`suite_kind`, `attempt_number`, `scope`, and passed/failed/skipped counts; `VerificationStage` writes `stage='verification'`), `test_executions`, and `llm_invocations`. `CheckerResult.diagnostics[*].severity` is persisted verbatim in `checker_diagnostics.severity`. `test_runs.success=1` means the report was produced; individual tests may still have failed. `checker_runs.success=1` means the invocation completed and diagnostics were parsed, not that `error_count=0`.
+3. Typed child rows are written with the same `step_id`: `synthesis_runs` (with `attempt_number`), `synthesized_qualifiers`, `synthesized_helpers`, `compilation_events`, `agent_turns`, `annotation_placements`, `guardrail_events`, `checker_runs` (with `attempt_number`; `VerificationStage` writes `stage='verification_final'`), `checker_diagnostics` (with `severity`), `test_runs` (`suite_kind`, `attempt_number`, `scope`, exit/compile/timeout status, and passed/failed/skipped counts; `VerificationStage` writes `stage='verification'`), `test_executions`, and `llm_invocations`. `test_runs.success=1` means the Gradle invocation exited successfully and produced XML; a failed invocation can still provide valid test-failure evidence when the report records failures. `timed_out`, `compile_failed`, and `reported_failed_count` distinguish incomplete invocations from assertion failures. `checker_runs.success=1` means the invocation completed and diagnostics were parsed, not that `error_count=0`.
 4. `eval.verdict` is never recomputed by a writer. It is read from the view:
    ```sql
    SELECT verdict FROM v_evaluation_verdicts WHERE run_id = :run_id;
@@ -1764,7 +1794,7 @@ To provide end-to-end execution auditability and granular diagnostic tracing—c
 | **Stage: Pure Marker Qualifier Synthesis** (`SynthesisStage.kt`) | • Prompt constructed with bug description & diff<br>• OpenCode synthesis agent invoked with $L_0$ prompt constraint<br>• Synthesized qualifier AST inspected: **enforces 0 helpers** and pure marker subtyping<br>• `JavacRunner` compiles source files into `custom-quals.jar`<br>• `placement_guide.md` validated and written to CAS | `DEBUG`<br>`INFO`<br>`INFO`<br>`INFO`<br>`DEBUG` | `qualifier_names`, `subtyping_hierarchy`, `helpers_count` (must be 0), `jar_size_bytes`, `guide_tokens`, `policy_rule_count`, `rules_by_category` |
 | **Stage: Semantic Type Application** (`ApplicationStage.kt`) | • OpenCode type applier invoked on target sources in a sanitized export<br>• Staged diff (`git add -N` + `git diff --cached`) and path/filesystem audit<br>• JavaParser AST Gate: type-annotation strip, annotation FQN validation, import check<br>• Test edits allowed only for annotations/imports; executable test logic unchanged<br>• `package-info.java` addition allowed only for defaulting annotations/imports; no executable code<br>• Rejection event: offending statement/expression line & AST kind; edit rolled back<br>• Compile + existing C-1 tests with `customQualsJar` on classpaths<br>• Dedicated selected-checker post-pass: initial error count & error keys parsed | `INFO`<br>`DEBUG`<br>`INFO`<br>`WARN`<br>`WARN`<br>`WARN`<br>`INFO`<br>`INFO` | `files_modified`, `parse_duration_ms`, `added_imports`, `package_info_added`, `initial_error_count`, `is_trivial`, `test_failure`, `error_distribution` |
 | **Stage: Blind Bug Fixing & Core Guards** (`RepairStage.kt`) | • Fixer prompt rendered (blind: T_reg, test names, test patch, placement guide, commit context, and build/test outputs omitted)<br>• Multi-turn agent loop: turn start/end, tool calls, turn execution latency<br>• Intermediate selected-checker error convergence delta ($E_{t} \to E_{t+1}$)<br>• **Guard 1**: full annotation/suppression map lock<br>• **Guard 2**: `@AssumeAssertion` backdoor check<br>• **Guard 3**: utility call and method-reference bypass check<br>• **Guard 4**: full declaration/header/initializer lock against annotated baseline<br>• **Guard 5**: local-variable annotation policy<br>• **Guard 6**: staged-diff filesystem/test/build/path/file-addition audit<br>• Overall audit outcome: `ACCEPTED` vs `REJECTED`; rejected edit rolled back | `DEBUG`<br>`INFO`<br>`DEBUG`<br>`WARN`<br>`WARN`<br>`WARN`<br>`WARN`<br>`WARN`<br>`WARN`<br>`INFO` | `turn_index`, `tool_name`, `error_delta`, `violation_vector`, `offending_node`, `modified_file`, `audit_status` |
-| **Stage: Ground-Truth Verification** (`VerificationStage.kt`) | • Ephemeral worktree created; `annotations.patch` then `repair.patch` applied<br>• Verification scope resolved: `full_suite` vs `regression_only`<br>• Final selected-checker run on reconstructed workspace (main sources)<br>• Regression test $T_{\text{reg}}$ execution; `test_results.xml` snapshotted before suite overwrite<br>• Pre-existing suite execution; `suite_results.xml` captured, per-test outcomes parsed (SKIPPED recorded)<br>• Terminal verdict via precedence (`VERIFICATION_MISSING`, `FIXER_INCOMPLETE`, `REGRESSION_INTRODUCED`, `PARTIAL_SUCCESS_REGRESSION_ONLY`, `FULL_SUCCESS`, `TYPE_SUCCESS_RUNTIME_FAIL`) | `DEBUG`<br>`INFO`<br>`INFO`<br>`INFO`<br>`INFO`<br>`INFO` | `scope`, `reg_test_passed`, `suite_passed`, `remaining_type_errors`, `verdict`, `duration_ms` |
+| **Stage: Ground-Truth Verification** (`VerificationStage.kt`) | • Ephemeral worktree created; `annotations.patch` then `repair.patch` applied<br>• Verification scope resolved: `full_suite` vs `regression_only`<br>• Final selected-checker run on reconstructed workspace (main sources)<br>• Regression test $T_{\text{reg}}$ execution; `test_results.xml` snapshotted before suite overwrite<br>• Pre-existing suite execution; `suite_results.xml` captured, per-test outcomes parsed (SKIPPED recorded)<br>• Terminal verdict via precedence (`VERIFICATION_MISSING`, `FIXER_INCOMPLETE`, `SUITE_FAILURE`, `PARTIAL_SUCCESS_REGRESSION_ONLY`, `FULL_SUCCESS`, `TYPE_SUCCESS_RUNTIME_FAIL`) | `DEBUG`<br>`INFO`<br>`INFO`<br>`INFO`<br>`INFO`<br>`INFO` | `scope`, `reg_test_passed`, `suite_passed`, `remaining_type_errors`, `verdict`, `duration_ms` |
 | **Merkle CAS Engine & Patch Manager** (`CasEngine.kt`, `PatchManager.kt`) | • Cache key input components & final SHA-256 digest computed<br>• Stage CAS lookup: cache `HIT` vs `MISS`<br>• Artifact serialization/deserialization: manifest JSON, jar, patch files<br>• Git patch generation & `git apply` status (clean, fuzz, or rejected hunks) | `DEBUG`<br>`INFO`<br>`DEBUG`<br>`DEBUG` / `WARN` | `stage_name`, `cas_key`, `upstream_keys`, `patch_hunk_count`, `apply_exit_code`, `bytes_written` |
 | **Process & Runner Harnesses** (`OpenCodeRunner.kt`, `BuildRunner.kt`, `JavacRunner.kt`) | • Subprocess spawned: CLI command, working dir, child PID<br>• Async stdout/stderr line counts and pipe throughput<br>• Timeout watchdog arming, deadline updates, cancellation signals<br>• Process termination: exit code, wall-clock duration, stderr dump on failure | `DEBUG`<br>`TRACE`<br>`DEBUG` / `WARN`<br>`INFO` / `ERROR` | `executable`, `pid`, `timeout_seconds`, `exit_code`, `duration_ms`, `error_snippet` |
 | **Persistence & Database Layer** (`DatabaseManager.kt`, `TelemetryProjector.kt`) | • Single connection opened; WAL/busy_timeout/foreign_keys configured<br>• Every stage writes `evaluation_runs`, `step_trajectories`, and typed child rows<br>• Transaction boundaries: `BEGIN IMMEDIATE`, `COMMIT`, `ROLLBACK`<br>• Nested-transaction rejection and `Throwable` rollback<br>• Slow query alert: warnings on any statement taking > 100ms | `DEBUG`<br>`DEBUG`<br>`TRACE`<br>`WARN`<br>`WARN` | `run_id`, `step_id`, `attempt_number`, `statement_type`, `table`, `query_duration_ms` |
@@ -1780,7 +1810,7 @@ To provide end-to-end execution auditability and granular diagnostic tracing—c
   * Logs dispatch of stage execution coroutine with execution deadline.
   * Logs stage termination with exit classification (`Success`, `Discard`, `TransientFailure`), duration in milliseconds, and emitted artifact filenames.
   * Logs the `DatabasePort` projection (`step_id`, `attempt_number`, child-row counts) after each stage.
-* **Terminal Evaluation**: Logs final run status, aggregate duration, sum of agent turns taken across all stages, and terminal verdict assignment (`FULL_SUCCESS`, `PARTIAL_SUCCESS_REGRESSION_ONLY`, `TYPE_SUCCESS_RUNTIME_FAIL`, `REGRESSION_INTRODUCED`, `FIXER_INCOMPLETE`, `VERIFICATION_MISSING`).
+* **Terminal Evaluation**: Logs lifecycle completion separately from terminal evaluation verdict, aggregate duration, and sum of agent turns taken across all stages. Verdicts include `FULL_SUCCESS`, `PARTIAL_SUCCESS_REGRESSION_ONLY`, `TYPE_SUCCESS_RUNTIME_FAIL`, `SUITE_FAILURE`, `FIXER_INCOMPLETE`, and `VERIFICATION_MISSING`.
 
 #### 2. Stage: Ingestion & Worktree Engine (`IngestionStage.kt`)
 * **Git Lineage & Integrity**: Logs remote repository fetch/clone status, resolution of commit $C$ and parent commit $C-1$ (`git rev-parse HEAD~1`), commit author, and commit message summary.
@@ -1866,8 +1896,8 @@ To provide end-to-end execution auditability and granular diagnostic tracing—c
   * Logs execution of the suite in a separate invocation/report directory and copies `suite_results.xml`; writes `test_runs.suite_kind='pre_existing_suite'`, `scope`, `attempt_number`, and passed/failed/skipped counts.
   * Logs per-test outcomes and summary counts: total, passed, failed, skipped, errored, and duration (ms); `SKIPPED` is recorded but not counted as a failure, and `T_reg` is excluded from pre-existing-suite counts by coordinate.
 * **Evaluation Verdict Resolution**:
-  * Reads the verdict from `v_evaluation_verdicts` after all verification rows are written. The view uses `suite_kind`, the latest `verification_final` checker row (with `checker_invoked`/`success`), and treats `status` of `failed` or `timeout` (or a still-running run) as `verification_missing`.
-  * Logs assignment of `VERIFICATION_MISSING`, `FIXER_INCOMPLETE`, `REGRESSION_INTRODUCED`, `PARTIAL_SUCCESS_REGRESSION_ONLY`, `FULL_SUCCESS`, or `TYPE_SUCCESS_RUNTIME_FAIL` using the documented precedence.
+   * Reads the verdict from `v_evaluation_verdicts` after all verification rows are written. The view uses `suite_kind`, the latest `verification_final` checker row, and test evidence metadata. A failed assertion with a valid report is substantive test evidence; compile failures, timeouts, and nonzero exits without reported test failures are incomplete evidence. The view is rebuilt at startup so existing databases receive current verdict rules.
+   * Logs assignment of `VERIFICATION_MISSING`, `FIXER_INCOMPLETE`, `SUITE_FAILURE`, `PARTIAL_SUCCESS_REGRESSION_ONLY`, `FULL_SUCCESS`, or `TYPE_SUCCESS_RUNTIME_FAIL` using the documented precedence.
 
 #### 8. Cross-Cutting Systems & Persistent Infrastructure
 * **Merkle CAS Engine (`CasEngine.kt`, `PatchManager.kt`)**:

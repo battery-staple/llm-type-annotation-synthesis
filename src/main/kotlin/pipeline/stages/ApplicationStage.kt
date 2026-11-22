@@ -197,6 +197,8 @@ class ApplicationStage(
                 tests.outcomes.count { it.status == TestStatus.SKIPPED },
                 tests.success,
                 tests.xmlPaths.firstOrNull()?.absolutePath,
+                tests.timedOut,
+                tests.outcomes.count { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR },
             )
             testExecutions = tests.outcomes.map { outcome ->
                 TestExecutionRecord(

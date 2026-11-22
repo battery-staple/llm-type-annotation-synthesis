@@ -23,7 +23,7 @@ Can domain-specific static type qualifiers (via the Java Checker Framework) be a
 | **Synthesis** | Type Lattice & Guard Synthesis | **Agent** (Iterative `javac` loop) | OpenCode (`opencode run`) + `javac` | Unpatched $C-1$ code, bug context (diff of $C$, commit msg, PR body), stage config | `custom-quals.jar` (qualifier annotations only; zero helpers), `placement_guide.md`, qualifier source files (`custom_quals_src/`), `checker_category` + `selected_processor` (exactly one processor), synthesis agent transcript |
 | **Application** | Semantic Type Application | **Agent** (Multi-turn edit loop) + **Deterministic AST Validator** | OpenCode (`opencode run`) + JavaParser (`AstGuard`) | Clean $C-1$ code, `custom-quals.jar`, `placement_guide.md`, AST guardrails | Unified Git patch (`annotations.patch` relative to $C-1$), AST + path audit log, initial Checker compiler log (`initial_checker_errors.log`), non-triviality error count $\ge 1$ |
 | **Repair** | Blind Bug Fixing | **Agent** (Iterative compile loop) | OpenCode (`opencode run`) + Gradle | Annotated $C-1$ code ($C-1$ base + `annotations.patch`), initial Checker log, `custom-quals.jar`, anti-cheat config. *(Blind to $C$, PR text, and $T_{\text{reg}}$; existing $C-1$ tests may be visible read-only, but $T_{\text{reg}}$, its test patch, and build/test outputs are absent)* | Repaired codebase unified Git patch (`repair.patch` relative to the annotated baseline, not clean $C-1$), anti-cheat validation log, final Checker log (verifying 0 errors), repair agent transcript. Verification applies `annotations.patch` first, then `repair.patch`. |
-| **Verification** | Ground-Truth Verification | **Deterministic** | Gradle Test Runner | $C-1$ base + `annotations.patch` + `repair.patch`, extracted regression test patch (`test_patch.diff` from triage stage) | Test execution report, original unit test suite report, final evaluation verdict (`full_success`, `type_success_runtime_fail`, `regression_introduced`, `fixer_incomplete`, `partial_success_regression_only`), resource metrics |
+| **Verification** | Ground-Truth Verification | **Deterministic** | Gradle Test Runner | $C-1$ base + `annotations.patch` + `repair.patch`, extracted regression test patch (`test_patch.diff` from triage stage) | Test execution report, original unit test suite report, final evaluation verdict (`full_success`, `type_success_runtime_fail`, `suite_failure`, `fixer_incomplete`, `partial_success_regression_only`, `verification_missing`), resource metrics |
 
 ```mermaid
 flowchart TD
@@ -226,13 +226,13 @@ Rather than executing the pipeline as a rigid, monolithic script, the orchestrat
 - **Formal Outputs (Artifacts & State)**:
   - `test_results.xml`: JUnit test report for regression test $T_{\text{reg}}$.
   - `suite_results.xml`: JUnit test report for pre-existing unit test suite on $C-1$ (absent under `verification.scope = "regression_only"`).
-  - `eval_verdict`: Primary outcome classification:
-    1. `full_success`: Regression test passes AND all original unit tests pass AND Checker Framework reports 0 errors. (`full_success` requires 0 Checker errors.)
-    2. `type_success_runtime_fail`: Checker Framework reports 0 errors, but regression test fails (types did not model the true runtime invariant).
-    3. `regression_introduced`: Checker Framework passed, but existing unit tests broke.
-    4. `fixer_incomplete`: Fixer failed to eliminate all type errors within turn/invocation budget.
-    5. `partial_success_regression_only`: Defined for `verification.scope = "regression_only"` when $T_{\text{reg}}$ passes and Checker reports 0 errors; the full suite was not run, so success is partial.
-    The verdict view additionally surfaces `verification_missing` when required final artifacts are absent; missing unit-suite rows surface as `unit_tests_passed = NULL` (unknown) rather than as a regression. These are diagnostic states, not additional primary outcomes.
+  - `eval_verdict`: Outcome classification, separate from whether pipeline execution completed:
+     1. `full_success`: Regression test passes AND all original unit tests pass AND Checker Framework reports 0 errors. (`full_success` requires 0 Checker errors.)
+     2. `type_success_runtime_fail`: Checker Framework reports 0 errors, but regression test fails with valid test evidence (types did not model the true runtime invariant).
+     3. `suite_failure`: Checker Framework passed, but one or more pre-existing suite tests fail. No baseline comparison is performed, so this does not claim the run introduced the failures.
+     4. `fixer_incomplete`: Fixer failed to eliminate all type errors within turn/invocation budget.
+     5. `partial_success_regression_only`: Defined for `verification.scope = "regression_only"` when $T_{\text{reg}}$ passes and Checker reports 0 errors; the full suite was not run, so success is partial.
+     `verification_missing` is reserved for missing/unusable checker or test evidence, including absent/unparseable reports, compile failures, timeouts, and nonzero test invocations with no reported test failures. A report containing assertion failures is evidence of a substantive test failure, not missing evidence. Missing unit-suite rows surface as `unit_tests_passed = NULL` (unknown).
   - `verification_summary.json`: End-to-end evaluation report, token totals, and wall-clock timings.
 
 ---
@@ -762,7 +762,8 @@ Every metric in the pipeline registry is derived through SQL aggregations over t
       FROM test_runs tr
       WHERE tr.run_id = :run_id
         AND tr.stage = 'verification'
-        AND tr.success = 1
+       AND (tr.success = 1 OR tr.reported_failed_count > 0)
+       AND tr.compile_failed = 0 AND tr.timed_out = 0
         AND tr.suite_kind = 'regression_test'
         AND tr.tests_found > 0
       ORDER BY tr.attempt_number DESC, tr.created_at DESC, tr.test_run_id DESC
@@ -783,7 +784,8 @@ Every metric in the pipeline registry is derived through SQL aggregations over t
       FROM test_runs tr
       WHERE tr.run_id = :run_id
         AND tr.stage = 'verification'
-        AND tr.success = 1
+         AND (tr.success = 1 OR tr.reported_failed_count > 0)
+         AND tr.compile_failed = 0 AND tr.timed_out = 0
         AND tr.suite_kind = 'pre_existing_suite'
         AND tr.tests_found > 0
       ORDER BY tr.attempt_number DESC, tr.created_at DESC, tr.test_run_id DESC
@@ -826,10 +828,11 @@ To provide instant querying without introducing denormalized caching columns, th
 
 ```sql
 -- Dynamic View for Evaluation Run Verdicts
--- Precedence: verification_missing -> fixer_incomplete -> regression_introduced
+-- Precedence: verification_missing -> fixer_incomplete -> suite_failure
 --             -> partial_success_regression_only -> full_success -> type_success_runtime_fail
 -- Every evaluation_runs row gets a verdict, including empty/incomplete/failed runs.
-CREATE VIEW IF NOT EXISTS v_evaluation_verdicts AS
+DROP VIEW IF EXISTS v_evaluation_verdicts;
+CREATE VIEW v_evaluation_verdicts AS
 WITH latest_final_checker AS (
     SELECT run_id, checker_run_id, error_count, checker_invoked, success
     FROM (
@@ -844,9 +847,10 @@ WITH latest_final_checker AS (
     WHERE rn = 1
 ),
 latest_regression_run AS (
-    SELECT run_id, test_run_id, success, tests_found
+    SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out, reported_failed_count
     FROM (
-        SELECT run_id, test_run_id, success, tests_found, attempt_number,
+        SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out,
+               reported_failed_count, attempt_number,
                ROW_NUMBER() OVER (
                    PARTITION BY run_id
                    ORDER BY attempt_number DESC, created_at DESC, test_run_id DESC
@@ -857,9 +861,10 @@ latest_regression_run AS (
     WHERE rn = 1
 ),
 latest_suite_run AS (
-    SELECT run_id, test_run_id, success, tests_found
+    SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out, reported_failed_count
     FROM (
-        SELECT run_id, test_run_id, success, tests_found, attempt_number,
+        SELECT run_id, test_run_id, success, tests_found, compile_failed, timed_out,
+               reported_failed_count, attempt_number,
                ROW_NUMBER() OVER (
                    PARTITION BY run_id
                    ORDER BY attempt_number DESC, created_at DESC, test_run_id DESC
@@ -874,9 +879,14 @@ regression AS (
     SELECT lr.run_id,
            lr.success AS run_success,
            lr.tests_found AS tests_found,
+           lr.compile_failed AS compile_failed,
+           lr.timed_out AS timed_out,
+           lr.reported_failed_count AS reported_failed_count,
            COUNT(te.execution_id) AS result_rows,
-           CASE
-               WHEN COUNT(te.execution_id) = 0 THEN NULL
+            CASE
+                WHEN lr.tests_found = 0 OR lr.compile_failed = 1 OR lr.timed_out = 1
+                     OR (lr.success = 0 AND lr.reported_failed_count = 0)
+                     OR COUNT(te.execution_id) = 0 THEN NULL
                WHEN COUNT(*) FILTER (WHERE te.status IN ('FAILED', 'ERROR')) > 0 THEN 0
                WHEN COUNT(*) FILTER (WHERE te.status = 'PASSED') > 0 THEN 1
                ELSE NULL -- only SKIPPED rows: unknown, not a failure
@@ -884,20 +894,23 @@ regression AS (
     FROM latest_regression_run lr
     LEFT JOIN test_executions te
       ON te.test_run_id = lr.test_run_id AND te.is_regression_test = 1
-    GROUP BY lr.run_id, lr.success, lr.tests_found
+     GROUP BY lr.run_id, lr.success, lr.tests_found, lr.compile_failed, lr.timed_out, lr.reported_failed_count
 ),
 unit AS (
     -- Executed counts exclude SKIPPED, so a SKIPPED-only suite is not a pass.
     SELECT ls.run_id,
            ls.success AS run_success,
            ls.tests_found AS tests_found,
+           ls.compile_failed AS compile_failed,
+           ls.timed_out AS timed_out,
+           ls.reported_failed_count AS reported_failed_count,
            COUNT(*) FILTER (WHERE te.status IN ('PASSED', 'FAILED', 'ERROR')) AS executed,
            COUNT(*) FILTER (WHERE te.status IN ('FAILED', 'ERROR')) AS failed,
            COUNT(*) FILTER (WHERE te.status = 'SKIPPED') AS skipped
     FROM latest_suite_run ls
     LEFT JOIN test_executions te
       ON te.test_run_id = ls.test_run_id AND te.is_regression_test = 0
-    GROUP BY ls.run_id, ls.success, ls.tests_found
+     GROUP BY ls.run_id, ls.success, ls.tests_found, ls.compile_failed, ls.timed_out, ls.reported_failed_count
 )
 SELECT
     r.run_id,
@@ -907,28 +920,37 @@ SELECT
     r.verification_scope,
     r.status,
     fc.error_count AS remaining_type_errors,
-    CASE WHEN u.executed > 0 THEN (u.failed = 0) ELSE NULL END AS unit_tests_passed,
+    CASE
+        WHEN u.executed > 0 AND u.tests_found > 0 AND u.compile_failed = 0 AND u.timed_out = 0
+             AND (u.run_success = 1 OR u.reported_failed_count > 0 OR reg.reg_test_passed = 0)
+        THEN (u.failed = 0)
+        ELSE NULL
+    END AS unit_tests_passed,
     reg.reg_test_passed,
     COALESCE(u.skipped, 0) AS skipped_tests,
     CASE
-        -- A run that is still running, never finalized, or ended failed/timeout is never a success.
+        -- A run that is still running, never finalized, or ended failed/timeout is incomplete.
         WHEN r.status <> 'success' OR r.completed_at IS NULL THEN 'verification_missing'
         -- Missing/failed final checker evidence (including checker never invoked).
         WHEN fc.checker_run_id IS NULL
              OR fc.checker_invoked = 0
              OR fc.success = 0 THEN 'verification_missing'
-        -- Missing regression evidence, a failed/unreported run, or SKIPPED-only rows.
+        -- Missing regression evidence, compile failure, timeout, or unexplained nonzero exit.
         WHEN reg.reg_test_passed IS NULL
-             OR reg.run_success = 0
-             OR reg.tests_found = 0 THEN 'verification_missing'
+             OR reg.tests_found = 0
+             OR reg.compile_failed = 1 OR reg.timed_out = 1
+             OR (reg.run_success = 0 AND reg.reported_failed_count = 0)
+             THEN 'verification_missing'
         -- In full_suite mode the pre-existing suite must have produced a report.
         WHEN r.verification_scope = 'full_suite'
-             AND (u.run_success IS NULL OR u.run_success = 0 OR u.tests_found = 0)
+             AND (u.run_success IS NULL OR u.tests_found = 0 OR u.executed IS NULL OR u.executed = 0
+                  OR u.compile_failed = 1 OR u.timed_out = 1
+                  OR (u.run_success = 0 AND u.reported_failed_count = 0 AND reg.reg_test_passed = 1))
              THEN 'verification_missing'
         -- Fixer incomplete outranks test regressions.
         WHEN fc.error_count > 0 THEN 'fixer_incomplete'
-        -- Any failing/erroring pre-existing test is a regression.
-        WHEN r.verification_scope = 'full_suite' AND u.failed > 0 THEN 'regression_introduced'
+        -- Suite failures are not claimed as newly introduced without a baseline.
+        WHEN r.verification_scope = 'full_suite' AND u.failed > 0 THEN 'suite_failure'
         -- No full suite under regression_only, so success is partial.
         WHEN r.verification_scope = 'regression_only'
              AND reg.reg_test_passed = 1 THEN 'partial_success_regression_only'
@@ -1092,7 +1114,7 @@ LEFT JOIN (
   - Under `"regression_only"`, Step 6 runs strictly the extracted regression test $T_{\text{reg}}$ (and tests in the directly affected submodule):
     `./gradlew test --tests {test_class}.{test_method}`
     Because the full suite is skipped, a passing $T_{\text{reg}}$ with 0 Checker errors yields `partial_success_regression_only` rather than `full_success`.
-  - Under `"full_suite"`, Step 6 runs both $T_{\text{reg}}$ and the full project test suite to formally differentiate between `full_success` and `regression_introduced`.
+   - Under `"full_suite"`, Step 6 runs both $T_{\text{reg}}$ and the full project test suite to distinguish `full_success` from `suite_failure`. Without a pre-change suite baseline, suite failures are not asserted to be newly introduced.
   - Enables rapid developer iteration and ablation sweeps without waiting for multi-module test suites on every intermediate run.
 
 ### 13. Extended AST Guardrail Vectors & Dynamic Canary Compilation

@@ -203,7 +203,10 @@ data class TestRunRecord(
     val failedCount: Int,
     val skippedCount: Int,
     val success: Boolean,
-    val xmlPath: String?
+    val xmlPath: String?,
+    val timedOut: Boolean = false,
+    /** Failures in the raw JUnit report, before any regression-test filtering. */
+    val reportedFailedCount: Int = failedCount
 )
 
 data class TestExecutionRecord(
@@ -250,5 +253,4 @@ data class TelemetryProjection(
     val testExecutions: List<TestExecutionRecord> = emptyList(),
     val llmInvocations: List<LlmInvocationRecord> = emptyList()
 )
-
 

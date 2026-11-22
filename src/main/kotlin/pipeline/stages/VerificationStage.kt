@@ -137,12 +137,12 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             log.info { "Verification: running T_reg ${input.sample.regressionTest}" }
             val result = buildRunner.runTests(worktree, testFilter = input.sample.regressionTest, customQualsJar = input.lattice.customQualsJar)
             regResult = result
-            val executed = result.outcomes.filter { it.status != TestStatus.SKIPPED }
             val hasPassed = result.outcomes.any { it.status == TestStatus.PASSED }
             val hasFailure = result.outcomes.any { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
             regPassed = hasPassed && !hasFailure
-            val reportMissing = !result.success || result.xmlPaths.isEmpty()
-            regEvidenceMissing = reportMissing || executed.isEmpty()
+            // A nonzero exit is valid evidence only when the report contains
+            // test failures; compile failures and timeouts remain incomplete.
+            regEvidenceMissing = regressionEvidenceMissing(result)
             regXmlName = snapshotXml(writer, result, ArtifactNames.TEST_RESULTS_XML, input.sample.regressionTest.testClass.value)
             recordTestTelemetry(
                 ctx,
@@ -183,9 +183,14 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             }
             suiteExecuted = filtered.count { it.status != TestStatus.SKIPPED }
             suiteFailed = filtered.count { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
-            suiteReportMissing = !suiteResult.success || suiteResult.xmlPaths.isEmpty() ||
-                suiteResult.testsFound == 0 || suiteExecuted == 0
-            suitePassed = if (suiteExecuted == 0) null else suiteFailed == 0
+            // Apply the same evidence rule as T_reg, using raw outcomes to
+            // retain failures from the excluded regression test as evidence.
+            suiteReportMissing = suiteEvidenceMissing(
+                suiteResult,
+                suiteExecuted,
+                regressionTestFailed = !regPassed
+            )
+            suitePassed = if (suiteReportMissing || suiteExecuted == 0) null else suiteFailed == 0
             suiteXmlName = snapshotXml(writer, suiteResult, ArtifactNames.SUITE_RESULTS_XML, preferredClass = null)
             // Record telemetry on the filtered (non-regression) outcomes; T_reg
             // is excluded from the pre-existing-suite counts entirely.
@@ -194,23 +199,32 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
                 outcomes = filtered,
                 testsFound = (suiteResult.testsFound - removedRegression).coerceAtLeast(0)
             )
-            recordTestTelemetry(ctx, input, adjusted, suiteKind = "pre_existing_suite", xmlArtifactName = suiteXmlName)
+            recordTestTelemetry(
+                ctx,
+                input,
+                adjusted,
+                suiteKind = "pre_existing_suite",
+                xmlArtifactName = suiteXmlName,
+                reportedFailedCount = suiteResult.outcomes.count {
+                    it.status == TestStatus.FAILED || it.status == TestStatus.ERROR
+                }
+            )
             log.info { "Verification: suite executed=$suiteExecuted failed=$suiteFailed reportMissing=$suiteReportMissing" }
         }
 
-        // e. Verdict precedence (exact order).
-        val verdict = when {
-            checkerMissing -> EvalVerdict.VERIFICATION_MISSING
-            regEvidenceMissing -> EvalVerdict.VERIFICATION_MISSING
-            input.verificationScope == VerificationScope.FULL_SUITE && suiteReportMissing -> EvalVerdict.VERIFICATION_MISSING
-            (remainingCheckerErrors ?: 0) > 0 -> EvalVerdict.FIXER_INCOMPLETE
-            input.verificationScope == VerificationScope.FULL_SUITE && suiteFailed > 0 -> EvalVerdict.REGRESSION_INTRODUCED
-            input.verificationScope == VerificationScope.REGRESSION_ONLY && regPassed -> EvalVerdict.PARTIAL_SUCCESS_REGRESSION_ONLY
-            input.verificationScope == VerificationScope.FULL_SUITE && regPassed &&
-                suiteExecuted > 0 && suiteFailed == 0 -> EvalVerdict.FULL_SUCCESS
-            !regPassed && (input.verificationScope == VerificationScope.REGRESSION_ONLY || suiteFailed == 0) -> EvalVerdict.TYPE_SUCCESS_RUNTIME_FAIL
-            else -> EvalVerdict.VERIFICATION_MISSING
-        }
+        // e. Verdict precedence (exact order). A failed task is accepted as
+        // test evidence only when its report records a test failure; compile
+        // failures, timeouts, and unexplained nonzero exits remain missing.
+        val verdict = decideVerdict(
+            checkerMissing = checkerMissing,
+            regEvidenceMissing = regEvidenceMissing,
+            suiteReportMissing = suiteReportMissing,
+            remainingCheckerErrors = remainingCheckerErrors,
+            suiteFailed = suiteFailed,
+            suiteExecuted = suiteExecuted,
+            regPassed = regPassed,
+            scope = input.verificationScope
+        )
         log.info { "Verification ${input.sample.benchmarkId}: verdict=$verdict regPassed=$regPassed suitePassed=$suitePassed remainingErrors=$remainingCheckerErrors" }
 
         // f. Summary artifact, telemetry already recorded above.
@@ -219,7 +233,12 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             put("verdict", JsonPrimitive(verdict.name.lowercase()))
             put("scope", JsonPrimitive(input.verificationScope.name.lowercase()))
             put("baseline", JsonPrimitive(ctx.config.verification.baseline))
-            put("regression_test_passed", JsonPrimitive(regPassed))
+            if (regEvidenceMissing) {
+                put("regression_test_passed", JsonNull)
+            } else {
+                put("regression_test_passed", JsonPrimitive(regPassed))
+            }
+            put("regression_test_evidence_present", JsonPrimitive(!regEvidenceMissing))
             if (suitePassed == null) {
                 put("original_tests_passed", JsonNull)
             } else {
@@ -250,7 +269,7 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         return StageResult.Success(
             data = VerificationResult(
                 verdict = verdict,
-                regressionTestPassed = regPassed,
+                regressionTestPassed = if (regEvidenceMissing) null else regPassed,
                 originalTestsPassed = suitePassed,
                 remainingCheckerErrors = remainingCheckerErrors,
                 testResultsXml = regXmlName?.let { stagingDir.resolve(it) },
@@ -272,14 +291,16 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
                 summaryFile.readText()
             )
             fun str(name: String): String? = summary[name]?.toString()?.trim('"')
-            fun bool(name: String): Boolean? = summary[name]?.let { it.toString() == "true" }
-            val verdict = EvalVerdict.entries.firstOrNull { it.name.equals(str("verdict"), ignoreCase = true) }
+            fun bool(name: String): Boolean? = summary[name]
+                ?.takeUnless { it == JsonNull }
+                ?.let { it.toString() == "true" }
+            val verdict = EvalVerdict.fromStoredName(str("verdict"))
                 ?: return null
             val testXml = bundleDir.resolve(ArtifactNames.TEST_RESULTS_XML).takeIf { it.isFile }
             val suiteXml = bundleDir.resolve(ArtifactNames.SUITE_RESULTS_XML).takeIf { it.isFile }
             VerificationResult(
                 verdict = verdict,
-                regressionTestPassed = bool("regression_test_passed") ?: false,
+                regressionTestPassed = bool("regression_test_passed"),
                 originalTestsPassed = summary["original_tests_passed"]?.let {
                     if (it.toString() == "null") null else it.toString().toBooleanStrictOrNull()
                 },
@@ -396,7 +417,8 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         result: TestRunResult,
         suiteKind: String,
         xmlArtifactName: String?,
-        isRegressionRun: Boolean = false
+        isRegressionRun: Boolean = false,
+        reportedFailedCount: Int? = null
     ) {
         val outcomes = result.outcomes
         val (passed, failed, skipped) = countStatuses(outcomes)
@@ -416,7 +438,9 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             failedCount = failed,
             skippedCount = skipped,
             success = result.success,
-            xmlPath = xmlArtifactName
+            xmlPath = xmlArtifactName,
+            timedOut = result.timedOut,
+            reportedFailedCount = reportedFailedCount ?: failed
         )
         val executions = outcomes.map { outcome ->
             TestExecutionRecord(
@@ -455,6 +479,71 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
                 }
             }
             return Triple(passed, failed, skipped)
+        }
+
+        /**
+         * Evidence means a parseable JUnit report with at least one executed
+         * (non-skipped) test. A nonzero exit is acceptable only when the report
+         * contains test failures; timeouts and compile failures remain incomplete.
+         */
+        fun regressionEvidenceMissing(result: TestRunResult): Boolean {
+            if (result.xmlPaths.none { it.isFile }) return true
+            if (result.testsFound == 0 || result.outcomes.isEmpty()) return true
+            if (result.outcomes.none { it.status != TestStatus.SKIPPED }) return true
+            if (result.compileFailed || result.timedOut) return true
+            val hasReportedFailure = result.outcomes.any {
+                it.status == TestStatus.FAILED || it.status == TestStatus.ERROR
+            }
+            return !result.success && !hasReportedFailure
+        }
+
+        /**
+         * Suite evidence uses the filtered (non-regression) executed count so
+         * the verdict and the persisted view agree: a suite run that only
+         * contains the regression test has no pre-existing-suite evidence.
+         */
+        fun suiteEvidenceMissing(
+            result: TestRunResult,
+            filteredExecuted: Int,
+            regressionTestFailed: Boolean = false
+        ): Boolean {
+            if (result.xmlPaths.none { it.isFile }) return true
+            if (result.testsFound == 0) return true
+            if (filteredExecuted == 0) return true
+            if (result.compileFailed || result.timedOut) return true
+            val hasReportedFailure = result.outcomes.any {
+                it.status == TestStatus.FAILED || it.status == TestStatus.ERROR
+            }
+            return !result.success && !hasReportedFailure && !regressionTestFailed
+        }
+
+        /**
+         * Terminal evaluation verdict. Lifecycle completion (orchestrator run
+         * status) is distinct: callers set `success` when verification
+         * executed, even when this returns a substantive failure verdict.
+         * `verification_missing` is reserved for genuinely absent/unusable
+         * evidence, never for assertion failures backed by valid reports.
+         */
+        fun decideVerdict(
+            checkerMissing: Boolean,
+            regEvidenceMissing: Boolean,
+            suiteReportMissing: Boolean,
+            remainingCheckerErrors: Int?,
+            suiteFailed: Int,
+            suiteExecuted: Int,
+            regPassed: Boolean,
+            scope: VerificationScope
+        ): EvalVerdict = when {
+            checkerMissing -> EvalVerdict.VERIFICATION_MISSING
+            regEvidenceMissing -> EvalVerdict.VERIFICATION_MISSING
+            scope == VerificationScope.FULL_SUITE && suiteReportMissing -> EvalVerdict.VERIFICATION_MISSING
+            (remainingCheckerErrors ?: 0) > 0 -> EvalVerdict.FIXER_INCOMPLETE
+            scope == VerificationScope.FULL_SUITE && suiteFailed > 0 -> EvalVerdict.SUITE_FAILURE
+            scope == VerificationScope.REGRESSION_ONLY && regPassed -> EvalVerdict.PARTIAL_SUCCESS_REGRESSION_ONLY
+            scope == VerificationScope.FULL_SUITE && regPassed &&
+                suiteExecuted > 0 && suiteFailed == 0 -> EvalVerdict.FULL_SUCCESS
+            !regPassed && (scope == VerificationScope.REGRESSION_ONLY || suiteFailed == 0) -> EvalVerdict.TYPE_SUCCESS_RUNTIME_FAIL
+            else -> EvalVerdict.VERIFICATION_MISSING
         }
     }
 }
