@@ -855,8 +855,48 @@
       <span>LLM Latency: <strong>${esc(fmtNum(totalLatency))} ms</strong></span>
       ${r.remaining_type_errors !== null && r.remaining_type_errors !== undefined ? `<span>Remaining Errors: <strong>${esc(r.remaining_type_errors)}</strong></span>` : ""}
       ${(r.retry_events || []).length ? `<span>Retries: <strong>${(r.retry_events || []).filter((e) => e.will_retry).length}</strong> · final transient failures: <strong>${(r.retry_events || []).filter((e) => !e.will_retry).length}</strong></span>` : ""}
-      ${(r.subprocess_metrics || []).length ? `<div style="width:100%;"><strong>Recent subprocess calls</strong><table class="data-table"><thead><tr><th>Stage</th><th>Kind</th><th>Duration ms</th><th>Exit</th><th>Timed out</th></tr></thead><tbody>${r.subprocess_metrics.map((x) => `<tr><td>${esc(x.stage)}</td><td>${esc(x.kind)}</td><td>${esc(fmtNum(x.duration_ms))}</td><td>${x.exit_code === null ? "-" : esc(x.exit_code)}</td><td>${x.timed_out ? "Yes" : "No"}</td></tr>`).join("")}</tbody></table></div>` : ""}
     `;
+
+    const subprocess = r.subprocess_metrics || [];
+    const subprocessPanel = $("hdrSubprocessPanel");
+    if (subprocess.length) {
+      const totalMs = subprocess.reduce((acc, x) => acc + (Number(x.duration_ms) || 0), 0);
+      const failedCount = subprocess.filter(
+        (x) => x.timed_out || (x.exit_code !== null && x.exit_code !== undefined && x.exit_code !== 0)
+      ).length;
+      const slowest = subprocess.reduce(
+        (a, b) => ((Number(b.duration_ms) || 0) > (Number(a.duration_ms) || 0) ? b : a),
+        subprocess[0]
+      );
+      $("hdrSubprocessStats").innerHTML = [
+        `${subprocess.length} ${subprocess.length === 1 ? "call" : "calls"}`,
+        `total ${esc(fmtDurationMs(totalMs))}`,
+        `slowest ${esc(fmtDurationMs(Number(slowest.duration_ms) || 0))} (${esc(slowest.kind)})`,
+        failedCount ? `${failedCount} failed` : null,
+      ].filter(Boolean).join(" · ");
+      $("hdrSubprocessBody").innerHTML = `
+        <table class="data-table subprocess-table">
+          <thead><tr><th>Stage</th><th>Kind</th><th>Duration</th><th>Exit</th><th>Timed out</th></tr></thead>
+          <tbody>${subprocess.map((x) => {
+            const exit = x.exit_code === null || x.exit_code === undefined
+              ? `<span class="muted">-</span>`
+              : `<span class="badge ${x.exit_code === 0 ? "badge-green" : "badge-red"}">${esc(x.exit_code)}</span>`;
+            return `<tr>
+              <td>${esc(x.stage)}</td>
+              <td><code>${esc(x.kind)}</code></td>
+              <td class="num">${esc(fmtNum(Math.round(Number(x.duration_ms) || 0)))} ms</td>
+              <td>${exit}</td>
+              <td>${x.timed_out ? `<span class="badge badge-red">timed out</span>` : `<span class="muted">no</span>`}</td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table>
+      `;
+      subprocessPanel.classList.remove("hidden");
+    } else {
+      subprocessPanel.classList.add("hidden");
+      $("hdrSubprocessStats").textContent = "";
+      $("hdrSubprocessBody").innerHTML = "";
+    }
 
     const regTest = r.regression_test_class
       ? `${r.regression_test_class}${r.regression_test_method ? "." + r.regression_test_method : ""}`

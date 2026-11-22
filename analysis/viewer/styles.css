@@ -436,6 +436,77 @@ code, pre {
   font-family: var(--mono);
 }
 
+/* Compact subprocess timing detail; collapsed to keep the header tidy. */
+.subprocess-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.subprocess-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.subprocess-summary::-webkit-details-marker,
+.subprocess-summary::marker {
+  content: "";
+  display: none;
+}
+
+.subprocess-summary::before {
+  content: "▸";
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.15s ease;
+}
+
+.subprocess-panel[open] .subprocess-summary::before {
+  transform: rotate(90deg);
+}
+
+.subprocess-summary:hover {
+  background: var(--bg-hover);
+}
+
+.subprocess-summary-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.subprocess-summary-stats {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subprocess-body {
+  border-top: 1px solid var(--border-subtle);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.subprocess-table th,
+.subprocess-table td {
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
+.subprocess-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .run-tabs {
   display: flex;
   gap: 4px;

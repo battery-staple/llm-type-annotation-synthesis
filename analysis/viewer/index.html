@@ -74,6 +74,14 @@
           <div class="run-meta-row" id="hdrCommitMeta"></div>
           <div class="config-pills-row" id="hdrConfigPills"></div>
 
+          <details id="hdrSubprocessPanel" class="subprocess-panel hidden">
+            <summary class="subprocess-summary">
+              <span class="subprocess-summary-label">Recent subprocess calls</span>
+              <span id="hdrSubprocessStats" class="subprocess-summary-stats"></span>
+            </summary>
+            <div id="hdrSubprocessBody" class="subprocess-body"></div>
+          </details>
+
           <nav class="run-tabs" role="tablist">
             <button class="run-tab active" data-run-tab="stages">Stages</button>
             <button class="run-tab" data-run-tab="config">Configuration</button>
