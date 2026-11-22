@@ -200,6 +200,10 @@ code, pre {
   white-space: nowrap;
 }
 
+.run-card-outcome-reason {
+  margin-bottom: 4px;
+}
+
 .run-card-id {
   font-family: var(--mono);
   font-size: 11px;
@@ -231,6 +235,7 @@ code, pre {
 .stage-mini-dot.ok { background: var(--green); }
 .stage-mini-dot.fail { background: var(--red); }
 .stage-mini-dot.running { background: var(--yellow); animation: step-pulse 1.2s ease-in-out infinite; }
+.stage-mini-dot.skip { background: var(--text-dim); }
 .stage-mini-dot.cached { box-shadow: inset 0 0 0 1px var(--accent); }
 
 /* Buttons & Badges */
@@ -510,6 +515,7 @@ code, pre {
 .stage-dot.fail { background: var(--red); }
 .stage-dot.running { background: var(--yellow); animation: step-pulse 1.2s ease-in-out infinite; }
 @keyframes step-pulse { 50% { opacity: 0.35; } }
+.stage-dot.skip { background: var(--text-dim); }
 
 .step-card-sub {
   font-size: 11px;

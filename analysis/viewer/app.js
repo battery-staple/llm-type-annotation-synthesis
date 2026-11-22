@@ -166,14 +166,15 @@
     return step.success ? "ok" : "fail";
   }
 
-  function statusBadgeClass(status) {
-    switch (status) {
-      case "success": return "badge-green";
-      case "failed": return "badge-red";
-      case "running": return "badge-blue";
-      default: return "badge-muted";
-    }
-  }
+  const VERDICT_LABELS = {
+    full_success: "full success",
+    partial_success_regression_only: "partial success",
+    type_success_runtime_fail: "type success, runtime fail",
+    fixer_incomplete: "fixer incomplete",
+    suite_failure: "suite failure",
+    regression_introduced: "suite failure (legacy)",
+    verification_missing: "verification missing",
+  };
 
   const VERDICT_TOOLTIPS = {
     full_success: "Full success: 0 remaining type errors, regression test passed, and full pre-existing unit suite passed.",
@@ -182,20 +183,238 @@
     fixer_incomplete: "Verification ran, but Checker Framework still reports remaining type errors.",
     suite_failure: "Checker is clean but at least one pre-existing suite test failed. No baseline comparison, so this does not claim the failure was newly introduced.",
     regression_introduced: "Legacy label for suite_failure. Checker is clean but at least one pre-existing suite test failed.",
-    verification_missing: "Required verification evidence is missing or unusable (no checker result, no parseable JUnit report, or no tests found). Assertion failures with valid reports are substantive failures, not missing evidence.",
+    verification_missing: "Verification ran, but its evidence is missing or unusable (no checker result, no parseable JUnit report, or no tests found). This is a verification result; it does not mean verification was skipped.",
   };
+
+  const TRIAGE_SKIP_LABELS = {
+    non_bugfix: "not a bugfix",
+    pending: "triage incomplete",
+    discarded_build_broken: "build broken",
+    discarded_no_test: "no regression test",
+    discarded_non_compiling: "test build broken",
+    discarded_passes_unpatched: "test passes unpatched",
+    discarded_invalid_test_patch: "invalid test patch",
+    discarded_regression_not_passing_on_fixed_commit: "test fails on fixed commit",
+    discarded_fixed_commit_unavailable: "fixed commit unavailable",
+    discarded_diff_too_large: "diff too large",
+    discarded_merge_commit: "merge commit",
+  };
+
+  function verdictLabel(verdict) {
+    return VERDICT_LABELS[verdict] || verdict || "unknown";
+  }
 
   function verdictTooltip(verdict) {
     return VERDICT_TOOLTIPS[verdict] || `Evaluation verdict: ${verdict || "unknown"}`;
   }
 
-  function statusTooltip(status) {
-    switch (status) {
-      case "success": return "Pipeline execution completed all stages (lifecycle). See the separate evaluation verdict for what the repaired code achieved.";
-      case "failed": return "Pipeline execution stopped due to a stage failure (lifecycle). The evaluation verdict is verification_missing because verification evidence is incomplete.";
-      case "running": return "Pipeline execution is currently in progress.";
-      default: return `Pipeline run status: ${status || "unknown"}`;
+  function triageSkipLabel(triageStatus) {
+    if (TRIAGE_SKIP_LABELS[triageStatus]) return TRIAGE_SKIP_LABELS[triageStatus];
+    return String(triageStatus || "skipped").replace(/^discarded_/, "").replace(/_/g, " ");
+  }
+
+  function isTriageSkipped(run) {
+    const ts = run?.triage_status || "";
+    return ts === "non_bugfix" || ts.startsWith("discarded_");
+  }
+
+  /** A triage stage that rejects a commit is a filter decision, not a failure. */
+  function isSkippedStep(run, step) {
+    return Boolean(step && step.step_name === "triage" && !step.success && isTriageSkipped(run));
+  }
+
+  function stageState(run, step) {
+    if (isSkippedStep(run, step)) return "skip";
+    return stepState(step);
+  }
+
+  function triageStatusMeta(triageStatus) {
+    if (!triageStatus) {
+      return { label: "unknown", cls: "badge-muted", tooltip: "No triage status recorded for this commit." };
     }
+    if (triageStatus === "verified") {
+      return {
+        label: "verified",
+        cls: "badge-green",
+        tooltip: "Triage admitted the commit; it proceeded to the later pipeline stages.",
+      };
+    }
+    if (triageStatus === "running") {
+      return { label: "running", cls: "badge-blue", tooltip: "Triage is currently running for this commit." };
+    }
+    if (isTriageSkipped({ triage_status: triageStatus })) {
+      return {
+        label: triageSkipLabel(triageStatus),
+        cls: "badge-muted",
+        tooltip: `Triage did not admit this commit (${triageStatus}), so the pipeline stopped before synthesis.`,
+      };
+    }
+    if (triageStatus === "pending") {
+      return { label: "pending", cls: "badge-yellow", tooltip: "Triage has not completed for this commit." };
+    }
+    return { label: triageStatus, cls: "badge-muted", tooltip: `Triage status: ${triageStatus}` };
+  }
+
+  function failureStage(run) {
+    const failed = (run.steps || []).filter((s) => !s.success);
+    return failed.length ? failed[failed.length - 1].step_name : null;
+  }
+
+  /**
+   * What can be concluded about the repaired code: an evaluation verdict, or
+   * "not evaluated" when verification never produced usable evidence.
+   *
+   * The database verdict stays `verification_missing` for every run without
+   * verification evidence. That is correct bookkeeping, but a misleading
+   * headline: a triage discard or an early stage failure was never evaluated.
+   * The viewer therefore shows the reason instead of the raw verdict.
+   */
+  function deriveOutcome(run) {
+    const status = run.status || "unknown";
+    const verdict = run.verdict;
+    const verificationStep = latestStep(run, "verification");
+
+    if (status === "running") {
+      return {
+        key: "running",
+        kind: "running",
+        label: "running",
+        cls: "badge-blue",
+        reasonLabel: null,
+        tooltip: "The run is still in progress; it has no evaluation outcome yet.",
+      };
+    }
+
+    if (verificationStep && verdict) {
+      return {
+        key: verdict,
+        kind: "evaluated",
+        label: verdictLabel(verdict),
+        cls: verdictBadgeClass(verdict),
+        reasonLabel: null,
+        tooltip: verdictTooltip(verdict),
+      };
+    }
+
+    const notEvaluated = (kind, reasonLabel, tooltip) => ({
+      key: "not_evaluated",
+      kind,
+      label: "not evaluated",
+      cls: kind === "triage_skipped" ? "badge-muted" : "badge-yellow",
+      reasonLabel,
+      tooltip,
+    });
+
+    if (status === "interrupted") {
+      return notEvaluated(
+        "interrupted",
+        "interrupted",
+        "The run was interrupted before verification completed, so it has no evaluation outcome. Any completed stages remain inspectable."
+      );
+    }
+
+    if (status.startsWith("stopped_after_")) {
+      const stage = status.slice("stopped_after_".length);
+      return notEvaluated(
+        "stopped",
+        `stopped after ${stage}`,
+        `The run was intentionally ended after ${stage} via --stop-after. Verification was not meant to run, so there is no evaluation outcome.`
+      );
+    }
+
+    if (isTriageSkipped(run)) {
+      const reason = triageSkipLabel(run.triage_status);
+      return notEvaluated(
+        "triage_skipped",
+        `triage: ${reason}`,
+        `Triage did not admit this commit (${run.triage_status}: ${reason}), so synthesis and verification never ran. The stored "verification_missing" verdict only records that no verification evidence exists; it is not a failed evaluation.`
+      );
+    }
+
+    if (status === "failed") {
+      const stage = failureStage(run);
+      return notEvaluated(
+        "failed",
+        stage ? `failed at ${stage}` : "pipeline failed",
+        stage
+          ? `The pipeline failed at the ${stage} stage before verification, so there is no evaluation outcome.`
+          : "The pipeline failed before verification, so there is no evaluation outcome."
+      );
+    }
+
+    return notEvaluated(
+      "unknown",
+      status,
+      `No evaluation outcome is available (run status: ${status}).`
+    );
+  }
+
+  /**
+   * Execution lifecycle, separate from the evaluation outcome. A triage
+   * discard ends the run as "failed" in the database, but that is a filtering
+   * decision, not a pipeline failure, so it is shown as "stopped at triage".
+   */
+  function deriveLifecycle(run) {
+    const status = run.status || "unknown";
+
+    if (status === "running") {
+      return {
+        label: "running",
+        cls: "badge-blue",
+        tooltip: "Pipeline execution is currently in progress.",
+      };
+    }
+    if (status === "success") {
+      return {
+        label: "completed",
+        cls: "badge-green",
+        tooltip: "All pipeline stages completed. The evaluation outcome is shown separately.",
+      };
+    }
+    if (status === "interrupted") {
+      return {
+        label: "interrupted",
+        cls: "badge-yellow",
+        tooltip: "The run was interrupted before it could finish.",
+      };
+    }
+    if (status.startsWith("stopped_after_")) {
+      const stage = status.slice("stopped_after_".length);
+      return {
+        label: `stopped after ${stage}`,
+        cls: "badge-muted",
+        tooltip: `The run was intentionally ended after ${stage} via --stop-after.`,
+      };
+    }
+    if (status === "failed") {
+      if (isTriageSkipped(run)) {
+        return {
+          label: "stopped at triage",
+          cls: "badge-muted",
+          tooltip: "Triage rejected the commit, so the pipeline stopped before synthesis. This is a filtering decision, not a pipeline failure.",
+        };
+      }
+      const stage = failureStage(run);
+      return {
+        label: stage ? `failed at ${stage}` : "failed",
+        cls: "badge-red",
+        tooltip: stage
+          ? `Pipeline execution stopped because the ${stage} stage failed.`
+          : "Pipeline execution stopped due to a stage failure.",
+      };
+    }
+    return {
+      label: status,
+      cls: "badge-muted",
+      tooltip: `Pipeline run status: ${status}`,
+    };
+  }
+
+  function outcomeSummary(run) {
+    const outcome = deriveOutcome(run);
+    return outcome.reasonLabel
+      ? `${outcome.label} (${outcome.reasonLabel})`
+      : outcome.label;
   }
 
   const CONFIG_PILL_TOOLTIPS = {
@@ -278,14 +497,21 @@
   }
 
   function populateFilterOptions() {
-    const verdicts = [...new Set(state.runs.map((r) => r.verdict || "unknown"))].sort();
+    const outcomes = new Map();
+    for (const r of state.runs) {
+      const outcome = deriveOutcome(r);
+      if (!outcomes.has(outcome.key)) {
+        outcomes.set(outcome.key, outcome.kind === "evaluated" ? outcome.label : (outcome.key === "not_evaluated" ? "not evaluated" : outcome.label));
+      }
+    }
+    const outcomeKeys = [...outcomes.keys()].sort((a, b) => outcomes.get(a).localeCompare(outcomes.get(b)));
     const guardrails = [...new Set(state.runs.map((r) => r.guardrails_mode || "unknown"))].sort();
     const triageModes = [...new Set(state.runs.map((r) => r.key_config?.triage_mode || "manifest"))].sort();
 
     const vf = $("verdictFilter");
     const prevV = vf.value;
-    vf.innerHTML = `<option value="">All verdicts</option>` + verdicts.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
-    vf.value = verdicts.includes(prevV) ? prevV : "";
+    vf.innerHTML = `<option value="">All outcomes</option>` + outcomeKeys.map((k) => `<option value="${esc(k)}">${esc(outcomes.get(k))}</option>`).join("");
+    vf.value = outcomeKeys.includes(prevV) ? prevV : "";
 
     const gf = $("guardrailFilter");
     const prevG = gf.value;
@@ -305,7 +531,7 @@
     const tf = $("triageModeFilter").value;
 
     return state.runs.filter((r) => {
-      if (vf && (r.verdict || "unknown") !== vf) return false;
+      if (vf && deriveOutcome(r).key !== vf) return false;
       if (gf && (r.guardrails_mode || "unknown") !== gf) return false;
       if (tf && (r.key_config?.triage_mode || "manifest") !== tf) return false;
       if (q) {
@@ -327,15 +553,15 @@
 
   function renderRunCardHtml(r, isChild = false) {
     const active = r.run_id === state.selectedRunId ? "active" : "";
-    const verdict = r.verdict || r.status;
+    const outcome = deriveOutcome(r);
     const dots = STAGE_ORDER.map((stName) => {
       const matches = (r.steps || []).filter((s) => s.step_name === stName);
       const latest = matches[matches.length - 1];
       if (!latest) return `<span class="stage-mini-dot" title="${esc(stName)}: not run"></span>`;
-      const cls = stepState(latest);
+      const cls = stageState(r, latest);
       const cached = latest.cache_hit ? " cached" : "";
-      const stLabel = { ok: "ok", fail: "failed", running: "running" }[cls];
-      return `<span class="stage-mini-dot ${cls}${cached}" title="${esc(stName)}: ${stLabel}${latest.cache_hit ? " (cached)" : ""}"></span>`;
+      const stateLabel = { ok: "ok", fail: "failed", running: "running", skip: "skipped" }[cls];
+      return `<span class="stage-mini-dot ${cls}${cached}" title="${esc(stName)}: ${stateLabel}${latest.cache_hit ? " (cached)" : ""}"></span>`;
     }).join("");
 
     const triageMode = r.key_config?.triage_mode || "manifest";
@@ -344,8 +570,9 @@
       <div class="run-card ${isChild ? "batch-child" : ""} ${active}" data-run-id="${esc(r.run_id)}">
         <div class="run-card-top">
           <span class="run-card-bench" title="${esc(r.benchmark_id)}">${esc(r.benchmark_id)}</span>
-          <span class="badge ${verdictBadgeClass(r.verdict)}" title="${esc(verdictTooltip(r.verdict))}">${esc(verdict)}</span>
+          <span class="badge ${outcome.cls}" title="${esc(outcome.tooltip)}">${esc(outcome.label)}</span>
         </div>
+        ${outcome.reasonLabel ? `<div class="run-card-outcome-reason"><span class="badge badge-muted" title="${esc(outcome.tooltip)}">${esc(outcome.reasonLabel)}</span></div>` : ""}
         <div class="run-card-id" title="Started: ${esc(fmtTs(r.started_at))}">${esc(r.run_id.slice(0, 8))} &middot; ${esc(fmtTs(r.started_at))}</div>
         <div class="run-card-meta">
           <span class="badge badge-muted" title="Triage mode: ${esc(triageMode)}">${esc(triageMode)}</span>
@@ -395,19 +622,22 @@
       const first = runs[0];
       const repoLabel = (first.benchmark_id || "").replace(/-[0-9a-f]{6,}$/i, "") || first.repo_name || "crawl";
       const totalTokens = runs.reduce((acc, r) => acc + (r.llm_stats?.total_tokens || 0), 0);
-      const passCount = runs.filter((r) => r.verdict === "PASS").length;
-      const failCount = runs.filter((r) => r.verdict && r.verdict !== "PASS").length;
-      const discardedCount = runs.filter((r) => r.triage_status === "discarded" || (r.discard_reason && r.discard_reason !== "")).length;
-      const runningCount = runs.filter((r) => r.status === "running").length;
+      const outcomes = runs.map((r) => deriveOutcome(r));
+      const passCount = outcomes.filter((o) => o.key === "full_success" || o.key === "partial_success_regression_only").length;
+      const failCount = outcomes.filter((o) => o.kind === "evaluated" && o.key !== "full_success" && o.key !== "partial_success_regression_only").length;
+      const skippedCount = outcomes.filter((o) => o.kind === "triage_skipped").length;
+      const incompleteCount = outcomes.filter((o) => ["failed", "interrupted", "stopped", "unknown"].includes(o.kind)).length;
+      const runningCount = outcomes.filter((o) => o.kind === "running").length;
       const hasSelected = runs.some((r) => r.run_id === state.selectedRunId);
       const isExpanded = searchActive || hasSelected || state.expandedBatches.has(item.batchId);
       const isActiveBatch = state.viewMode === "matrix" && state.selectedBatchId === item.batchId;
 
       const summaryPills = [
-        passCount ? `<span class="badge badge-pass">${passCount} pass</span>` : "",
-        failCount ? `<span class="badge badge-fail">${failCount} fail</span>` : "",
-        discardedCount ? `<span class="badge badge-muted">${discardedCount} discarded</span>` : "",
-        runningCount ? `<span class="badge badge-running">${runningCount} running</span>` : "",
+        passCount ? `<span class="badge badge-green">${passCount} pass</span>` : "",
+        failCount ? `<span class="badge badge-red">${failCount} evaluated fail</span>` : "",
+        skippedCount ? `<span class="badge badge-muted">${skippedCount} triage skip</span>` : "",
+        incompleteCount ? `<span class="badge badge-yellow">${incompleteCount} incomplete</span>` : "",
+        runningCount ? `<span class="badge badge-blue">${runningCount} running</span>` : "",
       ].filter(Boolean).join("");
 
       const childrenHtml = isExpanded
@@ -498,13 +728,15 @@
     const r = state.runDetail;
     const kc = r.key_config || {};
 
-    $("hdrVerdictBadge").className = `badge ${verdictBadgeClass(r.verdict)}`;
-    $("hdrVerdictBadge").textContent = r.verdict || "unknown";
-    $("hdrVerdictBadge").title = verdictTooltip(r.verdict);
+    const outcome = deriveOutcome(r);
+    $("hdrVerdictBadge").className = `badge ${outcome.cls}`;
+    $("hdrVerdictBadge").textContent = outcome.label;
+    $("hdrVerdictBadge").title = outcome.tooltip;
 
-    $("hdrStatusBadge").className = `badge ${statusBadgeClass(r.status)}`;
-    $("hdrStatusBadge").textContent = `run: ${r.status}`;
-    $("hdrStatusBadge").title = statusTooltip(r.status);
+    const lifecycle = deriveLifecycle(r);
+    $("hdrStatusBadge").className = `badge ${lifecycle.cls}`;
+    $("hdrStatusBadge").textContent = `run: ${lifecycle.label}`;
+    $("hdrStatusBadge").title = lifecycle.tooltip;
 
     $("hdrBenchmark").textContent = r.benchmark_id;
     $("hdrRunId").textContent = r.run_id;
@@ -606,10 +838,11 @@
           </div>
         `;
       }
-      const dotCls = stepState(latest);
+      const dotCls = stageState(state.runDetail, latest);
       const dur = fmtDuration(latest.started_at, latest.completed_at);
       const turns = latest.turns_taken ? `${latest.turns_taken}t` : "";
       const attBadge = attempts.length > 1 ? ` (${attempts.length} att)` : "";
+      const stateLabel = dotCls === "skip" ? "skipped" : (dotCls === "running" ? "running" : (latest.cache_hit ? "cached" : (latest.success ? "passed" : "failed")));
       return `
         <button class="step-card ${active}" data-step-name="${esc(name)}">
           <div class="step-card-top">
@@ -617,7 +850,7 @@
             <span class="stage-dot ${dotCls}"></span>
           </div>
           <div class="step-card-sub">
-            <span>${latest.cache_hit ? "cached" : ({ ok: "passed", fail: "failed", running: "running" }[dotCls])}</span>
+            <span>${stateLabel}</span>
             <span>${esc(turns)} ${esc(dur)}</span>
           </div>
         </button>
@@ -651,7 +884,8 @@
     }
     insp.classList.remove("hidden");
 
-    $("stageStatusIcon").className = `stage-dot ${stepState(step)}`;
+    const stepSkipped = isSkippedStep(state.runDetail, step);
+    $("stageStatusIcon").className = `stage-dot ${stepSkipped ? "skip" : stepState(step)}`;
     $("stageTitle").textContent = step.step_name;
 
     const cacheBadge = $("stageCacheBadge");
@@ -687,7 +921,11 @@
     if (attempts.length > 1) {
       attWrap.classList.remove("hidden");
       const sel = $("attemptSelector");
-      sel.innerHTML = attempts.map((a) => `<option value="${esc(a.step_id)}">#${a.attempt_number} (${{ ok: "ok", fail: "fail", running: "running" }[stepState(a)]})</option>`).join("");
+      sel.innerHTML = attempts.map((a) => {
+        const attemptState = stageState(state.runDetail, a);
+        const label = { ok: "ok", fail: "fail", running: "running", skip: "skipped" }[attemptState];
+        return `<option value="${esc(a.step_id)}">#${a.attempt_number} (${label})</option>`;
+      }).join("");
       sel.value = step.step_id;
     } else {
       attWrap.classList.add("hidden");
@@ -854,7 +1092,11 @@
         <table class="kv-table">
           <tr><th>Step ID</th><td><code>${esc(step.step_id)}</code></td></tr>
           <tr><th>Attempt</th><td>${esc(step.attempt_number)}</td></tr>
-          <tr><th>Success</th><td>${isStepRunning(step) ? `<span class="badge badge-yellow">running</span>` : `<span class="badge ${step.success ? "badge-green" : "badge-red"}">${step.success ? "true" : "false"}</span>`}</td></tr>
+          <tr><th>Success</th><td>${isSkippedStep(state.runDetail, step)
+            ? `<span class="badge badge-muted" title="The stage did not fail; triage rejected the commit, which is a filtering decision.">skipped (triage discard)</span>`
+            : isStepRunning(step)
+              ? `<span class="badge badge-yellow">running</span>`
+              : `<span class="badge ${step.success ? "badge-green" : "badge-red"}">${step.success ? "true" : "false"}</span>`}</td></tr>
           <tr><th>Cache Hit</th><td>${step.cache_hit ? "Yes" : "No"}</td></tr>
           ${step.cache_hit ? `<tr><th>Cache Origin</th><td>${step.cache_origin
             ? `<button class="link-btn cache-origin-link" data-origin-run="${esc(step.cache_origin.run_id)}">${esc(step.cache_origin.run_id.slice(0, 8))}</button> <span class="muted">(${esc(step.cache_origin.benchmark_id)} · ${esc(fmtTs(step.cache_origin.started_at))})</span>`
@@ -941,6 +1183,7 @@
       const kc = r.key_config || {};
       const provenance = tm.source_provenance || kc.triage_mode || "manifest";
       const triageStatus = r.triage_status || (isStepRunning(step) ? "running" : (step.success ? "verified" : "discarded"));
+      const triageMeta = triageStatusMeta(triageStatus);
       const discardReason = r.discard_reason || tm.discard_reason || "-";
       const classification = r.classification || tm.llm_classification || "-";
       const score = r.bugfix_score ?? tm.bugfix_score;
@@ -955,7 +1198,7 @@
           <h4>Triage Details (<span class="badge badge-muted">${esc(provenance)}</span>)</h4>
           <table class="data-table">
             <tbody>
-              <tr><th>Triage Status</th><td><code>${esc(triageStatus)}</code></td><th>Discard Reason</th><td><code>${esc(discardReason)}</code></td></tr>
+              <tr><th>Triage Status</th><td><span class="badge ${triageMeta.cls}" title="${esc(triageMeta.tooltip)}">${esc(triageMeta.label)}</span> <code class="muted">${esc(triageStatus)}</code></td><th>Discard Reason</th><td><code>${esc(discardReason)}</code></td></tr>
               <tr><th>Classification</th><td><code>${esc(classification)}</code></td><th>Bugfix Score</th><td>${score !== null && score !== undefined ? `<code>${esc(score)}</code>${threshold !== null && threshold !== undefined ? ` (threshold: <code>${esc(threshold)}</code>)` : ""}` : "-"}</td></tr>
               <tr><th>Regression Test</th><td colspan="3"><code>${esc(regTest)}</code></td></tr>
               <tr><th>Path Audit</th><td><code>${esc(tm.path_audit_result || "-")}</code></td><th>C-1 Build</th><td><code>${esc(tm.c1_build_status || "-")}</code></td></tr>
@@ -1671,7 +1914,7 @@
     sel.innerHTML = `<option value="">None (view current run only)</option>` +
       state.runs
         .filter((r) => r.run_id !== state.selectedRunId)
-        .map((r) => `<option value="${esc(r.run_id)}">${esc(r.benchmark_id)} (${esc(r.run_id.slice(0, 8))} · ${esc(r.verdict || r.status)})</option>`)
+        .map((r) => `<option value="${esc(r.run_id)}">${esc(r.benchmark_id)} (${esc(r.run_id.slice(0, 8))} · ${esc(outcomeSummary(r))})</option>`)
         .join("");
     sel.value = prev && state.runs.some((r) => r.run_id === prev) ? prev : "";
   }
@@ -1900,9 +2143,9 @@
   function renderMatrixCell(run, stageName) {
     const st = latestStep(run, stageName);
     if (!st) return `<td class="matrix-cell"><span class="muted">-</span></td>`;
-    const state = stepState(st);
-    const cls = { ok: "badge-ok", fail: "badge-fail", running: "badge-yellow" }[state];
-    const label = state;
+    const stageStatus = stageState(run, st);
+    const cls = { ok: "badge-green", fail: "badge-red", running: "badge-yellow", skip: "badge-muted" }[stageStatus];
+    const label = stageStatus;
     const cached = st.cache_hit ? " (C)" : "";
     const tok = st.total_tokens ? ` · ${fmtNum(st.total_tokens)}t` : "";
     return `
@@ -1921,7 +2164,7 @@
       runs = runs.filter((r) => r.batch_id === state.selectedBatchId);
     }
     if (state.hideDiscardedInMatrix) {
-      runs = runs.filter((r) => r.triage_status !== "discarded" && !(r.discard_reason && r.discard_reason !== ""));
+      runs = runs.filter((r) => !isTriageSkipped(r));
     }
     const stage = state.matrixStage;
 
@@ -1941,14 +2184,14 @@
               <th>Commit / Benchmark</th>
               <th>Triage</th>
               ${STAGE_ORDER.map((s) => `<th><button class="matrix-col-btn" data-matrix-stage="${esc(s)}" title="Focus on ${esc(s)} across all commits">${esc(s)}</button></th>`).join("")}
-              <th>Verdict</th>
+              <th>Outcome</th>
               <th>Tokens</th>
             </tr>
           </thead>
           <tbody>
             ${runs.map((r) => {
               const mode = r.key_config?.triage_mode || "manifest";
-              const verdict = r.verdict || r.status || "-";
+              const outcome = deriveOutcome(r);
               const tokens = r.llm_stats?.total_tokens ? fmtNum(r.llm_stats.total_tokens) : "0";
               return `
                 <tr>
@@ -1960,7 +2203,10 @@
                   </td>
                   <td><span class="badge badge-muted">${esc(mode)}</span></td>
                   ${STAGE_ORDER.map((s) => renderMatrixCell(r, s)).join("")}
-                  <td><span class="badge ${verdictBadgeClass(r.verdict)}">${esc(verdict)}</span></td>
+                  <td>
+                    <span class="badge ${outcome.cls}" title="${esc(outcome.tooltip)}">${esc(outcome.label)}</span>
+                    ${outcome.reasonLabel ? `<div class="muted" style="font-size:11px;margin-top:2px;">${esc(outcome.reasonLabel)}</div>` : ""}
+                  </td>
                   <td>${esc(tokens)}</td>
                 </tr>
               `;
@@ -1987,6 +2233,8 @@
             ${runs.map((r) => {
               const st = latestStep(r, "triage");
               const mode = r.key_config?.triage_mode || "manifest";
+              const triageStatus = r.triage_status || (st ? (isStepRunning(st) ? "running" : (st.success ? "verified" : "discarded")) : "pending");
+              const triageMeta = triageStatusMeta(triageStatus);
               const regTest = r.regression_test_class
                 ? `${r.regression_test_class.split(".").pop()}.${r.regression_test_method || ""}`
                 : "-";
@@ -1994,7 +2242,7 @@
                 <tr class="matrix-focus-row" data-run-id="${esc(r.run_id)}" data-stage="triage">
                   <td><strong>${esc(r.benchmark_id)}</strong> <span class="muted" style="font-size:11px;">${esc((r.commit_hash || "").slice(0, 8))}</span></td>
                   <td><span class="badge badge-muted">${esc(mode)}</span></td>
-                  <td><code>${esc(r.triage_status || (st ? (isStepRunning(st) ? "running" : (st.success ? "verified" : "discarded")) : "not_run"))}</code></td>
+                  <td><span class="badge ${triageMeta.cls}" title="${esc(triageMeta.tooltip)}">${esc(triageMeta.label)}</span></td>
                   <td><code>${esc(r.classification || "-")}</code></td>
                   <td>${r.bugfix_score !== null && r.bugfix_score !== undefined ? `<code>${esc(r.bugfix_score)}</code>` : "-"}</td>
                   <td><code>${esc(r.discard_reason || "-")}</code></td>
@@ -2019,16 +2267,17 @@
               <th>Checker Runs</th>
               <th>Diagnostics</th>
               <th>Test Runs</th>
-              <th>Verdict / Notes</th>
+              <th>Outcome / Notes</th>
             </tr>
           </thead>
           <tbody>
             ${runs.map((r) => {
               const st = latestStep(r, stage);
+              const outcome = deriveOutcome(r);
               const statusBadge = !st
                 ? `<span class="muted">not run</span>`
-                : `<span class="badge ${{ ok: "badge-ok", fail: "badge-fail", running: "badge-yellow" }[stepState(st)]}">${stepState(st)}</span>`;
-              const note = st?.compiler_diagnostics ? st.compiler_diagnostics.slice(0, 80) : (r.verdict || "");
+                : `<span class="badge ${{ ok: "badge-green", fail: "badge-red", running: "badge-yellow", skip: "badge-muted" }[stageState(r, st)]}">${stageState(r, st)}</span>`;
+              const note = st?.compiler_diagnostics ? st.compiler_diagnostics.slice(0, 80) : [outcome.label, outcome.reasonLabel].filter(Boolean).join(" · ");
               return `
                 <tr class="matrix-focus-row" data-run-id="${esc(r.run_id)}" data-stage="${esc(stage)}">
                   <td><strong>${esc(r.benchmark_id)}</strong> <span class="muted" style="font-size:11px;">${esc((r.commit_hash || "").slice(0, 8))}</span></td>
@@ -2061,7 +2310,7 @@
         <div class="matrix-stage-pills">
           <label class="checkbox-inline" style="margin-right:8px;font-size:12px;">
             <input type="checkbox" id="matrixHideDiscarded" ${state.hideDiscardedInMatrix ? "checked" : ""} />
-            <span>Hide discarded</span>
+            <span>Hide triage skips</span>
           </label>
           ${stagePills}
         </div>
