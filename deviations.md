@@ -195,3 +195,10 @@ the crawler) are not listed unless the code had to interpret the plan.
     read `project_config.yaml` from the process working directory instead of
     the `--config` path, and `verify-benchmark` delegates to `run` rather than
     offering a triage-only check.
+37. **Benchmark contamination is detected, not sandboxed.** Agents are not
+    OS-isolated and can reach the benchmark checkout by absolute path; a live
+    synthesis run did modify the synthetic submodule. `run` now refuses to
+    start on a dirty benchmark tree, and each agent stage rolls back and halts
+    if it detects a post-invocation change. Prompts also forbid subagents and
+    writes outside the stage workspace. A real filesystem sandbox remains
+    future work.
