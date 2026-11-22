@@ -132,16 +132,41 @@
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   }
 
-  function fmtDuration(startIso, endIso) {
-    if (!startIso || !endIso) return "-";
-    const ms = new Date(endIso) - new Date(startIso);
-    if (Number.isNaN(ms) || ms < 0) return "-";
+  function fmtDurationMs(ms) {
     if (ms < 1000) return `${ms}ms`;
     const s = Math.floor(ms / 1000);
     if (s < 60) return `${s}s`;
     const m = Math.floor(s / 60);
     const remS = s % 60;
     return `${m}m ${remS}s`;
+  }
+
+  function fmtDuration(startIso, endIso) {
+    if (!startIso || !endIso) return "-";
+    const ms = new Date(endIso) - new Date(startIso);
+    if (Number.isNaN(ms) || ms < 0) return "-";
+    return fmtDurationMs(ms);
+  }
+
+  /** Format an elapsed time that may still be growing (used for running stages). */
+  function fmtElapsed(startIso, nowMs = Date.now()) {
+    if (!startIso) return "-";
+    const ms = nowMs - new Date(startIso).getTime();
+    if (Number.isNaN(ms)) return "-";
+    return fmtDurationMs(Math.max(0, ms));
+  }
+
+  /**
+   * Elapsed-time markup that keeps ticking. Every [data-live-start] element is
+   * refreshed once per second by the live clock, so running stages show a
+   * counter without needing a full re-render.
+   */
+  function liveDurationHtml(startIso) {
+    return `<span class="live-duration" data-live-start="${esc(startIso || "")}" title="Elapsed time; updates every second while still running.">${esc(fmtElapsed(startIso))}</span>`;
+  }
+
+  function durationHtml(startIso, endIso, live = false) {
+    return live ? liveDurationHtml(startIso) : esc(fmtDuration(startIso, endIso));
   }
 
   function fmtTs(iso) {
@@ -822,8 +847,10 @@
       0
     );
 
+    const runDuration = durationHtml(r.started_at, r.completed_at, r.status === "running" && !r.completed_at);
+
     $("hdrMetrics").innerHTML = `
-      <span>Duration: <strong>${esc(fmtDuration(r.started_at, r.completed_at))}</strong></span>
+      <span>Duration: <strong>${runDuration}</strong></span>
       <span>Tokens: <strong>${esc(fmtNum(totalTokens))}</strong></span>
       <span>LLM Latency: <strong>${esc(fmtNum(totalLatency))} ms</strong></span>
       ${r.remaining_type_errors !== null && r.remaining_type_errors !== undefined ? `<span>Remaining Errors: <strong>${esc(r.remaining_type_errors)}</strong></span>` : ""}
@@ -915,7 +942,7 @@
         `;
       }
       const dotCls = stageState(state.runDetail, latest);
-      const dur = fmtDuration(latest.started_at, latest.completed_at);
+      const dur = durationHtml(latest.started_at, latest.completed_at, isStepRunning(latest));
       const turns = latest.turns_taken ? `${latest.turns_taken}t` : "";
       const attBadge = attempts.length > 1 ? ` (${attempts.length} att)` : "";
       const stateLabel = dotCls === "skip" ? "skipped" : (dotCls === "running" ? "running" : (dotCls === "warn" ? "incomplete" : (latest.cache_hit ? "cached" : (latest.success ? "completed" : "failed"))));
@@ -927,7 +954,7 @@
           </div>
           <div class="step-card-sub">
             <span>${stateLabel}</span>
-            <span>${esc(turns)} ${esc(dur)}</span>
+            <span>${esc(turns)} ${dur}</span>
           </div>
         </button>
       `;
@@ -984,7 +1011,10 @@
       cacheBadge.classList.add("hidden");
     }
 
-    $("stageDuration").textContent = `${fmtDuration(step.started_at, step.completed_at)} (${fmtTs(step.started_at)})`;
+    const startedLabel = `(${esc(fmtTs(step.started_at))})`;
+    $("stageDuration").innerHTML = isStepRunning(step)
+      ? `${liveDurationHtml(step.started_at)} ${startedLabel}`
+      : `${esc(fmtDuration(step.started_at, step.completed_at))} ${startedLabel}`;
     $("stageStats").textContent = [
       step.turns_taken ? `${step.turns_taken} turns` : null,
       step.total_tokens ? `${fmtNum(step.total_tokens)} tokens` : null,
@@ -2443,6 +2473,24 @@
     }).join("");
   }
 
+  // ---- Live duration clock ----
+  // Running stages render [data-live-start] placeholders. One timer updates
+  // them in place, so counters advance without a re-render (which would reset
+  // scroll position and focus).
+  const LIVE_CLOCK_MS = 1000;
+
+  function tickLiveDurations() {
+    const now = Date.now();
+    document.querySelectorAll("[data-live-start]").forEach((el) => {
+      el.textContent = fmtElapsed(el.dataset.liveStart, now);
+    });
+  }
+
+  function startLiveClock() {
+    tickLiveDurations();
+    setInterval(tickLiveDurations, LIVE_CLOCK_MS);
+  }
+
   // ---- Auto-refresh ----
   function setupAutoRefresh() {
     const toggle = $("autoRefreshToggle");
@@ -2612,10 +2660,11 @@
     const label = stageStatus;
     const cached = st.cache_hit ? " (C)" : "";
     const tok = st.total_tokens ? ` · ${fmtNum(st.total_tokens)}t` : "";
+    const timing = isStepRunning(st) ? ` · ${liveDurationHtml(st.started_at)}` : "";
     return `
       <td class="matrix-cell">
         <button class="matrix-cell-btn" data-run-id="${esc(run.run_id)}" data-stage="${esc(stageName)}" title="Inspect ${esc(stageName)} for ${esc(run.benchmark_id)}">
-          <span class="badge ${cls}">${label}${cached}</span>${tok ? `<span class="muted" style="font-size:11px;">${esc(tok)}</span>` : ""}
+          <span class="badge ${cls}">${label}${cached}</span>${tok || timing ? `<span class="muted" style="font-size:11px;">${esc(tok)}${timing}</span>` : ""}
         </button>
       </td>
     `;
@@ -2884,6 +2933,7 @@
     $("placementDiffCopyBtn").addEventListener("click", () => copyText(state.placementDiffText || "", $("placementDiffCopyBtn")));
 
     setupAutoRefresh();
+    startLiveClock();
     apiGet("/api/telemetry").then((data) => { state.telemetry = data; if (state.viewMode === "matrix") renderMatrixView(); }).catch(() => {});
     loadRuns(false).catch((err) => {
       $("runsCount").textContent = `Error: ${err.message}`;

@@ -305,6 +305,11 @@ code, pre {
   color: var(--text-muted);
 }
 
+/* Running-stage timers that tick once per second. */
+.live-duration {
+  font-variant-numeric: tabular-nums;
+}
+
 .copyable {
   cursor: pointer;
   padding: 2px 6px;
