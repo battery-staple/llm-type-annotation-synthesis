@@ -672,6 +672,38 @@ code, pre {
   text-decoration: underline;
 }
 
+/* Annotation placement rows open a method-level diff */
+.placement-row {
+  cursor: pointer;
+}
+
+.placement-row:hover td,
+.placement-row:focus td {
+  background: var(--bg-hover);
+}
+
+.placement-row:hover td:first-child,
+.placement-row:focus td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.placement-row:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.placement-diff-link {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.placement-row:hover .placement-diff-link,
+.placement-row:focus .placement-diff-link {
+  text-decoration: underline;
+}
+
 /* Diff Viewer */
 .diff-toolbar {
   display: flex;
@@ -1005,6 +1037,59 @@ code, pre {
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.modal-wide {
+  width: min(1100px, 94vw);
+}
+
+#placementDiffTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-subheader {
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.placement-diff-body {
+  padding: 0;
+  white-space: normal;
+  word-break: normal;
+}
+
+.placement-diff-body .diff-file {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+
+.placement-diff-body .diff-file + .diff-file {
+  border-top: 1px solid var(--border);
+}
+
+.placement-diff-body .diff-file-header {
+  cursor: default;
+}
+
+.placement-diff-note {
+  padding: 14px;
+}
+
+.placement-snippet {
+  margin: 0 14px 14px;
+  padding: 10px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre;
 }
 
 /* View Toggle & Stage Matrix */

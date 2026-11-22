@@ -22,6 +22,8 @@
     selectedBatchId: null,
     expandedBatches: new Set(),
     hideDiscardedInMatrix: false,
+    placementDiffText: "",
+    placementDiffRequest: 0,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -1228,15 +1230,18 @@
           <table class="data-table">
             <thead><tr><th>File</th><th>Line</th><th>Symbol</th><th>Qualifier</th><th>Tier</th></tr></thead>
             <tbody>
-              ${step.annotation_placements.map((p) => `
-                <tr>
+              ${step.annotation_placements.map((p) => {
+                const qName = String(p.qualifier || "").trim().replace(/^@+/, "");
+                return `
+                <tr class="placement-row" data-placement-id="${esc(p.placement_id)}" tabindex="0" role="button" title="Show the ${esc(p.symbol)} diff for ${esc(p.file_path)}:${esc(p.line_number)}">
                   <td><code>${esc(p.file_path)}</code></td>
                   <td>${esc(p.line_number)}</td>
-                  <td><code>${esc(p.symbol)}</code></td>
-                  <td><code>@${esc(p.qualifier)}</code></td>
+                  <td><code>${esc(p.symbol)}</code> <span class="placement-diff-link" title="View method diff">&#8599;</span></td>
+                  <td><code>@${esc(qName)}</code></td>
                   <td>${esc(p.target_tier ?? "-")}</td>
                 </tr>
-              `).join("")}
+              `;
+              }).join("")}
             </tbody>
           </table>
         </div>
@@ -1263,6 +1268,17 @@
       });
       el.addEventListener("mouseleave", () => {
         container.querySelectorAll(`[data-qual="${CSS.escape(qName)}"]`).forEach((m) => m.classList.remove("highlight"));
+      });
+    });
+
+    container.querySelectorAll(".placement-row").forEach((row) => {
+      const open = () => openPlacementDiff(step, row.dataset.placementId);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          open();
+        }
       });
     });
 
@@ -1384,6 +1400,78 @@
         if (body) body.classList.toggle("hidden");
       });
     });
+  }
+
+  // ---- Annotation Placement Method Diff Modal ----
+  function renderModalDiff(diffText) {
+    const files = parseUnifiedDiff(diffText);
+    if (!files.length) {
+      return `<div class="placement-diff-note muted">No diff content.</div>`;
+    }
+    return files.map((f) => `
+      <div class="diff-file">
+        <div class="diff-file-header">
+          <span>${esc(f.name)}</span>
+          <span>
+            <span class="badge badge-green">+${f.adds}</span>
+            <span class="badge badge-red">-${f.dels}</span>
+          </span>
+        </div>
+        <div class="diff-lines">
+          ${f.rows.map((r) => `
+            <div class="diff-line ${esc(r.type)}">
+              <span class="diff-ln">${esc(r.oldLn)}</span>
+              <span class="diff-ln">${esc(r.newLn)}</span>
+              <span>${esc(r.text)}</span>
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `).join("");
+  }
+
+  async function openPlacementDiff(step, placementId) {
+    const placement = (step.annotation_placements || []).find((p) => p.placement_id === placementId);
+    const modal = $("placementDiffModal");
+    if (!placement || !modal) return;
+
+    const qName = String(placement.qualifier || "").trim().replace(/^@+/, "");
+    const body = $("placementDiffBody");
+    modal.classList.remove("hidden");
+    $("placementDiffTitle").textContent = `${placement.file_path}:${placement.line_number}`;
+    $("placementDiffMeta").textContent = `${placement.symbol} · @${qName}`;
+    body.innerHTML = `<div class="placement-diff-note muted">Loading method diff…</div>`;
+    state.placementDiffText = "";
+    const requestId = state.placementDiffRequest + 1;
+    state.placementDiffRequest = requestId;
+
+    const url = `/api/runs/${encodeURIComponent(state.selectedRunId)}/steps/${encodeURIComponent(step.step_id)}/placement-diff?placement_id=${encodeURIComponent(placementId)}`;
+    try {
+      const res = await apiGet(url);
+      if (state.placementDiffRequest !== requestId) return;
+      const qualifier = String(res.qualifier || "").trim().replace(/^@+/, "");
+      const memberLabel = res.member_kind === "method"
+        ? `method ${res.member_name || "?"}()`
+        : `${res.member_kind || "member"} ${res.member_name || "?"}`;
+      const qualifierLabel = qualifier ? `@${qualifier}` : null;
+      const symbolLabel = res.symbol && res.symbol !== res.member_kind ? res.symbol : null;
+      $("placementDiffTitle").textContent = `${res.file_path}:${res.line_number}`;
+      $("placementDiffMeta").textContent = [memberLabel, qualifierLabel, symbolLabel].filter(Boolean).join(" · ");
+
+      if (res.has_diff && res.diff) {
+        body.innerHTML = renderModalDiff(res.diff);
+        state.placementDiffText = res.diff;
+      } else {
+        const note = res.note || "No diff is available for this placement.";
+        const snippet = res.snippet
+          ? `<pre class="code-block placement-snippet">${esc(res.snippet)}</pre>`
+          : "";
+        body.innerHTML = `<div class="placement-diff-note muted">${esc(note)}</div>${snippet}`;
+      }
+    } catch (err) {
+      if (state.placementDiffRequest !== requestId) return;
+      body.innerHTML = `<div class="placement-diff-note muted">Failed to load diff: ${esc(err.message)}</div>`;
+    }
   }
 
   // ---- Stage Tab: Transcript & Turns ----
@@ -2049,9 +2137,15 @@
   }
 
   function handleKeyDown(e) {
-    if (e.key === "Escape" && !$("artifactModal").classList.contains("hidden")) {
-      $("artifactModal").classList.add("hidden");
-      return;
+    if (e.key === "Escape") {
+      if (!$("artifactModal").classList.contains("hidden")) {
+        $("artifactModal").classList.add("hidden");
+        return;
+      }
+      if (!$("placementDiffModal").classList.contains("hidden")) {
+        $("placementDiffModal").classList.add("hidden");
+        return;
+      }
     }
 
     const tag = (e.target?.tagName || "").toLowerCase();
@@ -2407,6 +2501,10 @@
     $("artifactCloseBtn").addEventListener("click", () => $("artifactModal").classList.add("hidden"));
     $("artifactModal").querySelector(".modal-backdrop").addEventListener("click", () => $("artifactModal").classList.add("hidden"));
     $("artifactCopyBtn").addEventListener("click", () => copyText($("artifactModalBody").textContent, $("artifactCopyBtn")));
+
+    $("placementDiffCloseBtn").addEventListener("click", () => $("placementDiffModal").classList.add("hidden"));
+    $("placementDiffModal").querySelector(".modal-backdrop").addEventListener("click", () => $("placementDiffModal").classList.add("hidden"));
+    $("placementDiffCopyBtn").addEventListener("click", () => copyText(state.placementDiffText || "", $("placementDiffCopyBtn")));
 
     setupAutoRefresh();
     loadRuns(false).catch((err) => {

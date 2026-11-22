@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import mimetypes
 import os
+import re
 import sqlite3
+import subprocess
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -103,6 +107,858 @@ def load_cas_transcript(cas_dir: Path | None) -> list[dict[str, Any]]:
             if isinstance(parsed, list):
                 return parsed
     return []
+
+
+# ---------------------------------------------------------------------------
+# Method-level diffs for annotation placements
+# ---------------------------------------------------------------------------
+
+PATCH_ARTIFACT_NAMES = (
+    "annotations.patch",
+    "repair.patch",
+    "diff.patch",
+    "patch.diff",
+    "test_patch.diff",
+)
+
+JAVA_TYPE_RE = re.compile(r"\b(class|interface|enum|record)\s+([A-Za-z_$][\w$]*)")
+JAVA_ANNOTATION_RE = re.compile(r"@[A-Za-z_$][\w$.]*\s*(?:\([^()]*\))?")
+JAVA_MODIFIER_RE = re.compile(
+    r"^(?:public|private|protected|static|final|abstract|sealed|non-sealed|strictfp|"
+    r"class|interface|enum|record)\b"
+)
+
+
+def mask_java_source(content: str) -> str:
+    """Blank out comments, strings, and chars while preserving offsets and newlines.
+
+    Working on the masked text lets the brace-depth and declaration scans ignore
+    punctuation that lives inside comments or literals.
+    """
+
+    chars = list(content)
+    n = len(chars)
+    i = 0
+    state: str | None = None
+    while i < n:
+        c = chars[i]
+        nxt = chars[i + 1] if i + 1 < n else ""
+        if state is None:
+            if c == "/" and nxt == "/":
+                state = "line_comment"
+                chars[i] = chars[i + 1] = " "
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                state = "block_comment"
+                chars[i] = chars[i + 1] = " "
+                i += 2
+                continue
+            if c == '"' and content.startswith('"""', i):
+                state = "text_block"
+                chars[i : i + 3] = [" ", " ", " "]
+                i += 3
+                continue
+            if c == '"':
+                state = "string"
+                chars[i] = " "
+                i += 1
+                continue
+            if c == "'":
+                state = "char"
+                chars[i] = " "
+                i += 1
+                continue
+        else:
+            if state == "line_comment":
+                if c == "\n":
+                    state = None
+                else:
+                    chars[i] = " "
+                i += 1
+                continue
+            if state == "block_comment":
+                if c == "*" and nxt == "/":
+                    chars[i] = chars[i + 1] = " "
+                    state = None
+                    i += 2
+                    continue
+                if c != "\n":
+                    chars[i] = " "
+                i += 1
+                continue
+            if state == "text_block":
+                if content.startswith('"""', i):
+                    chars[i : i + 3] = [" ", " ", " "]
+                    state = None
+                    i += 3
+                    continue
+                if c != "\n":
+                    chars[i] = " "
+                i += 1
+                continue
+            if state in ("string", "char"):
+                if c == "\\":
+                    chars[i] = " "
+                    if i + 1 < n:
+                        chars[i + 1] = " "
+                    i += 2
+                    continue
+                term = '"' if state == "string" else "'"
+                if c == term:
+                    state = None
+                if c != "\n":
+                    chars[i] = " "
+                i += 1
+                continue
+        i += 1
+    return "".join(chars)
+
+
+class JavaSource:
+    """Lightweight structural view of a Java source file.
+
+    It tracks brace depth per line and exposes top-level type bodies plus their
+    members, which is enough to locate the method/field/type containing a
+    placement without running a full Java parser.
+    """
+
+    def __init__(self, content: str):
+        self.content = content
+        self.lines = content.splitlines()
+        self.masked = mask_java_source(content)
+        self.masked_lines = self.masked.splitlines()
+        n = len(self.lines)
+        self.depth_before = [0] * n
+        self.depth_after = [0] * n
+        events: list[tuple[str, int, int, int]] = []  # kind, line, depth, offset
+        depth = 0
+        line = 0
+        for idx, ch in enumerate(self.masked):
+            if ch == "\n":
+                if line < n:
+                    self.depth_after[line] = depth
+                line += 1
+                if line < n:
+                    self.depth_before[line] = depth
+                continue
+            if ch == "{":
+                events.append(("open", line, depth, idx))
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                events.append(("close", line, depth, idx))
+        if n:
+            self.depth_after[n - 1] = depth
+
+        open_by_offset: dict[int, int] = {}
+        stack: list[int] = []
+        pairs: dict[int, int] = {}
+        for event_idx, (kind, _line, _depth, offset) in enumerate(events):
+            if kind == "open":
+                stack.append(event_idx)
+                open_by_offset[offset] = event_idx
+            elif stack:
+                pairs[stack.pop()] = event_idx
+
+        self.types: list[dict[str, Any]] = []
+        for match in JAVA_TYPE_RE.finditer(self.masked):
+            kind, name = match.group(1), match.group(2)
+            brace = self.masked.find("{", match.end())
+            if brace < 0:
+                continue
+            open_idx = open_by_offset.get(brace)
+            if open_idx is None:
+                continue
+            close_idx = pairs.get(open_idx)
+            if close_idx is None:
+                continue
+            decl_line = self.masked.count("\n", 0, match.start())
+            self.types.append(
+                {
+                    "kind": kind,
+                    "name": name,
+                    "decl_line": decl_line,
+                    "open_line": events[open_idx][1],
+                    "close_line": events[close_idx][1],
+                    "member_depth": events[open_idx][2] + 1,
+                }
+            )
+        self._members: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
+
+    def innermost_type(self, line: int) -> dict[str, Any] | None:
+        candidates = [t for t in self.types if t["open_line"] <= line <= t["close_line"]]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda t: t["member_depth"])
+
+    def type_after_line(self, line: int) -> dict[str, Any] | None:
+        candidates = sorted((t for t in self.types if t["open_line"] >= line), key=lambda t: t["open_line"])
+        for type_span in candidates:
+            # A placement on a type annotation sits just above the declaration.
+            # Accept the type only when everything between is annotation/modifier
+            # or comment text, not unrelated statements.
+            ok = True
+            for idx in range(line, min(type_span["decl_line"] + 1, len(self.lines))):
+                original = self.lines[idx].strip()
+                masked = self.masked_lines[idx].strip()
+                if not original:
+                    continue
+                if original.startswith(("@", "/*", "*", "//")):
+                    continue
+                if masked and JAVA_MODIFIER_RE.match(masked):
+                    continue
+                ok = False
+                break
+            if ok:
+                return type_span
+        return None
+
+    def type_start_line(self, type_span: dict[str, Any]) -> int:
+        start = type_span["decl_line"]
+        idx = start - 1
+        while idx >= 0:
+            original = self.lines[idx].strip()
+            masked = self.masked_lines[idx].strip()
+            if not original:
+                start = idx
+                idx -= 1
+                continue
+            if original.startswith(("@", "/*", "*", "//")):
+                start = idx
+                idx -= 1
+                continue
+            if masked and JAVA_MODIFIER_RE.match(masked):
+                start = idx
+                idx -= 1
+                continue
+            break
+        return start
+
+    def members(self, type_span: dict[str, Any]) -> list[tuple[int, int]]:
+        key = (type_span["open_line"], type_span["close_line"], type_span["member_depth"])
+        if key in self._members:
+            return self._members[key]
+
+        limit = type_span["close_line"]
+        depth = type_span["member_depth"]
+        start_idx = type_span["open_line"] + 1
+        if type_span["kind"] == "enum":
+            # Skip the constant list so it does not get merged with the first
+            # real member. Enum constants end at the optional top-level ';'.
+            for idx in range(start_idx, limit):
+                if self.depth_before[idx] == depth and self.masked_lines[idx].strip().endswith(";"):
+                    start_idx = idx + 1
+                    break
+
+        result: list[tuple[int, int]] = []
+        idx = start_idx
+        while idx < limit:
+            if self.depth_before[idx] != depth or not self.masked_lines[idx].strip():
+                idx += 1
+                continue
+            start = idx
+            end = None
+            cursor = idx
+            while cursor < limit:
+                before = self.depth_before[cursor]
+                after = self.depth_after[cursor]
+                stripped = self.masked_lines[cursor].strip()
+                if before < depth:
+                    end = cursor - 1
+                    break
+                if before == depth:
+                    if stripped.startswith("}"):
+                        end = cursor - 1
+                        break
+                    if stripped.endswith(";") and after == depth:
+                        end = cursor
+                        break
+                    if "{" in self.masked_lines[cursor] and after > depth:
+                        close = cursor + 1
+                        while close < limit and self.depth_before[close] > depth:
+                            close += 1
+                        end = close if close < limit else limit - 1
+                        break
+                cursor += 1
+            if end is None:
+                end = limit - 1
+            result.append((start, end))
+            idx = end + 1
+
+        self._members[key] = result
+        return result
+
+    def member_for_line(self, type_span: dict[str, Any], line: int) -> tuple[int, int] | None:
+        for span in self.members(type_span):
+            if span[0] <= line <= span[1]:
+                return span
+        return None
+
+    def member_info(self, span: tuple[int, int]) -> dict[str, Any]:
+        start, end = span
+        joined = " ".join(self.masked_lines[idx].strip() for idx in range(start, end + 1))
+        cut = len(joined)
+        for character in ("{", ";"):
+            found = joined.find(character)
+            if found >= 0:
+                cut = min(cut, found)
+        head = joined[:cut]
+        no_annotations = JAVA_ANNOTATION_RE.sub(" ", head)
+
+        type_match = re.search(r"\b(class|interface|enum|record)\s+([A-Za-z_$][\w$]*)", no_annotations)
+        if type_match:
+            return {"kind": type_match.group(1), "name": type_match.group(2)}
+
+        equals = no_annotations.find("=")
+        paren = no_annotations.find("(")
+        if paren >= 0 and (equals < 0 or equals > paren):
+            method = re.search(r"([A-Za-z_$][\w$]*)\s*\(", no_annotations)
+            return {"kind": "method", "name": method.group(1) if method else None}
+
+        field_text = no_annotations.split("=")[0].replace(",", " ")
+        identifiers = re.findall(r"[A-Za-z_$][\w$]*", field_text)
+        return {"kind": "field", "name": identifiers[-1] if identifiers else None}
+
+
+def find_placement_member(source: JavaSource, line_number: int) -> dict[str, Any] | None:
+    """Return the method, field, or type header that contains a 1-based line."""
+
+    line = line_number - 1
+    type_span = source.innermost_type(line)
+    if type_span is None:
+        type_span = source.type_after_line(line)
+        if type_span is None:
+            return None
+        start = source.type_start_line(type_span)
+        end = type_span["open_line"]
+        return {
+            "kind": type_span["kind"],
+            "name": type_span["name"],
+            "start": start,
+            "end": end,
+            "type_level": True,
+            "type_name": type_span["name"],
+            "type_kind": type_span["kind"],
+            "type_depth": type_span["member_depth"],
+        }
+
+    span = source.member_for_line(type_span, line)
+    if span is None:
+        return None
+    info = source.member_info(span)
+    return {
+        "kind": info["kind"],
+        "name": info["name"],
+        "start": span[0],
+        "end": span[1],
+        "type_level": False,
+        "type_name": type_span["name"],
+        "type_kind": type_span["kind"],
+        "type_depth": type_span["member_depth"],
+    }
+
+
+def find_old_member(
+    source: JavaSource, new_member: dict[str, Any], mapped_old_line: int | None
+) -> dict[str, Any] | None:
+    """Find the corresponding member in the pre-stage source."""
+
+    if new_member["type_level"]:
+        candidates = [
+            t
+            for t in source.types
+            if t["name"] == new_member["type_name"] and t["kind"] == new_member["type_kind"]
+        ]
+        if not candidates:
+            return None
+        type_span = min(candidates, key=lambda t: abs(t["open_line"] - (mapped_old_line or 0)))
+        return {
+            "kind": type_span["kind"],
+            "name": type_span["name"],
+            "start": source.type_start_line(type_span),
+            "end": type_span["open_line"],
+        }
+
+    old_type = None
+    if mapped_old_line is not None:
+        candidate = source.innermost_type(mapped_old_line)
+        if candidate is not None and candidate["name"] == new_member["type_name"]:
+            old_type = candidate
+    if old_type is None:
+        for candidate in source.types:
+            if (
+                candidate["name"] == new_member["type_name"]
+                and candidate["member_depth"] == new_member["type_depth"]
+                and candidate["kind"] == new_member["type_kind"]
+            ):
+                old_type = candidate
+                break
+    if old_type is None:
+        return None
+
+    best: tuple[int, tuple[int, int]] | None = None
+    for span in source.members(old_type):
+        info = source.member_info(span)
+        if info["kind"] != new_member["kind"] or info["name"] != new_member["name"]:
+            continue
+        if mapped_old_line is not None and span[0] <= mapped_old_line <= span[1]:
+            return {"start": span[0], "end": span[1], "kind": info["kind"], "name": info["name"]}
+        distance = abs(span[0] - (mapped_old_line or 0))
+        if best is None or distance < best[0]:
+            best = (distance, span)
+
+    if best is not None:
+        return {
+            "start": best[1][0],
+            "end": best[1][1],
+            "kind": new_member["kind"],
+            "name": new_member["name"],
+        }
+
+    if mapped_old_line is not None:
+        span = source.member_for_line(old_type, mapped_old_line)
+        if span is not None:
+            info = source.member_info(span)
+            return {"start": span[0], "end": span[1], "kind": info["kind"], "name": info["name"]}
+    return None
+
+
+def clean_diff_path(path: str) -> str:
+    path = path.strip().strip('"')
+    if path.startswith("a/") or path.startswith("b/"):
+        path = path[2:]
+    return path
+
+
+def parse_diff_sections(patch_text: str) -> list[dict[str, Any]]:
+    """Parse a unified diff into per-file sections with hunk rows."""
+
+    lines = patch_text.splitlines()
+    sections: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if line.startswith("diff --git "):
+            rest = line[len("diff --git ") :]
+            if " b/" in rest:
+                old_part, new_part = rest.split(" b/", 1)
+                old_path = clean_diff_path(old_part)
+                new_path = clean_diff_path("b/" + new_part)
+            else:
+                parts = rest.split()
+                old_path = clean_diff_path(parts[0]) if parts else None
+                new_path = clean_diff_path(parts[-1]) if len(parts) > 1 else old_path
+            current = {"old_path": old_path, "new_path": new_path, "hunks": []}
+            sections.append(current)
+            idx += 1
+            continue
+
+        if line.startswith("--- ") and idx + 1 < len(lines) and lines[idx + 1].startswith("+++ "):
+            old_path = clean_diff_path(lines[idx][4:].split("\t")[0].strip())
+            new_path = clean_diff_path(lines[idx + 1][4:].split("\t")[0].strip())
+            if current is None or current["hunks"]:
+                current = {"old_path": old_path, "new_path": new_path, "hunks": []}
+                sections.append(current)
+            else:
+                current["old_path"] = old_path
+                current["new_path"] = new_path
+            idx += 2
+            continue
+
+        if line.startswith("@@"):
+            match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+            if current is None:
+                current = {"old_path": None, "new_path": None, "hunks": []}
+                sections.append(current)
+            if not match:
+                idx += 1
+                continue
+            hunk = {
+                "old_start": int(match.group(1)),
+                "old_count": int(match.group(2) or 1),
+                "new_start": int(match.group(3)),
+                "new_count": int(match.group(4) or 1),
+                "rows": [],
+            }
+            current["hunks"].append(hunk)
+            idx += 1
+            old_remaining = hunk["old_count"]
+            new_remaining = hunk["new_count"]
+            while idx < len(lines) and (old_remaining > 0 or new_remaining > 0):
+                row = lines[idx]
+                if row.startswith("\\"):
+                    idx += 1
+                    continue
+                if row.startswith("+"):
+                    hunk["rows"].append(("add", row[1:]))
+                    new_remaining -= 1
+                elif row.startswith("-"):
+                    hunk["rows"].append(("del", row[1:]))
+                    old_remaining -= 1
+                elif row.startswith(" ") or row == "":
+                    hunk["rows"].append(("ctx", row[1:] if row.startswith(" ") else ""))
+                    old_remaining -= 1
+                    new_remaining -= 1
+                else:
+                    break
+                idx += 1
+            while idx < len(lines) and lines[idx].startswith("\\"):
+                idx += 1
+            continue
+
+        idx += 1
+    return sections
+
+
+def apply_diff_section(lines: list[str], section: dict[str, Any], reverse: bool = False) -> list[str]:
+    """Apply the section's hunks to a list of lines (or undo them when reversed)."""
+
+    result: list[str] = []
+    cursor = 0
+    for hunk in section["hunks"]:
+        start = (hunk["new_start"] if reverse else hunk["old_start"]) - 1
+        if start > cursor:
+            result.extend(lines[cursor:start])
+        cursor = max(start, cursor)
+        for row_type, text in hunk["rows"]:
+            if reverse:
+                row_type = {"add": "del", "del": "add", "ctx": "ctx"}[row_type]
+            if row_type == "ctx":
+                if cursor < len(lines):
+                    result.append(lines[cursor])
+                cursor += 1
+            elif row_type == "del":
+                cursor += 1
+            elif row_type == "add":
+                result.append(text)
+    result.extend(lines[cursor:])
+    return result
+
+
+def map_new_line_to_old(section: dict[str, Any], new_line: int) -> int | None:
+    """Map a 1-based new-file line back to the old file (added lines use the insertion point)."""
+
+    for hunk in section["hunks"]:
+        old_line = hunk["old_start"]
+        new_line_cursor = hunk["new_start"]
+        for row_type, _text in hunk["rows"]:
+            if row_type == "ctx":
+                if new_line_cursor == new_line:
+                    return old_line
+                old_line += 1
+                new_line_cursor += 1
+            elif row_type == "del":
+                old_line += 1
+            elif row_type == "add":
+                if new_line_cursor == new_line:
+                    return old_line
+                new_line_cursor += 1
+    return None
+
+
+def make_member_diff(
+    old_lines: list[str],
+    new_lines: list[str],
+    path: str,
+    old_start: int,
+    new_start: int,
+) -> str:
+    """Build a unified diff with file-accurate hunk line numbers."""
+
+    raw = list(
+        difflib.unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+            n=3,
+        )
+    )
+    adjusted: list[str] = []
+    for line in raw:
+        if line.startswith("@@"):
+            match = re.match(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", line)
+            if match:
+                old_count = match.group(2) or "1"
+                new_count = match.group(4) or "1"
+                line = (
+                    f"@@ -{int(match.group(1)) + old_start},{old_count} "
+                    f"+{int(match.group(3)) + new_start},{new_count} @@{match.group(5)}"
+                )
+        adjusted.append(line)
+    return "\n".join(adjusted)
+
+
+def is_safe_relative_path(path: str) -> bool:
+    candidate = Path(path)
+    return bool(path) and not candidate.is_absolute() and ".." not in candidate.parts
+
+
+def find_stage_patch(
+    cache_dir: Path, step_name: str, cas_key: str | None, diff_patch: str | None
+) -> str | None:
+    if diff_patch:
+        return diff_patch
+    cas_dir = resolve_cas_dir(cache_dir, step_name, cas_key)
+    if cas_dir is None:
+        return None
+    for name in PATCH_ARTIFACT_NAMES:
+        candidate = cas_dir / name
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8", errors="replace")
+    return None
+
+
+def run_git(args: list[str], timeout: int = 20) -> tuple[int, str]:
+    try:
+        completed = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return completed.returncode, completed.stdout
+    except (OSError, subprocess.SubprocessError):
+        return 1, ""
+
+
+@lru_cache(maxsize=256)
+def git_show(repo: str, commit: str, path: str) -> str | None:
+    code, output = run_git(["git", "-C", repo, "show", f"{commit}:{path}"])
+    return output if code == 0 else None
+
+
+def repo_candidates(run_row: dict[str, Any], eval_repos_dir: Path) -> list[Path]:
+    seen: set[str] = set()
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        key = str(path)
+        if key not in seen and path.is_dir():
+            seen.add(key)
+            candidates.append(path)
+
+    git_url = run_row.get("git_url")
+    if git_url:
+        url_path = Path(git_url)
+        add(url_path if url_path.is_absolute() else REPO_ROOT / url_path)
+        add(eval_repos_dir / url_path.name)
+        add(eval_repos_dir / f"{url_path.name}.git")
+    repo_name = run_row.get("repo_name")
+    if repo_name:
+        add(eval_repos_dir / repo_name)
+        add(eval_repos_dir / f"{repo_name}.git")
+    return candidates
+
+
+def find_repo_for_commit(run_row: dict[str, Any], eval_repos_dir: Path, commit: str) -> Path | None:
+    if not commit:
+        return None
+    checked: set[str] = set()
+    for repo in repo_candidates(run_row, eval_repos_dir):
+        checked.add(str(repo))
+        code, _ = run_git(["git", "-C", str(repo), "cat-file", "-e", f"{commit}^{{commit}}"])
+        if code == 0:
+            return repo
+    if eval_repos_dir.is_dir():
+        for entry in sorted(eval_repos_dir.iterdir()):
+            if not entry.is_dir() or str(entry) in checked:
+                continue
+            code, _ = run_git(["git", "-C", str(entry), "cat-file", "-e", f"{commit}^{{commit}}"])
+            if code == 0:
+                return entry
+    return None
+
+
+def base_commit_for_run(run_row: dict[str, Any], repo: Path | None) -> str | None:
+    parent = run_row.get("parent_commit")
+    if parent:
+        return str(parent)
+    commit = run_row.get("commit_hash")
+    if repo is not None and commit:
+        code, output = run_git(["git", "-C", str(repo), "rev-parse", f"{commit}^"])
+        if code == 0:
+            return output.strip()
+    return str(commit) if commit else None
+
+
+def worktree_source_file(run_id: str, step_name: str, file_path: str) -> Path | None:
+    if not is_safe_relative_path(file_path):
+        return None
+    base = (REPO_ROOT / ".worktrees" / f"run_{run_id}" / step_name).resolve()
+    target = (base / file_path).resolve()
+    if not target.is_relative_to(base) or not target.is_file():
+        return None
+    return target
+
+
+def join_source_lines(lines: list[str]) -> str:
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def build_placement_diff(
+    db_path: Path,
+    cache_dir: Path,
+    run_id: str,
+    step_id: str,
+    placement_id: str,
+) -> dict[str, Any] | None:
+    """Reconstruct a method-level diff for one annotation placement.
+
+    The stage patch is applied to the run's parent commit to recover the new
+    source, and the member containing the placement is diffed against its
+    counterpart in the pre-stage source. Generated files that never appear in
+    the patch fall back to a read-only snippet with an explanatory note.
+    """
+
+    with connect_db(db_path) as conn:
+        placement_row = conn.execute(
+            "SELECT * FROM annotation_placements WHERE placement_id = ? AND run_id = ? AND step_id = ?",
+            (placement_id, run_id, step_id),
+        ).fetchone()
+        if placement_row is None:
+            return None
+        step_row = conn.execute(
+            "SELECT * FROM step_trajectories WHERE step_id = ? AND run_id = ?",
+            (step_id, run_id),
+        ).fetchone()
+        if step_row is None:
+            return None
+        run_row = conn.execute(
+            """
+            SELECT
+                r.*,
+                c.parent_commit,
+                repo.name AS repo_name,
+                repo.git_url
+            FROM evaluation_runs r
+            LEFT JOIN commits c ON r.commit_hash = c.commit_hash
+            LEFT JOIN repositories repo ON c.repo_id = repo.repo_id
+            WHERE r.run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if run_row is None:
+            return None
+
+    placement = dict(placement_row)
+    step = dict(step_row)
+    run = dict(run_row)
+    file_path = str(placement["file_path"])
+    line_number = int(placement["line_number"])
+    result: dict[str, Any] = {
+        "placement_id": placement["placement_id"],
+        "file_path": file_path,
+        "line_number": line_number,
+        "symbol": placement["symbol"],
+        "qualifier": placement["qualifier"],
+        "has_diff": False,
+        "diff": "",
+    }
+
+    if not is_safe_relative_path(file_path):
+        result["note"] = "Placement path is not a safe repository-relative path."
+        return result
+
+    config_snapshot = safe_json_loads(run.get("config_snapshot"), {}) or {}
+    paths_config = config_snapshot.get("paths") or {}
+    eval_repos_dir = Path(paths_config.get("eval_repos_dir") or REPO_ROOT / "eval-repos")
+    if not eval_repos_dir.is_dir():
+        eval_repos_dir = REPO_ROOT / "eval-repos"
+
+    commit = run.get("commit_hash") or ""
+    repo = find_repo_for_commit(run, eval_repos_dir, commit)
+    old_content = None
+    if repo is not None:
+        base_commit = base_commit_for_run(run, repo)
+        if base_commit:
+            old_content = git_show(str(repo), base_commit, file_path)
+
+    worktree_file = worktree_source_file(run_id, step["step_name"], file_path)
+    worktree_content = worktree_file.read_text(encoding="utf-8", errors="replace") if worktree_file else None
+
+    patch_text = find_stage_patch(cache_dir, step["step_name"], step.get("cas_key"), step.get("diff_patch"))
+    section = None
+    if patch_text:
+        for candidate in parse_diff_sections(patch_text):
+            if file_path in (candidate["old_path"], candidate["new_path"]):
+                section = candidate
+                break
+
+    # Prefer replaying the recorded patch so each attempt is diffed against its
+    # own result. The worktree is only needed for generated files that never
+    # appear in the patch.
+    new_content = None
+    if old_content is not None and section is not None:
+        new_content = join_source_lines(apply_diff_section(old_content.splitlines(), section))
+    elif worktree_content is not None:
+        new_content = worktree_content
+    elif old_content is not None:
+        new_content = old_content
+
+    if old_content is None and new_content is not None and section is not None:
+        old_content = join_source_lines(apply_diff_section(new_content.splitlines(), section, reverse=True))
+
+    if new_content is None:
+        result["note"] = "Could not reconstruct the annotated source for this placement."
+        return result
+
+    new_source = JavaSource(new_content)
+    new_member = find_placement_member(new_source, line_number)
+    if new_member is None:
+        result["note"] = "Could not locate the enclosing method or field for this placement."
+        result["snippet_start"] = max(1, line_number - 8)
+        result["snippet"] = "\n".join(
+            new_source.lines[max(0, line_number - 9) : min(len(new_source.lines), line_number + 8)]
+        )
+        return result
+
+    result["member_kind"] = new_member["kind"]
+    result["member_name"] = new_member["name"]
+
+    if old_content is None:
+        result["snippet_start"] = new_member["start"] + 1
+        result["snippet"] = "\n".join(new_source.lines[new_member["start"] : new_member["end"] + 1])
+        if section is None:
+            result["note"] = (
+                "This file is not part of the stage patch. It may be generated during the build, "
+                "so there is no pre-stage baseline to diff against."
+            )
+        else:
+            result["note"] = "Could not recover the pre-stage source for this file."
+        return result
+
+    old_source = JavaSource(old_content)
+    mapped_old_line = map_new_line_to_old(section, line_number) if section is not None else None
+    old_member = find_old_member(old_source, new_member, mapped_old_line)
+    if old_member is None:
+        result["snippet_start"] = new_member["start"] + 1
+        result["snippet"] = "\n".join(new_source.lines[new_member["start"] : new_member["end"] + 1])
+        result["note"] = "Could not match this member in the pre-stage source."
+        return result
+
+    old_snippet = old_source.lines[old_member["start"] : old_member["end"] + 1]
+    new_snippet = new_source.lines[new_member["start"] : new_member["end"] + 1]
+    diff = make_member_diff(
+        old_snippet,
+        new_snippet,
+        file_path,
+        old_member["start"],
+        new_member["start"],
+    )
+    result["old_start"] = old_member["start"] + 1
+    result["new_start"] = new_member["start"] + 1
+    result["has_diff"] = bool(diff.strip())
+    result["diff"] = diff
+    if not result["has_diff"]:
+        result["snippet_start"] = new_member["start"] + 1
+        result["snippet"] = "\n".join(new_snippet)
+        result["note"] = (
+            "This file is not part of the stage patch."
+            if section is None
+            else "This member has no textual changes in the stage patch."
+        )
+    return result
 
 
 def extract_key_config(config: dict[str, Any], run_row: dict[str, Any]) -> dict[str, Any]:
@@ -501,6 +1357,22 @@ class ViewerHandler(BaseHTTPRequestHandler):
                         return
                     text = log_file.read_text(encoding="utf-8", errors="replace")
                     self.send_json({"run_id": run_id, "content": text, "size_bytes": len(text.encode("utf-8"))})
+                    return
+
+                if len(parts) == 4 and parts[1] == "steps" and parts[3] == "placement-diff":
+                    run_id = parts[0]
+                    step_id = parts[2]
+                    placement_id = (query.get("placement_id") or [""])[0]
+                    if not placement_id:
+                        self.send_json({"error": "Missing placement_id"}, HTTPStatus.BAD_REQUEST)
+                        return
+                    payload = build_placement_diff(
+                        self.db_path, self.cache_dir, run_id, step_id, placement_id
+                    )
+                    if payload is None:
+                        self.send_json({"error": "Placement not found"}, HTTPStatus.NOT_FOUND)
+                    else:
+                        self.send_json(payload)
                     return
 
                 if len(parts) >= 4 and parts[1] == "steps" and parts[3] == "artifact":
