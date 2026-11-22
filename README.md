@@ -107,6 +107,28 @@ python3 analysis/inspect_cache.py
 
 Runtime state (`data/`, `logs/`, `.cache/`, `.worktrees/`, `vendor/`, build output) is gitignored. A fresh checkout needs the Checker Framework vendored before running.
 
+### Local environment
+
+Machine-specific values are supplied through environment variables, not the committed config:
+
+```bash
+cp local.env.example local.env
+$EDITOR local.env
+source local.env
+```
+
+`local.env` is gitignored. The template covers the JDK path, Checker Framework location, optional Gradle cache, OpenCode DB paths, and the scratch location. The most common required changes for a new checkout are:
+
+1. Point `JAVA_HOME` at a JDK 21.
+2. Install Checker Framework 3.42.0 at `vendor/checker-framework-3.42.0/`, or set `CHECKERFRAMEWORK` to its location.
+3. Install and authenticate the `opencode` CLI. If you are not on OpenCode Go, pass `--model <provider/model>` instead of editing `project_config.yaml`.
+4. Initialize at least the synthetic benchmark submodule:
+   `git submodule update --init eval-repos/synthetic-id-swap`
+   (the `cmsx` submodule requires Cornell GitLab access).
+5. Run the pipeline from the repository root; `.worktrees/` is still relative to the working directory.
+
+Everything in `project_config.yaml` and `benchmarks.yaml` stays shared across machines. `--seed` selects the sample index, and `--model` overrides the configured model for a run.
+
 ## 7. Current Status
 
 - The synthetic `synthetic-id-swap` benchmark completed end-to-end with verdict
