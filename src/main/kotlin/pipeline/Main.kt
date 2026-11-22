@@ -43,13 +43,22 @@ private fun loadConfig(path: String): ProjectConfig {
 private fun database(config: ProjectConfig): SQLiteDatabaseManager =
     SQLiteDatabaseManager(config.paths.databaseFile())
 
+private fun checkRepoClean(benchmarkRepo: File) {
+    if (benchmarkRepo.isDirectory && Git.isRepository(benchmarkRepo)) {
+        val dirty = Git.statusPorcelain(benchmarkRepo)
+        require(dirty.isBlank()) {
+            "Benchmark repository ${benchmarkRepo.path} is dirty; revert or commit changes before running so " +
+                "agent contamination is detectable:\n$dirty"
+        }
+    }
+}
+
 private fun buildOrchestrator(
     config: ProjectConfig,
-    entry: BenchmarkEntry,
+    buildRunner: GradleBuildRunner,
     db: SQLiteDatabaseManager,
     cas: CasEngine
 ): PipelineOrchestrator {
-    val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
     val openCodeDb = OpenCodeDb.prepare()
     val agentRunner = CoroutineOpenCodeRunner(databasePath = openCodeDb?.absolutePath)
     val javac = JavacRunner()
@@ -133,27 +142,28 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
             }
             updated
         }
-        val manifestFile = File(config.triage.manifestFile)
-        val entries = BenchmarkManifestLoader.load(manifestFile, config)
-        val entry = BenchmarkManifestLoader.resolve(entries, benchmark)
-            ?: error("Benchmark '$benchmark' not found in ${manifestFile.path}; known ids: ${entries.joinToString { it.benchmarkId.canonical }}")
-        val benchmarkRepo = File(entry.repoUrl)
-        if (benchmarkRepo.isDirectory && Git.isRepository(benchmarkRepo)) {
-            val dirty = Git.statusPorcelain(benchmarkRepo)
-            require(dirty.isBlank()) {
-                "Benchmark repository ${benchmarkRepo.path} is dirty; revert or commit changes before running so " +
-                    "agent contamination is detectable:\n$dirty"
-            }
-        }
         val cas = CasEngine(File(config.cache.stagesDir), config.cache.enabled)
         database(config).use { db ->
             // Sequential MVP: a run still marked running is stale.
             db.markStaleRunningRuns()
-            val orchestrator = buildOrchestrator(config, entry, db, cas)
             if (config.triage.mode == pipeline.stages.TriageMode.CRAWLER) {
-                val outcomes = orchestrator.crawlAndRun(entry, seed)
+                val crawlerFile = File(config.triage.reposFile)
+                val targets = pipeline.config.CrawlerManifestLoader.load(crawlerFile, config)
+                val target = pipeline.config.CrawlerManifestLoader.resolve(targets, benchmark)
+                    ?: error("Repo '$benchmark' not found in ${crawlerFile.path}; known ids: ${targets.joinToString { it.benchmarkId.canonical }}")
+                checkRepoClean(File(target.repoUrl))
+                val buildRunner = GradleBuildRunner(config, target.build, target.sourceCompatibility, target.targetCompatibility)
+                val orchestrator = buildOrchestrator(config, buildRunner, db, cas)
+                val outcomes = orchestrator.crawlAndRun(target, seed)
                 outcomes.forEach { printOutcome(it) }
             } else {
+                val manifestFile = File(config.triage.manifestFile)
+                val entries = BenchmarkManifestLoader.load(manifestFile, config)
+                val entry = BenchmarkManifestLoader.resolve(entries, benchmark)
+                    ?: error("Benchmark '$benchmark' not found in ${manifestFile.path}; known ids: ${entries.joinToString { it.benchmarkId.canonical }}")
+                checkRepoClean(File(entry.repoUrl))
+                val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
+                val orchestrator = buildOrchestrator(config, buildRunner, db, cas)
                 val outcome = orchestrator.runSingleSample(entry, seed)
                 printOutcome(outcome)
             }

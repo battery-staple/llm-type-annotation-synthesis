@@ -19,6 +19,7 @@ import pipeline.util.Env
 data class TriageSection(
     val mode: TriageMode = TriageMode.MANIFEST,
     @SerialName("manifest_file") val manifestFile: String = "benchmarks.yaml",
+    @SerialName("repos_file") val reposFile: String = "repos.yaml",
     val depth: Int = 20,
     val limit: Int? = null,
     @SerialName("bugfix_threshold") val bugfixThreshold: Double = 0.75
@@ -158,7 +159,10 @@ data class ProjectConfig(
                 ?: Env.get("CHECKERFRAMEWORK")?.takeIf { it.isNotBlank() }
                 ?: "vendor/checker-framework-3.42.0"
             val config = decoded.copy(
-                triage = decoded.triage.copy(manifestFile = resolve(decoded.triage.manifestFile)),
+                triage = decoded.triage.copy(
+                    manifestFile = resolve(decoded.triage.manifestFile),
+                    reposFile = resolve(decoded.triage.reposFile)
+                ),
                 paths = decoded.paths.copy(
                     evalReposDir = resolve(decoded.paths.evalReposDir),
                     database = resolve(decoded.paths.database)

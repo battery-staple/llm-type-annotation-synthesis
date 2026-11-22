@@ -1,0 +1,27 @@
+repos:
+  - id: "synthetic-id-swap"
+    repo_url: "eval-repos/synthetic-id-swap"
+    default_branch: "main"
+    source_compatibility: "17"
+    target_compatibility: "17"
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: ""
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"
+  - id: "cmsx"
+    repo_url: "eval-repos/cmsx"
+    default_branch: "master"
+    source_compatibility: "21"
+    target_compatibility: "21"
+    production_roots: ["src"]
+    test_roots: ["test"]
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: ""
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"

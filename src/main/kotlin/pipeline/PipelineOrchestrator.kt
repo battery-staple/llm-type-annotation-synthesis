@@ -49,16 +49,16 @@ class PipelineOrchestrator(
     private val maxTransientAttempts: Int = 3,
     private val automatedTriage: AutomatedTriageStage? = null
 ) {
-    suspend fun crawlAndRun(entry: BenchmarkEntry, sampleSeed: Int): List<PipelineRunOutcome> {
+    suspend fun crawlAndRun(target: pipeline.config.CrawlerRepoTarget, sampleSeed: Int): List<PipelineRunOutcome> {
         val autoTriage = automatedTriage
             ?: throw IllegalStateException("AutomatedTriageStage is required for crawler mode")
         val evalRepos = config.paths.evalRepos()
-        val repoName = File(entry.repoUrl).name.removeSuffix(".git")
-        val mirror = Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
-        val startRef = if (runCatching { Git.revParse(mirror, entry.defaultBranch) }.isSuccess) {
-            entry.defaultBranch
+        val repoName = File(target.repoUrl).name.removeSuffix(".git")
+        val mirror = Git.ensureMirror(target.repoUrl, evalRepos, repoName)
+        val startRef = if (runCatching { Git.revParse(mirror, target.defaultBranch) }.isSuccess) {
+            target.defaultBranch
         } else {
-            logger.warn { "Crawler: defaultBranch '${entry.defaultBranch}' not found in mirror; falling back to HEAD" }
+            logger.warn { "Crawler: defaultBranch '${target.defaultBranch}' not found in mirror; falling back to HEAD" }
             "HEAD"
         }
         val commits = Git.listCommits(mirror, startRef, config.triage.depth)
@@ -73,11 +73,20 @@ class PipelineOrchestrator(
             }
             val commitHash = CommitHash(meta.hash)
             val parentHash = CommitHash(meta.parents.firstOrNull() ?: "")
-            val commitEntry = entry.copy(
-                benchmarkId = BenchmarkId.of(entry.benchmarkId.canonical, commitHash),
+            val commitEntry = BenchmarkEntry(
+                benchmarkId = BenchmarkId.of(target.benchmarkId.canonical, commitHash),
+                repoUrl = target.repoUrl,
                 commitHash = commitHash,
                 parentHash = parentHash,
-                description = meta.message
+                regressionTest = TestCoordinate(Fqcn("crawler.Pending"), "pending"),
+                description = meta.message,
+                repoIdentity = target.repoIdentity,
+                defaultBranch = target.defaultBranch,
+                build = target.build,
+                sourceCompatibility = target.sourceCompatibility,
+                targetCompatibility = target.targetCompatibility,
+                productionRoots = target.productionRoots,
+                testRoots = target.testRoots
             )
             val outcome = runSingleSampleCrawler(commitEntry, meta, sampleSeed, autoTriage)
             outcomes += outcome

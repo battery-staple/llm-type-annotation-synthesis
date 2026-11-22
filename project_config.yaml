@@ -4,8 +4,8 @@
 # Relative paths are resolved against this file's directory.
 
 triage:
-  mode: "manifest"
-  manifest_file: "benchmarks.yaml"
+  mode: "crawler"
+  manifest_file: "repos.yaml"
   depth: 20
   bugfix_threshold: 0.75
 
