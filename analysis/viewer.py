@@ -147,11 +147,14 @@ def extract_key_config(config: dict[str, Any], run_row: dict[str, Any]) -> dict[
 
 def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
     with connect_db(db_path) as conn:
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(evaluation_runs)").fetchall()}
+        batch_col = "r.batch_id" if "batch_id" in cols else "NULL AS batch_id"
         runs = rows_to_dicts(
             conn.execute(
-                """
+                f"""
                 SELECT
                     r.run_id,
+                    {batch_col},
                     r.benchmark_id,
                     r.commit_hash,
                     r.sample_index,

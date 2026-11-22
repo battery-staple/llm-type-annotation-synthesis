@@ -75,6 +75,7 @@ class PipelineOrchestrator(
         }
         val commits = Git.listCommits(mirror, startRef, config.triage.depth)
         val limit = config.triage.limit
+        val batchId = UUID.randomUUID().toString()
         val outcomes = mutableListOf<PipelineRunOutcome>()
         var verifiedCount = 0
 
@@ -100,7 +101,7 @@ class PipelineOrchestrator(
                 productionRoots = target.productionRoots,
                 testRoots = target.testRoots
             )
-            val outcome = runSingleSampleCrawler(commitEntry, meta, sampleSeed, autoTriage)
+            val outcome = runSingleSampleCrawler(commitEntry, meta, sampleSeed, autoTriage, batchId)
             outcomes += outcome
             if (countsAsVerified(outcome)) {
                 verifiedCount++
@@ -128,9 +129,10 @@ class PipelineOrchestrator(
         entry: BenchmarkEntry,
         meta: CommitMetadata,
         sampleSeed: Int,
-        autoTriage: AutomatedTriageStage
+        autoTriage: AutomatedTriageStage,
+        batchId: String
     ): PipelineRunOutcome {
-        val (runId, worktreeBase, baseCtx) = initRunContext(entry, sampleSeed)
+        val (runId, worktreeBase, baseCtx) = initRunContext(entry, sampleSeed, batchId)
         return withRunHandling(runId) {
             if (meta.parents.size != 1) {
                 database.updateCommit(
@@ -172,7 +174,8 @@ class PipelineOrchestrator(
 
     private suspend fun initRunContext(
         entry: BenchmarkEntry,
-        sampleSeed: Int
+        sampleSeed: Int,
+        batchId: String? = null
     ): Triple<RunId, File, RunContext> {
         val runId = RunId(UUID.randomUUID().toString())
         val startedAt = Instant.now().toString()
@@ -207,7 +210,8 @@ class PipelineOrchestrator(
                 configSnapshot = PipelineJson.compact.encodeToString(ProjectConfig.serializer(), config),
                 guardrailsMode = config.guardrails.mode,
                 verificationScope = config.verification.scope,
-                startedAt = startedAt
+                startedAt = startedAt,
+                batchId = batchId
             )
         )
 

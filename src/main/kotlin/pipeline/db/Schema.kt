@@ -48,10 +48,12 @@ CREATE TABLE IF NOT EXISTS evaluation_runs (
     verification_scope TEXT NOT NULL DEFAULT 'full_suite',
     status TEXT NOT NULL,
     started_at TIMESTAMP NOT NULL,
-    completed_at TIMESTAMP
+    completed_at TIMESTAMP,
+    batch_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_evaluation_runs_benchmark ON evaluation_runs(benchmark_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_runs_batch ON evaluation_runs(batch_id);
 
 -- Individual Step Trajectories
 CREATE TABLE IF NOT EXISTS step_trajectories (

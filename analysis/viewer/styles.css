@@ -1092,3 +1092,47 @@ code, pre {
 .matrix-focus-row:hover td {
   background: var(--bg-elev-2);
 }
+
+/* Batch grouping in sidebar */
+.batch-group {
+  margin-bottom: 6px;
+}
+
+.batch-card {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2a3040);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.batch-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.batch-card.active {
+  border-color: var(--accent, #5b8def);
+  background: rgba(91, 141, 239, 0.12);
+}
+
+.batch-toggle-btn {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 4px 0 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.batch-children {
+  margin-left: 12px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border, #2a3040);
+  margin-top: 4px;
+}
+
+.run-card.batch-child {
+  margin-bottom: 4px;
+}

@@ -54,8 +54,8 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
             c.prepareStatement(
                 """INSERT OR IGNORE INTO evaluation_runs
                    (run_id, benchmark_id, commit_hash, sample_index, sample_temperature, cas_cache_key,
-                    config_snapshot, guardrails_mode, verification_scope, status, started_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)"""
+                    config_snapshot, guardrails_mode, verification_scope, status, started_at, batch_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
             ).use { s ->
                 s.setString(1, run.runId.value)
                 s.setString(2, run.benchmarkId)
@@ -68,6 +68,7 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
                 s.setString(9, run.verificationScope.name.lowercase())
                 s.setString(10, run.status)
                 s.setString(11, run.startedAt)
+                s.setString(12, run.batchId)
                 s.executeUpdate()
             }
         }

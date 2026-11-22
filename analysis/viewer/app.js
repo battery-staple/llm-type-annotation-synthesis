@@ -19,6 +19,9 @@
     autoRefreshTimer: null,
     viewMode: "inspector",
     matrixStage: null,
+    selectedBatchId: null,
+    expandedBatches: new Set(),
+    hideDiscardedInMatrix: false,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -312,6 +315,38 @@
     });
   }
 
+  function renderRunCardHtml(r, isChild = false) {
+    const active = r.run_id === state.selectedRunId ? "active" : "";
+    const verdict = r.verdict || r.status;
+    const dots = STAGE_ORDER.map((stName) => {
+      const matches = (r.steps || []).filter((s) => s.step_name === stName);
+      const latest = matches[matches.length - 1];
+      if (!latest) return `<span class="stage-mini-dot" title="${esc(stName)}: not run"></span>`;
+      const cls = latest.success ? "ok" : "fail";
+      const cached = latest.cache_hit ? " cached" : "";
+      return `<span class="stage-mini-dot ${cls}${cached}" title="${esc(stName)}: ${latest.success ? "ok" : "failed"}${latest.cache_hit ? " (cached)" : ""}"></span>`;
+    }).join("");
+
+    const triageMode = r.key_config?.triage_mode || "manifest";
+    const tokens = r.llm_stats?.total_tokens ? `${fmtNum(r.llm_stats.total_tokens)} tok` : "0 tok";
+    return `
+      <div class="run-card ${isChild ? "batch-child" : ""} ${active}" data-run-id="${esc(r.run_id)}">
+        <div class="run-card-top">
+          <span class="run-card-bench" title="${esc(r.benchmark_id)}">${esc(r.benchmark_id)}</span>
+          <span class="badge ${verdictBadgeClass(r.verdict)}" title="${esc(verdictTooltip(r.verdict))}">${esc(verdict)}</span>
+        </div>
+        <div class="run-card-id" title="Started: ${esc(fmtTs(r.started_at))}">${esc(r.run_id.slice(0, 8))} &middot; ${esc(fmtTs(r.started_at))}</div>
+        <div class="run-card-meta">
+          <span class="badge badge-muted" title="Triage mode: ${esc(triageMode)}">${esc(triageMode)}</span>
+          <span class="badge badge-muted" title="Guardrails mode: ${esc(r.guardrails_mode)}">${esc(r.guardrails_mode)}</span>
+          <span class="badge badge-muted" title="Verification scope: ${esc(r.verification_scope)}">${esc(r.verification_scope)}</span>
+          <span class="muted" style="font-size:11px;" title="Total LLM tokens across all stages">${esc(tokens)}</span>
+        </div>
+        <div class="run-card-dots">${dots}</div>
+      </div>
+    `;
+  }
+
   function renderRunsList() {
     const filtered = getFilteredRuns();
     $("runsCount").textContent = `${filtered.length} of ${state.runs.length} runs`;
@@ -323,37 +358,90 @@
       return;
     }
 
-    listEl.innerHTML = filtered.map((r) => {
-      const active = r.run_id === state.selectedRunId ? "active" : "";
-      const verdict = r.verdict || r.status;
-      const dots = STAGE_ORDER.map((stName) => {
-        const matches = (r.steps || []).filter((s) => s.step_name === stName);
-        const latest = matches[matches.length - 1];
-        if (!latest) return `<span class="stage-mini-dot" title="${esc(stName)}: not run"></span>`;
-        const cls = latest.success ? "ok" : "fail";
-        const cached = latest.cache_hit ? " cached" : "";
-        return `<span class="stage-mini-dot ${cls}${cached}" title="${esc(stName)}: ${latest.success ? "ok" : "failed"}${latest.cache_hit ? " (cached)" : ""}"></span>`;
-      }).join("");
+    const searchActive = Boolean($("runSearch").value.trim());
+    const items = [];
+    const batchMap = new Map();
 
-      const triageMode = r.key_config?.triage_mode || "manifest";
-      const tokens = r.llm_stats?.total_tokens ? `${fmtNum(r.llm_stats.total_tokens)} tok` : "0 tok";
+    for (const r of filtered) {
+      if (r.batch_id) {
+        let group = batchMap.get(r.batch_id);
+        if (!group) {
+          group = { type: "batch", batchId: r.batch_id, runs: [] };
+          batchMap.set(r.batch_id, group);
+          items.push(group);
+        }
+        group.runs.push(r);
+      } else {
+        items.push({ type: "run", run: r });
+      }
+    }
+
+    listEl.innerHTML = items.map((item) => {
+      if (item.type === "run") {
+        return renderRunCardHtml(item.run, false);
+      }
+      const runs = item.runs;
+      const first = runs[0];
+      const repoLabel = (first.benchmark_id || "").replace(/-[0-9a-f]{6,}$/i, "") || first.repo_name || "crawl";
+      const totalTokens = runs.reduce((acc, r) => acc + (r.llm_stats?.total_tokens || 0), 0);
+      const passCount = runs.filter((r) => r.verdict === "PASS").length;
+      const failCount = runs.filter((r) => r.verdict && r.verdict !== "PASS").length;
+      const discardedCount = runs.filter((r) => r.triage_status === "discarded" || (r.discard_reason && r.discard_reason !== "")).length;
+      const runningCount = runs.filter((r) => r.status === "running").length;
+      const hasSelected = runs.some((r) => r.run_id === state.selectedRunId);
+      const isExpanded = searchActive || hasSelected || state.expandedBatches.has(item.batchId);
+      const isActiveBatch = state.viewMode === "matrix" && state.selectedBatchId === item.batchId;
+
+      const summaryPills = [
+        passCount ? `<span class="badge badge-pass">${passCount} pass</span>` : "",
+        failCount ? `<span class="badge badge-fail">${failCount} fail</span>` : "",
+        discardedCount ? `<span class="badge badge-muted">${discardedCount} discarded</span>` : "",
+        runningCount ? `<span class="badge badge-running">${runningCount} running</span>` : "",
+      ].filter(Boolean).join("");
+
+      const childrenHtml = isExpanded
+        ? `<div class="batch-children">${runs.map((r) => renderRunCardHtml(r, true)).join("")}</div>`
+        : "";
+
       return `
-        <div class="run-card ${active}" data-run-id="${esc(r.run_id)}">
-          <div class="run-card-top">
-            <span class="run-card-bench" title="${esc(r.benchmark_id)}">${esc(r.benchmark_id)}</span>
-            <span class="badge ${verdictBadgeClass(r.verdict)}" title="${esc(verdictTooltip(r.verdict))}">${esc(verdict)}</span>
+        <div class="batch-group">
+          <div class="batch-card ${isActiveBatch ? "active" : ""}" data-batch-id="${esc(item.batchId)}">
+            <div class="run-card-top">
+              <button class="batch-toggle-btn" data-toggle-batch="${esc(item.batchId)}" title="${isExpanded ? "Collapse" : "Expand"} commits">${isExpanded ? "&#x25BE;" : "&#x25B8;"}</button>
+              <span class="run-card-bench" title="Crawl batch ${esc(item.batchId)}">${esc(repoLabel)}</span>
+              <span class="badge badge-muted">${runs.length} commits</span>
+            </div>
+            <div class="run-card-id" title="Batch ID: ${esc(item.batchId)}">${esc(item.batchId.slice(0, 8))} &middot; ${esc(fmtTs(first.started_at))}</div>
+            <div class="run-card-meta">
+              ${summaryPills}
+              <span class="muted" style="font-size:11px;">${esc(fmtNum(totalTokens))} tok</span>
+            </div>
           </div>
-          <div class="run-card-id" title="Started: ${esc(fmtTs(r.started_at))}">${esc(r.run_id.slice(0, 8))} &middot; ${esc(fmtTs(r.started_at))}</div>
-          <div class="run-card-meta">
-            <span class="badge badge-muted" title="Triage mode: ${esc(triageMode)}">${esc(triageMode)}</span>
-            <span class="badge badge-muted" title="Guardrails mode: ${esc(r.guardrails_mode)}">${esc(r.guardrails_mode)}</span>
-            <span class="badge badge-muted" title="Verification scope: ${esc(r.verification_scope)}">${esc(r.verification_scope)}</span>
-            <span class="muted" style="font-size:11px;" title="Total LLM tokens across all stages">${esc(tokens)}</span>
-          </div>
-          <div class="run-card-dots">${dots}</div>
+          ${childrenHtml}
         </div>
       `;
     }).join("");
+
+    listEl.querySelectorAll(".batch-toggle-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const bid = btn.dataset.toggleBatch;
+        if (state.expandedBatches.has(bid)) {
+          state.expandedBatches.delete(bid);
+        } else {
+          state.expandedBatches.add(bid);
+        }
+        renderRunsList();
+      });
+    });
+
+    listEl.querySelectorAll(".batch-card").forEach((el) => {
+      el.addEventListener("click", () => {
+        state.selectedBatchId = el.dataset.batchId;
+        setViewMode("matrix");
+        renderRunsList();
+      });
+    });
 
     listEl.querySelectorAll(".run-card").forEach((el) => {
       el.addEventListener("click", () => {
@@ -1816,7 +1904,13 @@
 
   function renderMatrixView() {
     const el = $("matrixView");
-    const runs = getFilteredRuns();
+    let runs = getFilteredRuns();
+    if (state.selectedBatchId) {
+      runs = runs.filter((r) => r.batch_id === state.selectedBatchId);
+    }
+    if (state.hideDiscardedInMatrix) {
+      runs = runs.filter((r) => r.triage_status !== "discarded" && !(r.discard_reason && r.discard_reason !== ""));
+    }
     const stage = state.matrixStage;
 
     const stagePills = [
@@ -1942,16 +2036,42 @@
       `;
     }
 
+    const batchBanner = state.selectedBatchId
+      ? `<span class="badge badge-muted" style="margin-left:8px;">Batch: <code>${esc(state.selectedBatchId.slice(0, 8))}</code> <button id="clearBatchFilterBtn" class="btn btn-sm" style="margin-left:4px;padding:0 5px;" title="Show all batches">&times;</button></span>`
+      : "";
+
     el.innerHTML = `
       <div class="matrix-toolbar">
         <div>
-          <h2 style="margin:0 0 4px 0;">Stage Matrix <span class="muted" style="font-size:13px;font-weight:400;">(${runs.length} commit${runs.length === 1 ? "" : "s"})</span></h2>
+          <h2 style="margin:0 0 4px 0;">Stage Matrix <span class="muted" style="font-size:13px;font-weight:400;">(${runs.length} commit${runs.length === 1 ? "" : "s"})</span>${batchBanner}</h2>
           <div class="muted" style="font-size:12px;">Click a stage column or pill to compare one stage across all commits; click any row or cell to inspect that commit.</div>
         </div>
-        <div class="matrix-stage-pills">${stagePills}</div>
+        <div class="matrix-stage-pills">
+          <label class="checkbox-inline" style="margin-right:8px;font-size:12px;">
+            <input type="checkbox" id="matrixHideDiscarded" ${state.hideDiscardedInMatrix ? "checked" : ""} />
+            <span>Hide discarded</span>
+          </label>
+          ${stagePills}
+        </div>
       </div>
       <div class="card" style="overflow-x:auto;">${tableHtml}</div>
     `;
+
+    const clearBatchBtn = $("clearBatchFilterBtn");
+    if (clearBatchBtn) {
+      clearBatchBtn.addEventListener("click", () => {
+        state.selectedBatchId = null;
+        renderRunsList();
+        renderMatrixView();
+      });
+    }
+    const hideDiscardedEl = $("matrixHideDiscarded");
+    if (hideDiscardedEl) {
+      hideDiscardedEl.addEventListener("change", (e) => {
+        state.hideDiscardedInMatrix = e.target.checked;
+        renderMatrixView();
+      });
+    }
 
     el.querySelectorAll("[data-matrix-stage]").forEach((btn) => {
       btn.addEventListener("click", () => {

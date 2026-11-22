@@ -31,7 +31,8 @@ data class EvaluationRunRecord(
     val guardrailsMode: GuardrailsMode,
     val verificationScope: VerificationScope,
     val status: String = "running",
-    val startedAt: String
+    val startedAt: String,
+    val batchId: String? = null
 )
 
 data class StepTrajectoryRecord(
