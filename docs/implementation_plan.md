@@ -106,7 +106,8 @@ Artifact bundles reside under a configurable root (`cache.stages_dir`, defaultin
 │   └── <K_stage_hash>/
 │       ├── manifest.json
 │       ├── test_patch.diff
-│       └── triage_metadata.json
+│       ├── triage_metadata.json
+│       └── triage_transcript.json  # crawler mode only
 ├── synthesis/
 │   └── <K_stage_hash>/
 │       ├── manifest.json

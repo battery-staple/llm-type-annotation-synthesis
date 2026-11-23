@@ -122,6 +122,7 @@ Rather than executing the pipeline as a rigid, monolithic script, the orchestrat
   - `regression_test`: Fully qualified test coordinate (`TestCoordinate` holding `testClass: Fqcn` and `testMethod: String`).
   - `test_patch.diff`: Extracted test patch containing the regression test from $C$.
   - `triage_metadata.json`: Execution log on $C-1$/$C$ and source provenance.
+  - `triage_transcript.json`: Crawler mode only — single-shot classifier transcript emitted by the agent runner (no agent transcript exists in manifest mode).
 - **Deterministic Verification Invariant ($T_{\text{reg}}$ must fail on $C-1$ and pass on $C$)**:
   1. Retrieve the test patch from $C$ (`src/test/**`). Audit every touched path; the patch may only modify or add test sources and must not change production or build files. An invalid patch is discarded with `discard_reason: invalid_test_patch`.
   2. Verify that the unpatched $C-1$ project builds. A broken baseline is discarded with `discard_reason: build_broken_unpatched`, distinct from a failure to compile the test patch.

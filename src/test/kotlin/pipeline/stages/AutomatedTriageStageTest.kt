@@ -15,11 +15,13 @@ import pipeline.db.CommitTriageUpdate
 import pipeline.db.EvaluationRunRecord
 import pipeline.db.StepTrajectoryRecord
 import pipeline.db.TelemetryProjection
+import pipeline.cas.ArtifactNames
 import pipeline.ports.BuildResult
 import pipeline.ports.BuildRunner
 import pipeline.ports.CheckerResult
 import pipeline.ports.DatabasePort
 import pipeline.ports.SingleShotLlmClient
+import pipeline.ports.SingleShotLlmException
 import pipeline.ports.SingleShotLlmResponse
 import pipeline.ports.TestOutcome
 import pipeline.ports.TestRunResult
@@ -121,6 +123,13 @@ class AutomatedTriageStageTest {
             guardrailsMode: GuardrailsMode
         ): CheckerResult = error("unused")
     }
+
+    private fun triageEvent(content: String) = AgentTranscriptEvent(
+        timestamp = "2026-01-01T00:00:00Z",
+        eventType = AgentEventType.MESSAGE,
+        turnIndex = 1,
+        content = content
+    )
 
     @Test
     fun `cache key does not depend on depth or limit`() {
@@ -245,7 +254,8 @@ class AutomatedTriageStageTest {
                                 regressionTest = TestCoordinate(Fqcn("com.example.AppTest"), "testFix")
                             ),
                             usage = TokenUsage(),
-                            latencyMs = 10L
+                            latencyMs = 10L,
+                            transcript = listOf(triageEvent("triage-transcript-marker"))
                         )
                 },
                 buildRunner = unusedBuildRunner
@@ -259,6 +269,9 @@ class AutomatedTriageStageTest {
             assertTrue(res is StageResult.Discard)
             assertEquals(DiscardReason.NOT_BUGFIX, res.reason)
             assertEquals("non_bugfix", db.updates.last().triageStatus)
+            val transcriptFile = res.bundleDir!!.resolve(ArtifactNames.TRIAGE_TRANSCRIPT)
+            assertTrue(transcriptFile.isFile)
+            assertTrue(transcriptFile.readText().contains("triage-transcript-marker"))
         } finally {
             tmp.deleteRecursively()
         }
@@ -317,7 +330,8 @@ class AutomatedTriageStageTest {
                                 regressionTest = testCoord
                             ),
                             usage = TokenUsage(),
-                            latencyMs = 10L
+                            latencyMs = 10L,
+                            transcript = listOf(triageEvent("verified-triage-transcript"))
                         )
                 },
                 buildRunner = buildRunner
@@ -332,11 +346,44 @@ class AutomatedTriageStageTest {
             assertEquals(testCoord, res.data.regressionTest)
             assertTrue(res.data.testPatchFile.isFile)
             assertEquals("verified", db.updates.last().triageStatus)
+            val transcriptFile = res.bundleDir!!.resolve(ArtifactNames.TRIAGE_TRANSCRIPT)
+            assertTrue(transcriptFile.isFile)
+            val transcriptText = transcriptFile.readText()
+            assertTrue(transcriptText.contains("verified-triage-transcript"))
+            assertTrue(res.artifactsManifest.artifacts.any { it.path == ArtifactNames.TRIAGE_TRANSCRIPT })
 
             val restored = stage.restoreCached(res.bundleDir!!, res.artifactsManifest)
             assertNotNull(restored)
             assertEquals(res.data.commitHash, restored.commitHash)
             assertEquals(res.data.regressionTest, restored.regressionTest)
+        } finally {
+            tmp.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `classification failure keeps the transcript for transient failure reporting`() = runBlocking {
+        val tmp = Files.createTempDirectory("triage-failure-transcript-test-").toFile()
+        try {
+            val repo = tmp.resolve("repo")
+            val (parent, commit) = initGitRepo(repo)
+            val db = RecordingDatabase()
+            val events = listOf(triageEvent("failed-triage-transcript"))
+            val stage = AutomatedTriageStage(
+                llmClient = object : SingleShotLlmClient {
+                    override suspend fun classifyCommit(prompt: String, model: String, temperature: Double): SingleShotLlmResponse<TriageClassification> =
+                        throw SingleShotLlmException("no JSON", transcript = events)
+                },
+                buildRunner = unusedBuildRunner
+            )
+            val input = AutomatedTriageInput(
+                benchmarkId = BenchmarkId.of("demo", CommitHash(commit)),
+                worktree = IngestionWorktree(CommitHash(commit), CommitHash(parent), tmp.resolve("wt"), repo),
+                commitMetadata = CommitMetadata(commit, listOf(parent), "2026-01-01T00:00:00Z", "fix")
+            )
+            val res = stage.execute(makeContext(tmp, repo, db), input)
+            assertTrue(res is StageResult.TransientFailure)
+            assertEquals(events, res.transcript)
         } finally {
             tmp.deleteRecursively()
         }
@@ -377,12 +424,50 @@ class AutomatedTriageStageTest {
             )
         }
         val client = pipeline.runners.OpenCodeSingleShotLlmClient(agentRunner = fakeRunner)
-        var threw = false
+        var thrown: SingleShotLlmException? = null
         try {
             client.classifyCommit("prompt", "model", 0.0)
-        } catch (_: IllegalStateException) {
-            threw = true
+        } catch (e: SingleShotLlmException) {
+            thrown = e
         }
-        assertTrue(threw)
+        assertNotNull(thrown)
+        assertEquals(2, thrown.transcript.size)
+    }
+
+    @Test
+    fun `OpenCodeSingleShotLlmClient returns the runner transcript`() = runBlocking {
+        val classification = """{"isBugfix": true, "bugfixScore": 0.9, "category": "bugfix", "rationale": "ok", "regressionTest": {"testClass": "com.example.FooTest", "testMethod": "testBar"}}"""
+        val events = listOf(
+            triageEvent("prompt"),
+            AgentTranscriptEvent(
+                timestamp = "2026-01-01T00:00:01Z",
+                eventType = AgentEventType.MESSAGE,
+                turnIndex = 1,
+                content = classification
+            )
+        )
+        val fakeRunner = object : pipeline.ports.AgentRunner {
+            override suspend fun runAgent(
+                prompt: String,
+                cwd: File,
+                agentRole: String,
+                model: String,
+                maxSteps: Int,
+                timeoutSeconds: Long,
+                seed: Long,
+                temperature: Double,
+                environment: Map<String, String>,
+                onEvent: (suspend (AgentTranscriptEvent) -> Unit)?
+            ) = pipeline.ports.AgentRunResult(
+                exitCode = 0,
+                stepsCounted = 1,
+                transcript = events,
+                timedOut = false
+            )
+        }
+        val response = pipeline.runners.OpenCodeSingleShotLlmClient(agentRunner = fakeRunner)
+            .classifyCommit("prompt", "model", 0.0)
+        assertEquals(events, response.transcript)
+        assertEquals("testBar", response.value.regressionTest?.testMethod)
     }
 }

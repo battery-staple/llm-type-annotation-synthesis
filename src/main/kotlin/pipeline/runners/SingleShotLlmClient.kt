@@ -7,6 +7,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import pipeline.ports.AgentRunner
 import pipeline.ports.SingleShotLlmClient
+import pipeline.ports.SingleShotLlmException
 import pipeline.ports.SingleShotLlmResponse
 import pipeline.ports.TriageClassification
 import pipeline.stages.AgentEventType
@@ -67,11 +68,17 @@ class OpenCodeSingleShotLlmClient(
             .filter { it.eventType == AgentEventType.MESSAGE }
             .mapNotNull { it.content }
         val value = decodeLastClassification(messageContents)
-            ?: throw IllegalStateException(
+            ?: throw SingleShotLlmException(
                 "Single-shot LLM produced no parseable TriageClassification JSON " +
-                    "(exit=${result.exitCode}, messages=${messageContents.size}, totalEvents=${result.transcript.size})"
+                    "(exit=${result.exitCode}, messages=${messageContents.size}, totalEvents=${result.transcript.size})",
+                transcript = result.transcript
             )
-        return SingleShotLlmResponse(value = value, usage = usage, latencyMs = latencyMs)
+        return SingleShotLlmResponse(
+            value = value,
+            usage = usage,
+            latencyMs = latencyMs,
+            transcript = result.transcript
+        )
     }
 
     private fun decodeLastClassification(contents: List<String>): TriageClassification? {

@@ -23,6 +23,7 @@ object ArtifactNames {
 
     const val TEST_PATCH = "test_patch.diff"
     const val TRIAGE_METADATA = "triage_metadata.json"
+    const val TRIAGE_TRANSCRIPT = "triage_transcript.json"
 
     const val CUSTOM_QUALS_JAR = "custom-quals.jar"
     const val PLACEMENT_GUIDE = "placement_guide.md"

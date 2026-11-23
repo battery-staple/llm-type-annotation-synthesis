@@ -33,8 +33,16 @@ data class TriageClassification(
 data class SingleShotLlmResponse<T>(
     val value: T,
     val usage: TokenUsage,
-    val latencyMs: Long
+    val latencyMs: Long,
+    val transcript: List<AgentTranscriptEvent> = emptyList()
 )
+
+/** Classification failure that still carries the model interaction for auditing. */
+class SingleShotLlmException(
+    message: String,
+    cause: Throwable? = null,
+    val transcript: List<AgentTranscriptEvent> = emptyList()
+) : RuntimeException(message, cause)
 
 interface SingleShotLlmClient {
     suspend fun classifyCommit(

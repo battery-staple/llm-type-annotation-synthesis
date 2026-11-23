@@ -7,6 +7,7 @@ import pipeline.cas.CacheKeys
 import pipeline.db.CommitTriageUpdate
 import pipeline.ports.BuildRunner
 import pipeline.ports.SingleShotLlmClient
+import pipeline.ports.SingleShotLlmException
 import pipeline.util.Git
 
 /**
@@ -117,6 +118,12 @@ class AutomatedTriageStage(
                 model = ctx.config.model.triageModel,
                 temperature = ctx.sampleTemperature
             )
+        } catch (e: SingleShotLlmException) {
+            return StageResult.TransientFailure(
+                error = RuntimeException("LLM triage classification failed for ${commitHash.abbreviated}: ${e.message}", e),
+                stageTurnsTaken = 1,
+                transcript = e.transcript
+            )
         } catch (t: Throwable) {
             return StageResult.TransientFailure(
                 error = RuntimeException("LLM triage classification failed for ${commitHash.abbreviated}: ${t.message}", t),
@@ -126,6 +133,7 @@ class AutomatedTriageStage(
         }
 
         val classification = response.value
+        val transcript = response.transcript
         ctx.database.updateCommit(
             CommitTriageUpdate(
                 commitHash = commitHash.hash,
@@ -152,7 +160,8 @@ class AutomatedTriageStage(
                 reason = DiscardReason.NOT_BUGFIX,
                 details = "Classified as non-bugfix (isBugfix=${classification.isBugfix}, score=${classification.bugfixScore}, threshold=$threshold): ${classification.rationale}",
                 sourceProvenance = TriageMode.CRAWLER,
-                extraMetadata = extraMeta
+                extraMetadata = extraMeta,
+                transcript = transcript
             )
         }
 
@@ -166,7 +175,8 @@ class AutomatedTriageStage(
                 reason = DiscardReason.NO_TEST_FOUND,
                 details = "LLM classified commit as bugfix (score=${classification.bugfixScore}) but identified no regressionTest: ${classification.rationale}",
                 sourceProvenance = TriageMode.CRAWLER,
-                extraMetadata = extraMeta
+                extraMetadata = extraMeta,
+                transcript = transcript
             )
 
         return TriageVerifier.verify(
@@ -181,7 +191,8 @@ class AutomatedTriageStage(
                 sourceProvenance = TriageMode.CRAWLER,
                 sampleIndex = ctx.sampleIndex,
                 sampleTemperature = ctx.sampleTemperature,
-                extraMetadata = extraMeta
+                extraMetadata = extraMeta,
+                transcript = transcript
             )
         )
     }

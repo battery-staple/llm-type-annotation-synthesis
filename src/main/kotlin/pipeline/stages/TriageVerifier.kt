@@ -1,6 +1,7 @@
 package pipeline.stages
 
 import java.io.File
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -36,7 +37,8 @@ internal object TriageVerifier {
         val sourceProvenance: TriageMode,
         val sampleIndex: Int,
         val sampleTemperature: Double,
-        val extraMetadata: Map<String, JsonPrimitive> = emptyMap()
+        val extraMetadata: Map<String, JsonPrimitive> = emptyMap(),
+        val transcript: List<AgentTranscriptEvent> = emptyList()
     )
 
     suspend fun verify(
@@ -103,7 +105,7 @@ internal object TriageVerifier {
             val c1Build = metrics.compile("C-1 compile", c1Sandbox)
             if (!c1Build.success) {
                 if (c1Build.timedOut) return StageResult.TransientFailure(
-                    RuntimeException("C-1 compile timed out: ${c1Build.output.take(2000)}"), 0, emptyList()
+                    RuntimeException("C-1 compile timed out: ${c1Build.output.take(2000)}"), 0, req.transcript
                 )
                 ctx.database.updateCommit(
                     CommitTriageUpdate(
@@ -134,7 +136,7 @@ internal object TriageVerifier {
             val c1Result = metrics.tests("C-1 regression test", c1Sandbox, testFilter = req.regressionTest)
             recordTriageTestTelemetry(ctx, req, c1Result, suiteKind = "regression_test", xmlPath = null)
             if (c1Result.timedOut) return StageResult.TransientFailure(
-                RuntimeException("C-1 regression test timed out: ${c1Result.output.take(2000)}"), 0, emptyList()
+                RuntimeException("C-1 regression test timed out: ${c1Result.output.take(2000)}"), 0, req.transcript
             )
             if (c1Result.compileFailed) {
                 return discardFromVerification(
@@ -174,7 +176,7 @@ internal object TriageVerifier {
             val cResult = metrics.tests("C regression test", cSandbox, testFilter = req.regressionTest)
             recordTriageTestTelemetry(ctx, req, cResult, suiteKind = "regression_test", xmlPath = null)
             if (cResult.timedOut) return StageResult.TransientFailure(
-                RuntimeException("C regression test timed out: ${cResult.output.take(2000)}"), 0, emptyList()
+                RuntimeException("C regression test timed out: ${cResult.output.take(2000)}"), 0, req.transcript
             )
             val cPassed = cResult.outcomes.any { it.status == TestStatus.PASSED }
             val cFailed = cResult.outcomes.any { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
@@ -202,6 +204,7 @@ internal object TriageVerifier {
                 sampleIndex = req.sampleIndex,
                 sampleTemperature = req.sampleTemperature
             )
+            writeTriageTranscript(writer, req.transcript)
             writer.writeBytes(ArtifactNames.TEST_PATCH, patchBytes)
             val patchFileRef = stagingDir.resolve(ArtifactNames.TEST_PATCH)
             writer.writeJson(
@@ -274,6 +277,7 @@ internal object TriageVerifier {
         sampleIndex = req.sampleIndex,
         sampleTemperature = req.sampleTemperature,
         patchBytes = patchBytes,
+        transcript = req.transcript,
         extraMetadata = buildMap {
             put("test_patch_path", JsonPrimitive(req.testPatchFile?.name ?: "generated"))
             put("path_audit_result", JsonPrimitive(pathAudit))
@@ -285,6 +289,14 @@ internal object TriageVerifier {
             putAll(req.extraMetadata)
         }
     )
+
+    private fun writeTriageTranscript(writer: StageArtifactWriter, transcript: List<AgentTranscriptEvent>) {
+        if (transcript.isEmpty()) return
+        writer.writeText(
+            ArtifactNames.TRIAGE_TRANSCRIPT,
+            PipelineJson.json.encodeToString(ListSerializer(AgentTranscriptEvent.serializer()), transcript),
+        )
+    }
 
     suspend fun discard(
         ctx: RunContext,
@@ -298,7 +310,8 @@ internal object TriageVerifier {
         sampleIndex: Int = ctx.sampleIndex,
         sampleTemperature: Double = ctx.sampleTemperature,
         patchBytes: ByteArray? = null,
-        extraMetadata: Map<String, JsonPrimitive> = emptyMap()
+        extraMetadata: Map<String, JsonPrimitive> = emptyMap(),
+        transcript: List<AgentTranscriptEvent> = emptyList()
     ): StageResult.Discard {
         if (reason.dbTriageStatus != null) {
             ctx.database.updateCommit(
@@ -317,6 +330,7 @@ internal object TriageVerifier {
             sampleIndex = sampleIndex,
             sampleTemperature = sampleTemperature
         )
+        writeTriageTranscript(writer, transcript)
         if (patchBytes != null) {
             writer.writeBytes(ArtifactNames.TEST_PATCH, patchBytes)
         }
