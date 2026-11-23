@@ -13,6 +13,7 @@ object RuntimeCleanup {
     private const val RUN_LOG_LIMIT = 2_000
     private const val RUN_LOG_DAYS = 14L
     private const val DB_AGE_HOURS = 24L
+    private const val LEGACY_STAGING_HOURS = 6L
 
     fun startup(logDir: File = logDirectory(), projectDir: File = File("."), now: Instant = Instant.now()) {
         bestEffort("run log retention") { pruneRunLogs(File(logDir, "runs"), RUN_LOG_LIMIT, RUN_LOG_DAYS, now) }
@@ -39,10 +40,27 @@ object RuntimeCleanup {
         }
     }
 
-    fun pruneCasStaging(stagesDirectory: File) {
+    /**
+     * Removes CAS staging directories whose writer is gone. A staging directory
+     * belongs to the process named in it (`.staging-p<pid>-...`), and another
+     * pipeline process may be writing one right now, so only directories of
+     * dead processes are removed. Directories from before owner names are
+     * removed once they are older than [LEGACY_STAGING_HOURS].
+     */
+    fun pruneCasStaging(stagesDirectory: File, now: Instant = Instant.now()) {
         if (!stagesDirectory.isDirectory) return
+        val legacyCutoff = now.minus(Duration.ofHours(LEGACY_STAGING_HOURS)).toEpochMilli()
         stagesDirectory.listFiles()?.forEach { stage ->
             if (stage.isDirectory) stage.listFiles { child -> child.isDirectory && child.name.startsWith(".staging-") }
+                ?.filter { dir ->
+                    val owner = Regex("""^\${pipeline.cas.CasStaging.PREFIX}(\d+)-""")
+                        .find(dir.name)?.groupValues?.get(1)?.toLongOrNull()
+                    if (owner != null) {
+                        ProcessHandle.of(owner).map { !it.isAlive }.orElse(true)
+                    } else {
+                        dir.lastModified() < legacyCutoff
+                    }
+                }
                 ?.forEach { stale -> deleteTree(stale) }
         }
     }

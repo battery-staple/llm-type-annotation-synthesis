@@ -142,6 +142,11 @@ class StageArtifactWriter(
 
 data class CasBundle(val dir: File, val manifest: ArtifactsManifest)
 
+/** Staging directory names: `.staging-p<owner pid>-<nanos>-<thread>`. */
+object CasStaging {
+    const val PREFIX = ".staging-p"
+}
+
 class CasEngine(
     private val root: File,
     val enabled: Boolean = true
@@ -155,7 +160,11 @@ class CasEngine(
     fun createStagingDir(stage: StageName): File {
         val parent = stageDir(stage)
         parent.mkdirs()
-        val staging = parent.resolve(".staging-${System.nanoTime()}-${Thread.currentThread().id}")
+        // The owner's PID lets startup cleanup in another pipeline process tell
+        // an abandoned bundle from one that is still being written.
+        val staging = parent.resolve(
+            "${CasStaging.PREFIX}${ProcessHandle.current().pid()}-${System.nanoTime()}-${Thread.currentThread().id}"
+        )
         staging.mkdirs()
         return staging
     }
