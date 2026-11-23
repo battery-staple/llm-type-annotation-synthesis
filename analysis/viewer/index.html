@@ -94,30 +94,32 @@
           <div class="stage-stepper" id="stageStepper"></div>
 
           <div id="stageInspector" class="stage-inspector hidden">
-            <div class="stage-header-bar">
-              <div class="stage-header-left">
-                <span id="stageStatusIcon" class="stage-dot"></span>
-                <h3 id="stageTitle"></h3>
-                <span id="stageCacheBadge" class="badge badge-muted hidden"></span>
-                <span id="stageDuration" class="muted"></span>
+            <div class="stage-sticky-header">
+              <div class="stage-header-bar">
+                <div class="stage-header-left">
+                  <span id="stageStatusIcon" class="stage-dot"></span>
+                  <h3 id="stageTitle"></h3>
+                  <span id="stageCacheBadge" class="badge badge-muted hidden"></span>
+                  <span id="stageDuration" class="muted"></span>
+                </div>
+                <div class="stage-header-right">
+                  <label id="attemptSelectorWrap" class="attempt-wrap hidden">
+                    Attempt:
+                    <select id="attemptSelector"></select>
+                  </label>
+                  <span id="stageStats" class="muted"></span>
+                </div>
               </div>
-              <div class="stage-header-right">
-                <label id="attemptSelectorWrap" class="attempt-wrap hidden">
-                  Attempt:
-                  <select id="attemptSelector"></select>
-                </label>
-                <span id="stageStats" class="muted"></span>
-              </div>
-            </div>
 
-            <nav class="stage-tabs" role="tablist">
-              <button class="stage-tab active" data-stage-tab="overview">Overview &amp; Artifacts</button>
-              <button class="stage-tab" data-stage-tab="patch">Patch / Diff <span id="cntPatch" class="pill-count"></span></button>
-              <button class="stage-tab" data-stage-tab="transcript">Transcript &amp; Turns <span id="cntTranscript" class="pill-count"></span></button>
-              <button class="stage-tab" data-stage-tab="diagnostics">Diagnostics &amp; Checker <span id="cntDiagnostics" class="pill-count"></span></button>
-              <button class="stage-tab" data-stage-tab="tests">Tests <span id="cntTests" class="pill-count"></span></button>
-              <button class="stage-tab" data-stage-tab="guardrails">Guardrails <span id="cntGuardrails" class="pill-count"></span></button>
-            </nav>
+              <nav class="stage-tabs" role="tablist">
+                <button class="stage-tab active" data-stage-tab="overview">Overview &amp; Artifacts</button>
+                <button class="stage-tab" data-stage-tab="patch">Patch / Diff <span id="cntPatch" class="pill-count"></span></button>
+                <button class="stage-tab" data-stage-tab="transcript">Transcript &amp; Turns <span id="cntTranscript" class="pill-count"></span></button>
+                <button class="stage-tab" data-stage-tab="diagnostics">Diagnostics &amp; Checker <span id="cntDiagnostics" class="pill-count"></span></button>
+                <button class="stage-tab" data-stage-tab="tests">Tests <span id="cntTests" class="pill-count"></span></button>
+                <button class="stage-tab" data-stage-tab="guardrails">Guardrails <span id="cntGuardrails" class="pill-count"></span></button>
+              </nav>
+            </div>
 
             <div id="stageTabContent" class="stage-tab-content"></div>
           </div>

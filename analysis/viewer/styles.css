@@ -719,7 +719,9 @@ code, pre {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px 20px 28px 20px;
+  /* No top padding: sticky children must reach the very top of the scrollport,
+     otherwise scrolling content peeks through the gap above the sticky header. */
+  padding: 0 20px 28px 20px;
 }
 
 /* Stage Stepper */
@@ -727,6 +729,7 @@ code, pre {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   gap: 8px;
+  margin-top: 16px;
   margin-bottom: 16px;
 }
 
@@ -801,7 +804,15 @@ code, pre {
   background: var(--bg-elev);
   border: 1px solid var(--border);
   border-radius: 10px;
-  overflow: hidden;
+  /* `clip` keeps the rounded corners without creating a scroll container,
+     so the sticky stage header can stick to .run-tab-panel's scrollport. */
+  overflow: clip;
+}
+
+.stage-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
 }
 
 .stage-header-bar {
@@ -1302,6 +1313,7 @@ code, pre {
   justify-content: space-between;
   align-items: center;
   gap: 10px;
+  margin-top: 16px;
   margin-bottom: 12px;
 }
 
