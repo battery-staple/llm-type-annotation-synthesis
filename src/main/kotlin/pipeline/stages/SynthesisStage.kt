@@ -56,6 +56,7 @@ class SynthesisStage(
         val configSlice = mapOf(
             "freedom_level" to freedomLevelName(ctx.config.synthesis.freedomLevel),
             "allowed_checkers" to allowedCheckersName(ctx.config.synthesis.allowedCheckers),
+            "builtin_checker" to ctx.config.synthesis.builtinChecker,
             "model_synthesis" to ctx.config.model.synthesisModel,
             "checker_processor" to ctx.config.checker.processor,
             "checker_category" to checkerCategoryName(ctx.config.checker.category),
@@ -109,6 +110,7 @@ class SynthesisStage(
         }
 
         val bug = input.bugContext
+        val builtinChecker = BuiltinCheckerCatalog.require(ctx.config.synthesis.builtinChecker)
         val basePrompt = PromptTemplates.render(
             template,
             mapOf(
@@ -119,6 +121,9 @@ class SynthesisStage(
                 "commit_diff" to bug.commitDiff,
                 "freedom_level" to freedomLevelName(ctx.config.synthesis.freedomLevel),
                 "allowed_checkers" to allowedCheckersName(ctx.config.synthesis.allowedCheckers),
+                "custom_processor" to ctx.config.checker.processor,
+                "builtin_checker" to builtinChecker.processor,
+                "builtin_checker_name" to builtinChecker.displayName,
             ),
         )
 
@@ -129,6 +134,12 @@ class SynthesisStage(
         var prompt = basePrompt
         var lastProblems: List<String> = listOf("synthesis agent has not run yet")
         var accepted = false
+        var acceptedDecision: SynthesisDecision? = null
+        val decisionPolicy = SynthesisDecisionPolicy(
+            allowedCheckers = ctx.config.synthesis.allowedCheckers,
+            customProcessor = ctx.config.checker.processor,
+            builtinProcessor = builtinChecker.processor,
+        )
         val timeoutSeconds = ctx.config.agent.timeoutMs / 1000
         while (attempt < MAX_ATTEMPTS && !accepted) {
             attempt++
@@ -147,6 +158,14 @@ class SynthesisStage(
             fullTranscript += runResult.transcript
             agentStartupFailure(runResult)?.let { throw StageHaltException(it) }
             haltIfBenchmarkRepoDirty(ctx, "synthesis")
+            val decisionResult = runCatching {
+                SynthesisDecisionParser.parse(workspace.resolve(SynthesisDecision.FILE_NAME))
+            }
+            val decision = decisionResult.getOrNull()
+            val decisionProblems = buildList {
+                decisionResult.exceptionOrNull()?.let { add(it.message ?: "invalid synthesis decision") }
+                decision?.let { addAll(SynthesisDecisionValidator.validate(it, decisionPolicy)) }
+            }
             val problems = buildList {
                 agentFailureMessage(runResult)?.let { add(it) }
                 addAll(
@@ -157,12 +176,15 @@ class SynthesisStage(
                         stagingDir,
                         attempt,
                         ctx,
-                        compilationEvents
+                        compilationEvents,
+                        decision,
+                        decisionProblems,
                     )
                 )
             }
             if (problems.isEmpty()) {
                 accepted = true
+                acceptedDecision = decision
                 lastProblems = emptyList()
             } else {
                 lastProblems = problems
@@ -179,33 +201,33 @@ class SynthesisStage(
                 fullTranscript.toList(),
             )
         }
+        val decision = acceptedDecision
+            ?: return StageResult.TransientFailure(
+                RuntimeException("synthesis accepted without a parsed strategy decision"),
+                stepsTaken,
+                fullTranscript.toList(),
+            )
 
-        val discovered = QualifierDiscovery.typeUseQualifiers(sourcesWorkspace)
-        val builtinAllowed = ctx.config.synthesis.allowedCheckers == AllowedCheckers.ALL ||
-            ctx.config.synthesis.allowedCheckers == AllowedCheckers.BUILTIN_ONLY
-        // If custom qualifiers were found but only builtin checkers are allowed, the
-        // custom hierarchy is ignored and the builtin path is taken.
-        val processor: String
-        val category: CheckerCategory
-        val qualifierNames: List<Fqcn>
-        if (discovered.isNotEmpty() && ctx.config.synthesis.allowedCheckers != AllowedCheckers.BUILTIN_ONLY) {
-            processor = ctx.config.checker.processor
-            category = CheckerCategory.CUSTOM_QUALIFIER_HIERARCHY
-            qualifierNames = discovered.map { it.fqcn }
-        } else if (builtinAllowed) {
-            processor = BUILTIN_PROCESSOR
-            category = CheckerCategory.BUILTIN_CHECKER
-            qualifierNames = emptyList()
+        val discovered = if (decision.checkerCategory == CheckerCategory.CUSTOM_QUALIFIER_HIERARCHY) {
+            QualifierDiscovery.typeUseQualifiers(sourcesWorkspace)
+        } else {
+            emptyList()
+        }
+        if (decision.checkerCategory == CheckerCategory.CUSTOM_QUALIFIER_HIERARCHY && discovered.isEmpty()) {
+            return StageResult.TransientFailure(
+                RuntimeException("custom_qualifier_hierarchy decision was accepted without TYPE_USE qualifiers"),
+                stepsTaken,
+                fullTranscript.toList(),
+            )
+        }
+        val processor = decision.processor
+        val category = decision.checkerCategory
+        val qualifierNames = discovered.map { it.fqcn }
+        if (category == CheckerCategory.BUILTIN_CHECKER) {
             val stagingJar = stagingDir.resolve(ArtifactNames.CUSTOM_QUALS_JAR)
             val emptySrc = workspace.resolve(".empty-quals-src")
             emptySrc.mkdirs()
             createJarFromDirectory(emptySrc, stagingJar)
-        } else {
-            return StageResult.TransientFailure(
-                RuntimeException("no TYPE_USE qualifiers discovered and synthesis.allowed_checkers forbids the builtin fallback"),
-                stepsTaken,
-                fullTranscript.toList(),
-            )
         }
 
         val guideFile = workspace.resolve(ArtifactNames.PLACEMENT_GUIDE)
@@ -220,6 +242,7 @@ class SynthesisStage(
         }
         writer.registerDirectory(ArtifactNames.CUSTOM_QUALS_SRC_DIR)
         val stagedGuide = writer.copyIn(ArtifactNames.PLACEMENT_GUIDE, guideFile)
+        writer.copyIn(ArtifactNames.SYNTHESIS_DECISION, workspace.resolve(SynthesisDecision.FILE_NAME))
         writer.register(ArtifactNames.CUSTOM_QUALS_JAR, stagingJar)
 
         val durationMs = System.currentTimeMillis() - startedMs
@@ -252,6 +275,17 @@ class SynthesisStage(
                 buildJsonObject {
                     put("processor", JsonPrimitive(processor))
                     put("checker_category", JsonPrimitive(checkerCategoryName(category)))
+                    put("allowed_checkers", JsonPrimitive(allowedCheckersName(ctx.config.synthesis.allowedCheckers)))
+                    put("fallback_occurred", JsonPrimitive(false))
+                    put(
+                        "decision",
+                        buildJsonObject {
+                            put("checker_category", JsonPrimitive(checkerCategoryName(category)))
+                            put("processor", JsonPrimitive(processor))
+                            put("rationale", JsonPrimitive(decision.rationale))
+                            put("source", JsonPrimitive("agent"))
+                        },
+                    )
                     put(
                         "qualifier_class_names",
                         JsonArray(qualifierNames.map { JsonPrimitive(it.value) }),
@@ -288,6 +322,9 @@ class SynthesisStage(
                 category,
                 transcriptFile.absolutePath,
                 metricsFile.absolutePath,
+                decisionSource = "agent",
+                decisionRationale = decision.rationale.take(2000),
+                fallbackOccurred = false,
             ),
             qualifiers = qualifierInfos.map { info ->
                 QualifierRecord(
@@ -337,9 +374,12 @@ class SynthesisStage(
     }
 
     /**
-     * Validates one agent attempt. A missing source tree is only acceptable when the
-     * builtin-checker fallback is allowed; otherwise it is a retryable problem.
-     * Compiles present sources directly into the staging bundle jar.
+     * Validates one agent attempt against the explicit strategy decision.
+     *
+     * A custom decision requires valid TYPE_USE qualifier sources and compiles
+     * them into the staging bundle jar. A built-in decision requires no custom
+     * sources; the empty marker jar is created after acceptance. A missing or
+     * malformed decision is always a retryable problem, never a fallback.
      */
     private fun validateAttempt(
         workspace: File,
@@ -349,55 +389,69 @@ class SynthesisStage(
         attempt: Int,
         ctx: RunContext,
         compilationEvents: MutableList<CompilationEventRecord>,
+        decision: SynthesisDecision?,
+        decisionProblems: List<String>,
     ): List<String> {
         val problems = mutableListOf<String>()
-        val builtinAllowed = ctx.config.synthesis.allowedCheckers == AllowedCheckers.ALL ||
-            ctx.config.synthesis.allowedCheckers == AllowedCheckers.BUILTIN_ONLY
+        problems += decisionProblems
         val javaFiles = if (sourcesWorkspace.isDirectory) {
             sourcesWorkspace.walkTopDown().filter { it.isFile && it.extension == "java" }.toList()
         } else {
             emptyList()
         }
-        if (javaFiles.isEmpty()) {
-            if (!builtinAllowed) {
-                problems += "custom_quals_src/ contains no Java sources and synthesis.allowed_checkers forbids the builtin fallback"
-            }
-        } else {
-            problems += QualifierValidator.validatePureMarkerSources(sourcesWorkspace)
-            val stagingJar = stagingDir.resolve(ArtifactNames.CUSTOM_QUALS_JAR)
-            val classpath = if (checkerQualJar.isFile) listOf(checkerQualJar) else emptyList()
-            val result = runCatching { javac.compileAndPackageJar(javaFiles, stagingJar, classpath) }.getOrElse { error ->
-                compilationEvents += CompilationEventRecord(
-                    TelemetryIds.id(),
-                    ctx.runId,
-                    ctx.stepId,
-                    null,
-                    "synthesis",
-                    attempt,
-                    1,
-                    "javac invocation threw: ${error.message}".take(4000),
-                )
-                problems += "javac invocation failed: ${error.message}"
-                null
-            }
-            if (result != null) {
-                compilationEvents += CompilationEventRecord(
-                    TelemetryIds.id(),
-                    ctx.runId,
-                    ctx.stepId,
-                    null,
-                    "synthesis",
-                    attempt,
-                    result.exitCode,
-                    result.diagnostics.joinToString("\n") { diagnostic ->
-                        "${diagnostic.kind}:${diagnostic.lineNumber}:${diagnostic.columnNumber}: ${diagnostic.message}"
-                    }.take(4000),
-                )
-                if (!result.success) {
-                    problems += "javac compilation failed: " +
-                        result.diagnostics.joinToString("; ") { it.message }.take(2000)
+        when (decision?.checkerCategory) {
+            CheckerCategory.CUSTOM_QUALIFIER_HIERARCHY -> {
+                if (javaFiles.isEmpty()) {
+                    problems += "custom_qualifier_hierarchy decision requires at least one Java source " +
+                        "under custom_quals_src/"
+                } else {
+                    problems += QualifierValidator.validatePureMarkerSources(sourcesWorkspace)
+                    problems += QualifierValidator.validateTypeUseLattice(sourcesWorkspace)
+                    val stagingJar = stagingDir.resolve(ArtifactNames.CUSTOM_QUALS_JAR)
+                    val classpath = if (checkerQualJar.isFile) listOf(checkerQualJar) else emptyList()
+                    val result = runCatching { javac.compileAndPackageJar(javaFiles, stagingJar, classpath) }.getOrElse { error ->
+                        compilationEvents += CompilationEventRecord(
+                            TelemetryIds.id(),
+                            ctx.runId,
+                            ctx.stepId,
+                            null,
+                            "synthesis",
+                            attempt,
+                            1,
+                            "javac invocation threw: ${error.message}".take(4000),
+                        )
+                        problems += "javac invocation failed: ${error.message}"
+                        null
+                    }
+                    if (result != null) {
+                        compilationEvents += CompilationEventRecord(
+                            TelemetryIds.id(),
+                            ctx.runId,
+                            ctx.stepId,
+                            null,
+                            "synthesis",
+                            attempt,
+                            result.exitCode,
+                            result.diagnostics.joinToString("\n") { diagnostic ->
+                                "${diagnostic.kind}:${diagnostic.lineNumber}:${diagnostic.columnNumber}: ${diagnostic.message}"
+                            }.take(4000),
+                        )
+                        if (!result.success) {
+                            problems += "javac compilation failed: " +
+                                result.diagnostics.joinToString("; ") { it.message }.take(2000)
+                        }
+                    }
                 }
             }
+
+            CheckerCategory.BUILTIN_CHECKER -> {
+                if (javaFiles.isNotEmpty()) {
+                    problems += "builtin_checker decision must not include custom qualifier sources; " +
+                        "remove the ${javaFiles.size} Java file(s) under custom_quals_src/"
+                }
+            }
+
+            null -> Unit // The missing/invalid decision is already reported above.
         }
         val guideFile = workspace.resolve(ArtifactNames.PLACEMENT_GUIDE)
         if (!guideFile.isFile) {
@@ -447,7 +501,6 @@ class SynthesisStage(
 
     companion object {
         const val MAX_ATTEMPTS = 3
-        const val BUILTIN_PROCESSOR = "org.checkerframework.checker.nullness.NullnessChecker"
         const val SYNTHESIS_METADATA = "synthesis_metadata.json"
     }
 }

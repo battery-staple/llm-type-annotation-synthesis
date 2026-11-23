@@ -85,7 +85,7 @@ Where:
 - $\text{stage\_name}$: Canonical enum identifier from `StageName` (`"ingestion"`, `"triage"`, `"synthesis"`, `"application"`, `"repair"`, `"verification"`).
 - $H(\text{stage\_input})$: Hash of the complete typed stage input (for example `BugContext` or `ApplicationInput`), not merely the upstream artifact hashes. This prevents two semantically different inputs from colliding.
 - $H(\text{upstream\_artifacts})$: Cryptographic hash of upstream input artifacts (e.g., for the application stage, hash of the $C-1$ commit, `custom-quals.jar`, and `placement_guide.md`).
-- $H(\text{config\_slice})$: Canonical JSON hash of configuration parameters governing this specific stage, including model, seed, temperature, and checker processor/quals/category.
+- $H(\text{config\_slice})$: Canonical JSON hash of configuration parameters governing this specific stage, including model, seed, temperature, checker processor/quals/category, and `synthesis.builtin_checker` in the synthesis key.
 - $H(\text{prompt\_template})$: SHA-256 hash of the markdown prompt template used for agent instructions.
 - $H(\text{stage\_code})$: SHA-256 fingerprint of the compiled stage and validator bytecode, or an equivalent versioned source fingerprint (module/class build ID plus source revision). A hand-maintained version string is not sufficient.
 - $\text{sample\_seed}$ / $\text{sample\_temperature}$: Deterministic sampling parameters for the run. Included only for stochastic (LLM-backed) stages; deterministic stages omit them so a seed change cannot fork an identical bundle.
@@ -111,6 +111,8 @@ Artifact bundles reside under a configurable root (`cache.stages_dir`, defaultin
 ├── synthesis/
 │   └── <K_stage_hash>/
 │       ├── manifest.json
+│       ├── synthesis_decision.json
+│       ├── synthesis_metadata.json
 │       ├── custom-quals.jar
 │       ├── placement_guide.md
 │       ├── custom_quals_src/
@@ -668,11 +670,12 @@ The orchestrator executes the pipeline stages as an isolated, content-addressabl
 3. **Iterative Compilation**: The agent outputs qualifier source files (e.g., `@SourceId.java`, `@TargetId.java`, `@IdBottom.java`) into `custom_quals_src/`. `JavacRunner` compiles them in-process against `checker-qual.jar`. Any syntax errors or circular subtyping issues are fed back to the agent until compilation succeeds or the turn budget is exhausted.
 4. **Zero-Helpers Enforcement**: The validator verifies that `custom_quals_src/` contains **strictly annotation declarations**. Any class, interface with default methods, record, or static utility is rejected.
 5. **Declarative Placement Guide Emission & Rule Extraction**: The agent produces `placement_guide.md`, detailing high-level semantic typing criteria structured across four standardized categories (Defaulting Invariants, Source Rules / Introducers, Sink Rules / Consumers, Sanitizers & Coercions) without naming concrete repository symbols. A parser extracts the rules, verifies structural adherence, and computes `policy_rule_count` (total and per-category breakdown).
-6. **Packaging & Qualifier Discovery**: `JavacRunner` packages the compiled classes into `custom-quals.jar`. A built-in-only sample emits an empty marker jar so the checker harness has a uniform artifact; it contributes no qualifiers and receives no `-Aquals` flag. A class discovery scanner parses the custom qualifier ASTs and records **all** `@Target(TYPE_USE)` qualifier annotations, including root/default qualifiers, not only `@SubtypeOf` children. The resulting `qualifierClassNames` list feeds `-Aquals` for custom hierarchies; the stage also derives the selected `processor` and `checkerCategory` for the checker configuration.
-7. **Output Generation**: Emits `SynthesizedLattice` packaging `custom-quals.jar`, `placement_guide.md`, discovered `qualifierClassNames`, `policyRuleCount`, `ruleCountsByCategory`, `processor`, and `checkerCategory`, plus `synthesis_transcript.json` and `synthesis_metrics.json`.
+6. **Decision Validation**: The agent must write `synthesis_decision.json` at the workspace root with `checker_category` (`custom_qualifier_hierarchy` or `builtin_checker`), `processor` (FQCN), and a non-empty `rationale`. `custom_only` requires the custom category and `checker.processor`; `builtin_only` requires the built-in category and `synthesis.builtin_checker`; `all` allows either explicit selection. Missing/malformed decisions, missing `TYPE_USE` qualifiers, multiple roots or bottoms, disconnected qualifiers, and custom sources for a built-in decision are retryable validation failures. After three attempts the stage fails; it never switches strategies silently.
+7. **Packaging & Qualifier Discovery**: `JavacRunner` packages custom classes into `custom-quals.jar`; an explicitly selected built-in-only sample emits an empty marker jar and receives no `-Aquals` flag. The scanner records all `@Target(TYPE_USE)` custom qualifier annotations, including root/default qualifiers. Built-in selection uses `synthesis.builtin_checker` (default `org.checkerframework.checker.nullness.NullnessChecker`; supported catalog: Nullness, Signedness, Index, Regex, FormatString), and unsupported values fail config loading. The accepted choice is recorded in `synthesis_metadata.json` as `decision` with `checker_category`, `processor`, `rationale`, `source: "agent"`, plus `allowed_checkers` and `fallback_occurred: false`.
+8. **Output Generation**: Emits `SynthesizedLattice` packaging `custom-quals.jar`, `placement_guide.md`, discovered `qualifierClassNames`, `policyRuleCount`, `ruleCountsByCategory`, `processor`, and `checkerCategory`, plus `synthesis_decision.json`, `synthesis_metadata.json`, `synthesis_transcript.json`, and `synthesis_metrics.json`.
 
 #### Stage: Semantic Type Application (`ApplicationStage`)
-1. **Prompt Construction**: Formats `application.md` with the clean $C-1$ codebase, the declarative `placement_guide.md`, and allowed qualifier import prefixes. The prompt instructs the agent to interpret the declarative policy and ground it across the codebase without relying on symbol punch-lists.
+1. **Prompt Construction**: Formats `application.md` with the clean $C-1$ codebase, the declarative `placement_guide.md`, and allowed qualifier import prefixes. For a built-in selection, prompts provide that checker’s own qualifier names (for example, Nullness `@Nullable` and `@NonNull`) rather than an empty custom-qualifier list; the AST guard allowlists those annotations. The prompt instructs the agent to interpret the declarative policy and ground it across the codebase without relying on symbol punch-lists.
 2. **Multi-Turn Application Loop**: The OpenCode type applier agent modifies Java files to place type annotations on variables, fields, parameters, and return types. It may also touch test sources, but **only** to add qualifier annotations/imports; executable test logic is immutable, and every suppression remains banned. The agent works in the sanitized export; the orchestrator mirrors accepted edits into its own worktree for patch staging and Git operations.
 3. **Per-Turn Patch Audit**: After every edit turn, the orchestrator builds a staged diff (`git add -N` then `git diff --cached`) in its worktree so newly created files are visible, then runs:
    - **FilesystemGuard / path audit**: every touched path must remain inside a multi-module `(^|/)src/(main|test)/` root, must not escape the worktree, and must not be a build script or `.astub`. `package-info.java` is permitted only under `(^|/)src/main/` and only when it contains qualifier/defaulting annotations and imports (for example `org.checkerframework.framework.qual.DefaultQualifier`, `DefaultQualifierInHierarchy`, `QualifierDefaults`) plus `package`/`import` declarations — no executable code and no other declarations. A new `package-info.java` is the **one** permitted file addition in application; it must be staged with `git add -N`/`git diff --cached`. All other file additions, deletions, and renames are rejected.
@@ -1290,6 +1293,9 @@ CREATE TABLE IF NOT EXISTS synthesis_runs (
     policy_rule_count INTEGER NOT NULL DEFAULT 0,
     processor TEXT NOT NULL,
     checker_category TEXT NOT NULL, -- 'custom_qualifier_hierarchy' | 'builtin_checker'
+    decision_source TEXT,            -- nullable decision provenance
+    decision_rationale TEXT,         -- nullable agent rationale
+    fallback_occurred BOOLEAN,       -- nullable for legacy rows; accepted decisions record false
     transcript_path TEXT,
     metrics_path TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -2093,7 +2099,8 @@ sample:
 
 synthesis:
   freedom_level: "level0" # MVP active: "level0"; future: "level1" | "level2"
-  allowed_checkers: "all" # "all" | "custom_only" | "builtin_only"; wired into processor/category resolution
+  allowed_checkers: "all" # "all" | "custom_only" | "builtin_only"; constrains the agent's explicit decision
+  builtin_checker: "org.checkerframework.checker.nullness.NullnessChecker" # supported catalog: Nullness, Signedness, Index, Regex, FormatString
 
 checker:
   processor: "org.checkerframework.common.subtyping.SubtypingChecker" # explicit; never "auto"
@@ -2139,8 +2146,8 @@ Wiring notes:
 - `cache.enabled: false` bypasses CAS reads but still writes a fresh bundle when a stage succeeds.
 - `logging.*` configures Logback level/file and the per-run appender. There is no separate `trace_runs` toggle.
 - `repair.internet_access` is passed to the agent sandbox; `false` enforces no network.
-- `synthesis.allowed_checkers` restricts which processor/category may be selected (`builtin_only` forbids custom qualifiers; `custom_only` requires them).
-- `checker.*` supplies the default/allowlist. After synthesis, the effective `processor`, `checkerCategory`, and `quals` are derived from `SynthesizedLattice` and validated against this configuration; `runChecker` receives only the derived values.
+- `synthesis.allowed_checkers` constrains the explicit `synthesis_decision.json` selection: `custom_only` requires `custom_qualifier_hierarchy` with `checker.processor`; `builtin_only` requires `builtin_checker` with `synthesis.builtin_checker`; `all` permits either. Built-in selection is not a fallback. The accepted choice and rationale are recorded in `synthesis_metadata.json`.
+- `checker.*` supplies the custom processor. `synthesis.builtin_checker` supplies the built-in processor; supported values are validated at config load. After synthesis, the effective `processor`, `checkerCategory`, and `quals` are derived from `SynthesizedLattice`; `runChecker` receives only the derived values.
 - `environment.source_compatibility` / `environment.target_compatibility` are passed as `CF_SOURCE_COMPATIBILITY` / `CF_TARGET_COMPATIBILITY` and applied to the dedicated `checkerPass` JavaCompile task; `target_compatibility` defaults to `source_compatibility`, and both fall back to the project's Java extension.
 - `verification.baseline: "none"` is parsed into the typed config, recorded in `evaluation_runs.config_snapshot` and `verification_summary.json`, and logged. It is a **no-op in the MVP**: no clean-$C-1$ checker baseline is run and no diagnostics are subtracted. Only `"none"` is accepted; a future `"clean_c1"` mode will require a separate checker pass on clean $C-1$.
 - `prompt.tell_non_triviality_error` is rendered into `application.md`; it does not alter deterministic checks.

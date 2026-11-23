@@ -1,7 +1,7 @@
-# Level 0 Qualifier Hierarchy Synthesis
+# Level 0 Checker Strategy Synthesis
 
-You are designing a sound, minimal checker-framework type hierarchy that captures
-one latent bug pattern. This is Level 0: **pure marker qualifier hierarchy only**.
+Choose the soundest checker strategy for capturing one latent bug pattern. This is
+Level 0: **pure marker qualifier hierarchy only** when using a custom hierarchy.
 
 ## Bug context
 
@@ -23,8 +23,43 @@ any concrete repository class, method, variable, file, or test in your output.
 
 ## What to produce
 
-Write `placement_guide.md` FIRST, then the qualifier sources. The harness validates
-the guide even when the Java sources are already present.
+## Decide first: synthesis_decision.json
+
+Write `synthesis_decision.json` in the workspace root FIRST, before
+`placement_guide.md` or any qualifier sources. It must contain exactly these keys
+and values:
+
+```json
+{
+  "checker_category": "custom_qualifier_hierarchy" | "builtin_checker",
+  "processor": "<fully qualified Checker Framework processor class>",
+  "rationale": "<one or two sentences tying the choice to the bug semantics>"
+}
+```
+
+Use the configured processors: custom is `{{custom_processor}}`; built-in is
+`{{builtin_checker}}` ({{builtin_checker_name}}). The rationale must explain why
+the selected strategy captures the confusion described by the bug.
+
+`allowed_checkers` constrains your choice:
+- `custom_only`: MUST choose `custom_qualifier_hierarchy` and processor
+  `{{custom_processor}}`.
+- `builtin_only`: MUST choose `builtin_checker` and processor
+  `{{builtin_checker}}`.
+- `all`: choose exactly one honestly. Prefer `custom_qualifier_hierarchy` when a
+  marker lattice can express the confusion; choose `builtin_checker` only when
+  the configured built-in checker's existing annotations/defaulting directly
+  capture the bug. If the configured built-in is a poor fit, choose the custom
+  hierarchy instead of forcing a mismatch. For `builtin_checker`, processor MUST
+  be `{{builtin_checker}}`.
+
+If your decision is `builtin_checker`, do NOT create any files under
+`custom_quals_src/`.
+
+## If you chose custom_qualifier_hierarchy
+
+For this choice, write `placement_guide.md` FIRST, then the qualifier sources. The
+harness validates the guide even when the Java sources are already present.
 
 1. **Qualifier sources** under `./custom_quals_src/<package path>/*.java`.
    Each file declares exactly one qualifier annotation:
@@ -70,12 +105,26 @@ the guide even when the Java sources are already present.
 Rules must be semantic and generic (identifier conflation, untrusted vs vetted
 values). Never name concrete repository symbols, files, or the regression test.
 
+## If you chose builtin_checker
+
+- Do NOT create any files under `custom_quals_src/`.
+- Write `placement_guide.md` after the decision and before any other artifacts.
+  Describe the selected built-in checker's own annotations (for Nullness, for
+  example, `@Nullable`, `@NonNull`, etc.), including defaulting, introducers,
+  consumers, and sanitizers. Use the same five headings and bullet format above.
+- In the Qualifier Semantics section, list only the built-in checker's actual
+  annotations. The "one bullet per qualifier you declared" rule applies to
+  custom hierarchies; do not invent qualifier names for a built-in guide.
+- Keep the guide generic; do not name repository symbols, files, or the regression
+  test.
+
 ## Hard constraints
 
 - Do not read `.git`, do not run `git log`, do not look for test files or patches.
 - Do not spawn subagents or delegate to another agent.
 - Write only inside the current working directory. Never modify the pipeline
   repository or any other checkout outside it.
-- Every qualifier source must compile with `javac -proc:none` against `checker-qual.jar`.
+- Every custom qualifier source must compile with `javac -proc:none` against
+  `checker-qual.jar`.
 - Keep the package stable; the harness discovers all `@Target(TYPE_USE)`
   qualifiers automatically for `-Aquals`.

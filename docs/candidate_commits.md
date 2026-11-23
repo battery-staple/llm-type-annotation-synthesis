@@ -107,7 +107,7 @@ How `SubtypingChecker` behaves decides most of these labels:
 
 Two more constraints matter:
 - Under the repair-stage declaration lock (`DiffAwareAstGuard` guard 4), changing a field's type is `SIGNATURE_TAMPERING`.
-- The built-in checker path is currently hard-wired to `NullnessChecker` (`SynthesisStage.BUILTIN_PROCESSOR`) and is taken only when no qualifier sources are written.
+- Checker selection is an explicit agent decision recorded in `synthesis_decision.json`; a built-in checker is selected deliberately, not as a fallback when no qualifier sources are written. The selected decision must satisfy `synthesis.allowed_checkers`, and the built-in processor is configurable through `synthesis.builtin_checker`.
 
 | Benchmark | Expected fit | Rationale |
 |---|---|---|

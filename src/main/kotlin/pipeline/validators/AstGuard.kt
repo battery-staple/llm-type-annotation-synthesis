@@ -9,6 +9,8 @@ import com.github.javaparser.ast.type.Type
 import java.io.File
 import pipeline.cas.ChangedPath
 import pipeline.stages.AnnotationScanner
+import pipeline.stages.BuiltinCheckerCatalog
+import pipeline.stages.CheckerCategory
 import pipeline.stages.GuardrailViolationCategory
 import pipeline.stages.ScannedPlacement
 import pipeline.stages.SynthesizedLattice
@@ -62,10 +64,20 @@ object AstGuard {
     ): AstAuditResult {
         ensureLanguageLevel()
         val violations = mutableListOf<AstViolation>()
-        val qualifierPackages = lattice.qualifierClassNames.map { it.packageName }
-            .filter { it.isNotBlank() }.toSet()
-        val qualifierSimple = lattice.qualifierClassNames.map { it.simpleName }.toSet()
-        val qualifierFqns = lattice.qualifierClassNames.map { it.value }.toSet()
+        val builtinQualifiers = if (lattice.checkerCategory == CheckerCategory.BUILTIN_CHECKER) {
+            BuiltinCheckerCatalog.get(lattice.processor)?.qualifierNames.orEmpty()
+        } else {
+            emptyList()
+        }
+        val qualifierPackages = (
+            lattice.qualifierClassNames.map { it.packageName } +
+                builtinQualifiers.map { it.substringBeforeLast('.') }
+            ).filter { it.isNotBlank() }.toSet()
+        val qualifierSimple = (
+            lattice.qualifierClassNames.map { it.simpleName } +
+                builtinQualifiers.map { it.substringAfterLast('.') }
+            ).toSet()
+        val qualifierFqns = (lattice.qualifierClassNames.map { it.value } + builtinQualifiers).toSet()
 
         for (cp in changedPaths) {
             val relPath = cp.path.replace('\\', '/')

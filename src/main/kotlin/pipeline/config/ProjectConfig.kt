@@ -7,6 +7,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.Transient
 import pipeline.stages.AllowedCheckers
+import pipeline.stages.BuiltinCheckerCatalog
 import pipeline.stages.CheckerCategory
 import pipeline.stages.FreedomLevel
 import pipeline.stages.GuardrailsMode
@@ -96,7 +97,13 @@ data class PathsSection(
 @Serializable
 data class SynthesisSection(
     @SerialName("freedom_level") val freedomLevel: FreedomLevel = FreedomLevel.LEVEL_0,
-    @SerialName("allowed_checkers") val allowedCheckers: AllowedCheckers = AllowedCheckers.ALL
+    @SerialName("allowed_checkers") val allowedCheckers: AllowedCheckers = AllowedCheckers.ALL,
+    /**
+     * The single built-in Checker Framework processor an agent may select when
+     * a built-in strategy is allowed. The choice is explicit per run, not a
+     * fallback inferred from missing qualifier sources.
+     */
+    @SerialName("builtin_checker") val builtinChecker: String = "org.checkerframework.checker.nullness.NullnessChecker"
 )
 
 @Serializable
@@ -189,6 +196,10 @@ data class ProjectConfig(
             )
             require(config.verification.baseline == "none") {
                 "verification.baseline='${config.verification.baseline}' is not supported in the MVP; only 'none' is accepted"
+            }
+            require(config.synthesis.builtinChecker in BuiltinCheckerCatalog.supportedProcessors) {
+                "synthesis.builtin_checker='${config.synthesis.builtinChecker}' is not supported; " +
+                    "supported: ${BuiltinCheckerCatalog.supportedProcessors.sorted().joinToString(", ")}"
             }
             return config
         }

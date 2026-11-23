@@ -4,6 +4,7 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 class ProjectConfigTest {
     @Test
@@ -40,6 +41,26 @@ class ProjectConfigTest {
             assertEquals(dir.resolve("tools/checker").toString(), config.environment.checkerFrameworkHome)
             assertEquals(dir.resolve("cache/stages").toString(), config.cache.stagesDir)
             assertEquals(file.absoluteFile, config.sourceFile)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `rejects unsupported builtin checker`() {
+        val dir = Files.createTempDirectory("project-config-builtin").toFile()
+        try {
+            val file = dir.resolve("project.yaml")
+            file.writeText(
+                """
+                synthesis:
+                  builtin_checker: "example.UnknownChecker"
+                """.trimIndent()
+            )
+
+            val error = assertFailsWith<IllegalArgumentException> { ProjectConfig.load(file) }
+
+            assertTrue(error.message.orEmpty().contains("synthesis.builtin_checker"))
         } finally {
             dir.deleteRecursively()
         }

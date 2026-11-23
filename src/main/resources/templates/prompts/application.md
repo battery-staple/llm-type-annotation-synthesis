@@ -7,11 +7,14 @@ across the whole codebase by adding qualifier annotations to types.
 
 {{placement_guide}}
 
+{{checker_mode_note}}
+
 ## Available qualifiers
 
 Names: {{qualifier_names}}
 Import prefixes: {{qualifier_import_prefixes}}
 Qualifier jar: {{custom_quals_jar_path}}
+Checker qual jar: .agent-libs/checker-qual.jar
 
 Non-triviality hint enabled: {{tell_non_triviality_error}}
 

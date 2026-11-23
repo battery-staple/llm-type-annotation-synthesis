@@ -363,3 +363,12 @@ the crawler) are not listed unless the code had to interpret the plan.
      summarizes these outcomes and timings. The viewer exposes subprocess
      summaries, and `analysis/evaluate_metrics.py` includes an offline
      subprocess section; all table/view summaries are also queryable in SQLite.
+57. **Checker selection is an explicit synthesis decision, not a silent
+    Nullness fallback.** The agent must write `synthesis_decision.json`; the
+    decision is validated against `synthesis.allowed_checkers`, and invalid
+    decisions or qualifier hierarchies are retried up to three attempts before
+    the stage fails. `synthesis.builtin_checker` configures the selected built-in
+    processor and is included in the synthesis cache key. Synthesis metadata
+    records the accepted decision and confirms `fallback_occurred: false`.
+    `synthesis_runs` adds nullable `decision_source`, `decision_rationale`, and
+    `fallback_occurred` telemetry columns, with a migration for legacy databases.

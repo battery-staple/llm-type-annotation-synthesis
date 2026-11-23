@@ -144,11 +144,13 @@ Rather than executing the pipeline as a rigid, monolithic script, the orchestrat
   - Stochastic sample seed: `sample_index`.
   - The regression test coordinate, test patch, and test file contents are not synthesis inputs.
 - **Formal Outputs (Artifacts & State)**:
+  - `synthesis_decision.json`: Agent-authored selection with `checker_category`, `processor`, and a non-empty `rationale`; built-in selection is deliberate, never an implicit fallback.
   - `custom-quals.jar`: Compiled JAR packaging synthesized qualifier annotations only (Level 0; zero executable helpers or contract classes).
   - `placement_guide.md`: Structured markdown specifications establishing high-level, declarative typing policies across four standardized categories (Defaulting Invariants, Source Rules / Introducers, Sink Rules / Consumers, Sanitizers & Coercions) without naming codebase-specific symbols.
   - `custom_quals_src/`: Raw Java source files for qualifiers and contracts.
   - `checker_category`: Exactly one of `custom_qualifier_hierarchy` or `builtin_checker`, recording the selected strategy for this sample.
-  - `selected_processor`: The single Checker Framework processor the pipeline will invoke (e.g., `SubtypingChecker` for a custom hierarchy, or exactly one built-in checker such as `NullnessChecker`).
+  - `selected_processor`: The single Checker Framework processor the pipeline will invoke (e.g., `SubtypingChecker` for a custom hierarchy, or the configured built-in checker).
+  - `synthesis_metadata.json`: Includes a `decision` object (`checker_category`, `processor`, `rationale`, `source: "agent"`), `allowed_checkers`, and `fallback_occurred: false`.
   - `synthesis_transcript.json`: Full OpenCode agent multi-turn interaction log.
   - `synthesis_metrics.json`: Compiler iteration count, turn count, duration, token usage.
 - **Declarative Placement Guide Policy**:
@@ -159,7 +161,7 @@ Rather than executing the pipeline as a rigid, monolithic script, the orchestrat
   4. *Sanitizer/Coercion Invariants*: Transformation boundaries that validate or cast qualifiers.
   Prompt instructions in `prompts/synthesis.md` explicitly forbid naming concrete class names, method names, variable names, or file paths from the target repository.
 - **Checker Selection Invariant**:
-  Exactly one checker family/processor is selected per sample: either the custom qualifier hierarchy run through the built-in `SubtypingChecker`, or exactly one built-in checker (e.g., Nullness, Index, Regex, or FormatString). All built-in checkers are never run simultaneously. `synthesis.allowed_checkers` only constrains which of these single-processor choices are legal; the pipeline executes only the selected processor during application, repair, and verification.
+  Exactly one checker family/processor is selected per sample by the agent and recorded in `synthesis_decision.json`: either the custom qualifier hierarchy run through the built-in `SubtypingChecker`, or exactly one built-in checker (Nullness, Signedness, Index, Regex, or FormatString). A built-in selection is an explicit choice, not a fallback. `custom_only` requires the custom category and `checker.processor`; `builtin_only` requires the built-in category and `synthesis.builtin_checker`; `all` permits either explicit choice. Invalid/missing decisions and invalid qualifier hierarchies are retryable validation failures, up to three attempts, and never trigger an arm switch.
 - **Levels of Freedom for Implementer**:
   - *Level 0 (Monomorphic Marker Lattice - Active in MVP)*: Declarative subtyping hierarchies (`@SubtypeOf`) via built-in `SubtypingChecker` for the custom-quals arm, or exactly one selected built-in checker, plus local variable defaulting via `@DefaultQualifier`. Zero executable helper code in `custom-quals.jar` (`synthesis.helpers_count == 0`).
   - *Level 1 (Flow-Sensitive Contracts on Existing Code - Deferred to Future)*: Level 0 plus method preconditions (`@RequiresQualifier`) and conditional/unconditional postconditions (`@EnsuresQualifierIf`, `@EnsuresQualifier`).
@@ -296,8 +298,9 @@ Independently of `guardrails.mode`, the application stage always performs a file
 | `repair.local_variable_annotations`| `"frozen"`, `"allowed"` (`LocalAnnotationPolicy`) | `"frozen"` | Does allowing local variable annotation modifications help or permit evasion? |
 | `repair.internet_access` | `bool` | `false` | Does internet access enable information leakage vs helping with docs? |
 | `synthesis.allowed_checkers` | `"all"`, `"custom_only"`, `"builtin_only"` (`AllowedCheckers`) | `"all"` | Constrains whether synthesis may choose the custom qualifier hierarchy or exactly one built-in checker. The pipeline runs only the selected processor, never all built-ins simultaneously. |
+| `synthesis.builtin_checker` | Supported built-in processor FQCN (Nullness, Signedness, Index, Regex, or FormatString) | `"org.checkerframework.checker.nullness.NullnessChecker"` | Processor used when the agent explicitly selects `builtin_checker`; unsupported catalog entries fail configuration loading. Included in the synthesis cache key. This is a run-level setting, not a per-benchmark one: `builtin_only` is only meaningful when the configured checker matches the sample's bug family. |
 | `synthesis.freedom_level` | `"level0"` (MVP active), `"level1"`, `"level2"` (`FreedomLevel`) | `"level0"` | Type system expressiveness level for synthesis stage (pure lattice marker hierarchy; zero helper code). |
-| `checker.processor` | Fully qualified processor class (e.g. `"org.checkerframework.common.subtyping.SubtypingChecker"`) or exactly one built-in checker class | `"org.checkerframework.common.subtyping.SubtypingChecker"` | Default/single Checker Framework processor invoked during application, repair, and verification; the per-run effective processor is derived from `SynthesizedLattice` and validated against this allowlist. |
+| `checker.processor` | Fully qualified processor class (e.g. `"org.checkerframework.common.subtyping.SubtypingChecker"`) or exactly one built-in checker class | `"org.checkerframework.common.subtyping.SubtypingChecker"` | Processor for a `custom_qualifier_hierarchy` decision. Built-in decisions use `synthesis.builtin_checker` instead, and the accepted per-run processor is persisted in `synthesis_runs.processor`. |
 | `checker.category` | `"custom_qualifier_hierarchy"`, `"builtin_checker"` (`CheckerCategory`) | `"custom_qualifier_hierarchy"` | Default strategy category; the effective per-run value is derived from `SynthesizedLattice` and persisted in `synthesis_runs.checker_category`. |
 | ~~`checker.quals`~~ | Removed (ignored if present) | — | `-Aquals` values are never static config. Every Gradle invocation that injects the checker init script (compile, test, checker) takes them from `SynthesizedLattice.qualifierClassNames` (all `TYPE_USE` qualifiers); they are persisted in `checker_runs.quals`. The init script validates them only when `checkerPass` executes, because plugins such as JavaCC configure every `JavaCompile` task even in compile-only builds. |
 | `verification.scope` | `"full_suite"` (MVP active), `"regression_only"` (`VerificationScope`) | `"full_suite"` | Test execution scope in verification stage. Under `regression_only`, a passing $T_{\text{reg}}$ with 0 Checker errors yields `partial_success_regression_only`; selective regression scope is detailed in §7.12. |
@@ -398,6 +401,9 @@ CREATE TABLE IF NOT EXISTS synthesis_runs (
     policy_rule_count INTEGER NOT NULL DEFAULT 0,
     processor TEXT NOT NULL,           -- selected processor class, e.g. 'SubtypingChecker'
     checker_category TEXT NOT NULL,    -- 'custom_qualifier_hierarchy', 'builtin_checker'
+    decision_source TEXT,              -- nullable decision provenance
+    decision_rationale TEXT,           -- nullable agent rationale
+    fallback_occurred BOOLEAN,         -- nullable for legacy rows; accepted decisions record false
     transcript_path TEXT,
     metrics_path TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

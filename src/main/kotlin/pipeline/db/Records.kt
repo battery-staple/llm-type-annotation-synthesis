@@ -81,7 +81,10 @@ data class SynthesisRunRecord(
     val processor: String,
     val checkerCategory: CheckerCategory,
     val transcriptPath: String?,
-    val metricsPath: String?
+    val metricsPath: String?,
+    val decisionSource: String? = null,
+    val decisionRationale: String? = null,
+    val fallbackOccurred: Boolean? = null
 )
 
 data class QualifierRecord(

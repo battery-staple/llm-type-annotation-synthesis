@@ -27,8 +27,9 @@ object TelemetryProjector {
             """INSERT OR REPLACE INTO synthesis_runs
                (synthesis_run_id, run_id, step_id, attempt_number, custom_quals_jar_path,
                 placement_guide_path, qualifier_count, helpers_count, policy_rule_count,
-                processor, checker_category, transcript_path, metrics_path)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+                processor, checker_category, transcript_path, metrics_path, decision_source,
+                decision_rationale, fallback_occurred)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
         ).use { s ->
             s.setString(1, r.synthesisRunId)
             s.setString(2, r.runId.value)
@@ -43,6 +44,9 @@ object TelemetryProjector {
             s.setString(11, r.checkerCategory.name.lowercase())
             s.setString(12, r.transcriptPath)
             s.setString(13, r.metricsPath)
+            s.setString(14, r.decisionSource)
+            s.setString(15, r.decisionRationale)
+            if (r.fallbackOccurred == null) s.setNull(16, Types.BOOLEAN) else s.setBoolean(16, r.fallbackOccurred)
             s.executeUpdate()
         }
     }

@@ -100,15 +100,29 @@ class ApplicationStage(
         val workspace = ctx.agentWorkspaceDir.resolve("application_${ctx.runId}")
         prepareWorkspace(worktree, workspace, lattice, ctx)
 
-        val qualifierNames = lattice.qualifierClassNames.map { it.value }
-        val importPrefixes = QualifierDiscovery.packagePrefixes(lattice.customQualsSrcDir)
-            .ifEmpty { setOf("org.checkerframework") }
+        val builtin = if (lattice.checkerCategory == CheckerCategory.BUILTIN_CHECKER) {
+            BuiltinCheckerCatalog.get(lattice.processor)
+        } else {
+            null
+        }
+        val qualifierNames = builtin?.qualifierNames ?: lattice.qualifierClassNames.map { it.value }
+        val importPrefixes = builtin?.let { setOf(it.importPrefix) }
+            ?: QualifierDiscovery.packagePrefixes(lattice.customQualsSrcDir)
+                .ifEmpty { setOf("org.checkerframework") }
+        val checkerModeNote = if (builtin != null) {
+            "This run uses the built-in ${builtin.displayName} (`${builtin.processor}`). " +
+                "Apply that checker's annotations, listed below, according to the placement guide; " +
+                "do not invent custom qualifier names."
+        } else {
+            "This run uses a synthesized marker qualifier hierarchy. Use only the qualifiers listed below."
+        }
         val basePrompt = PromptTemplates.render(
             template,
             mapOf(
                 "placement_guide" to lattice.placementGuideFile.readText(),
                 "qualifier_names" to qualifierNames.joinToString(", "),
                 "qualifier_import_prefixes" to importPrefixes.joinToString(", "),
+                "checker_mode_note" to checkerModeNote,
                 "custom_quals_jar_path" to ".agent-libs/custom-quals.jar",
                 "tell_non_triviality_error" to ctx.config.prompt.tellNonTrivialityError.toString(),
                 "production_roots" to pipeline.validators.SourceRoots.display(ctx.productionRoots),
@@ -334,7 +348,11 @@ class ApplicationStage(
         )
         val manifest = writer.buildManifest(key)
 
-        val qualifierSimpleNames = lattice.qualifierClassNames.map { it.simpleName }.toSet()
+        val qualifierSimpleNames = if (builtin != null) {
+            builtin.qualifierNames.map { it.substringAfterLast('.') }.toSet()
+        } else {
+            lattice.qualifierClassNames.map { it.simpleName }.toSet()
+        }
         val durationMs = System.currentTimeMillis() - startedMs
         val projection = TelemetryProjection(
             agentTurns = AgentTelemetry.turns(ctx, StageName.APPLICATION, fullTranscript),

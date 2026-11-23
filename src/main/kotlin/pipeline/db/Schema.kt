@@ -91,6 +91,9 @@ CREATE TABLE IF NOT EXISTS synthesis_runs (
     checker_category TEXT NOT NULL,
     transcript_path TEXT,
     metrics_path TEXT,
+    decision_source TEXT,
+    decision_rationale TEXT,
+    fallback_occurred BOOLEAN,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -101,11 +101,16 @@ class RepairStage(
         prepareRepairWorkspace(worktree, workspace, checker, ctx)
 
         val initialErrors = sanitizeCheckerLogPaths(worktree, input.initialCheckerErrorsLog.readText()).take(MAX_PROMPT_ERRORS)
+        val qualifierNames = if (checker.checkerCategory == CheckerCategory.BUILTIN_CHECKER) {
+            BuiltinCheckerCatalog.get(checker.processor)?.qualifierNames.orEmpty()
+        } else {
+            checker.qualifierClassNames.map { it.value }
+        }
         val basePrompt = PromptTemplates.render(
             template,
             mapOf(
                 "initial_checker_errors" to initialErrors,
-                "qualifier_names" to checker.qualifierClassNames.joinToString(", ") { it.value },
+                "qualifier_names" to qualifierNames.joinToString(", "),
                 "processor" to checker.processor,
                 "custom_quals_jar_path" to ".agent-libs/custom-quals.jar",
                 "max_checker_invocations" to ctx.config.agent.maxCheckerInvocations.toString(),

@@ -38,6 +38,7 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
         migrateTestRunColumns()
         migrateCheckerRunColumns()
         migrateEvaluationRunColumns()
+        migrateSynthesisRunColumns()
         connection.createStatement().use { statement ->
             // JDBC's execute() only runs the first statement in a multi-statement string.
             Schema.DDL.split(';').forEach { ddl ->
@@ -88,6 +89,22 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
         val columns = tableColumns("checker_runs")
         if (columns.isNotEmpty() && "timed_out" !in columns) {
             connection.createStatement().use { it.execute("ALTER TABLE checker_runs ADD COLUMN timed_out BOOLEAN NOT NULL DEFAULT 0") }
+        }
+    }
+
+    private fun migrateSynthesisRunColumns() {
+        val columns = tableColumns("synthesis_runs")
+        if (columns.isEmpty()) return // Fresh database; the DDL creates the current schema.
+        connection.createStatement().use { statement ->
+            if ("decision_source" !in columns) {
+                statement.execute("ALTER TABLE synthesis_runs ADD COLUMN decision_source TEXT")
+            }
+            if ("decision_rationale" !in columns) {
+                statement.execute("ALTER TABLE synthesis_runs ADD COLUMN decision_rationale TEXT")
+            }
+            if ("fallback_occurred" !in columns) {
+                statement.execute("ALTER TABLE synthesis_runs ADD COLUMN fallback_occurred BOOLEAN")
+            }
         }
     }
 

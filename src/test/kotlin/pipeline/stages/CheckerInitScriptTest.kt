@@ -63,6 +63,28 @@ class CheckerInitScriptTest {
         }
     }
 
+    @Test
+    fun `builtin repair run-checker script leaves -Aquals empty`() {
+        val root = Files.createTempDirectory("checker-run-script-builtin").toFile()
+        try {
+            val workspace = root.resolve("workspace").also { it.mkdirs() }
+            val ctx = context(root, workspace, BuildSection())
+            val builtin = CheckerConfig(
+                customQualsJar = File(root, "custom-quals.jar"),
+                processor = BuiltinCheckerCatalog.nullness.processor,
+                checkerCategory = CheckerCategory.BUILTIN_CHECKER,
+                qualifierClassNames = emptyList(),
+            )
+            writeRunCheckerScript(workspace, builtin, ctx)
+
+            val script = workspace.resolve("run-checker.sh").readText()
+            assertContains(script, "export CF_AQUALS=\"\"")
+            assertContains(script, "export CF_CHECKER_CATEGORY=\"builtin_checker\"")
+        } finally {
+            FileOps.deleteRecursively(root)
+        }
+    }
+
     /**
      * JSqlParser's JavaCC plugin realizes every JavaCompile task during
      * configuration, `checkerPass` included, even when only `compileJava` runs.

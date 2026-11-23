@@ -4,11 +4,15 @@ import java.io.File
 import java.nio.file.Files
 import java.sql.DriverManager
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import pipeline.stages.AgentEventType
+import pipeline.stages.AgentTranscriptEvent
+import pipeline.util.PipelineJson
+import pipeline.util.TranscriptStreams
 
 class AgentRunnerReasoningTest {
 
@@ -70,6 +74,58 @@ class AgentRunnerReasoningTest {
             val finish = result.transcript.single { it.eventType == AgentEventType.STEP_FINISH }
             assertEquals(9, finish.tokenUsage?.totalTokens)
             assertEquals(2, callbacks.count { it.eventType == AgentEventType.REASONING })
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `stream reasoning appears live without changing the reconciled durable transcript`() = runBlocking {
+        val dir = Files.createTempDirectory("agent-live-reasoning-test").toFile()
+        try {
+            val database = File(dir, "opencode.db")
+            createOpenCodeDb(database)
+            val script = fakeOpenCode(
+                dir,
+                """
+                {"type":"step_start","sessionID":"session-a","part":{"id":"step-1","messageID":"message-1"}}
+                {"type":"reasoning","sessionID":"session-a","part":{"id":"stream-reason-1","messageID":"message-1","text":"stream copy"}}
+                {"type":"text","sessionID":"session-a","part":{"text":"answer text"}}
+                """.trimIndent()
+            )
+            val liveStream = TranscriptStreams.forStep(dir, "run-live", "step-live")
+            val result = withContext(liveStream) {
+                CoroutineOpenCodeRunner(
+                    executable = script.absolutePath,
+                    databasePath = database.absolutePath
+                ).runAgent(
+                    prompt = "prompt",
+                    cwd = dir,
+                    agentRole = "test",
+                    model = "fake/model",
+                    maxSteps = 10,
+                    timeoutSeconds = 10,
+                    seed = 0,
+                    temperature = 0.0
+                )
+            }
+
+            val liveEvents = liveStream.file.readLines().map {
+                PipelineJson.compact.decodeFromString<AgentTranscriptEvent>(it)
+            }
+            assertEquals(
+                listOf("stream copy"),
+                liveEvents.filter { it.eventType == AgentEventType.REASONING }.map { it.content },
+                "the provisional stream copy should be visible while the step runs"
+            )
+            assertTrue(liveEvents.any { it.eventType == AgentEventType.MESSAGE && it.content == "answer text" })
+            assertFalse(liveEvents.any { it.content == "database reasoning" },
+                "DB-derived reasoning must not be duplicated into the live stream")
+
+            val durableReasoning = result.transcript.filter { it.eventType == AgentEventType.REASONING }
+            assertEquals(listOf("database reasoning", "database-only reasoning"), durableReasoning.map { it.content })
+            assertFalse(result.transcript.any { it.content == "stream copy" },
+                "the durable transcript must still prefer reconciled DB reasoning")
         } finally {
             dir.deleteRecursively()
         }

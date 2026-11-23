@@ -28,6 +28,7 @@ object ArtifactNames {
     const val CUSTOM_QUALS_JAR = "custom-quals.jar"
     const val PLACEMENT_GUIDE = "placement_guide.md"
     const val CUSTOM_QUALS_SRC_DIR = "custom_quals_src"
+    const val SYNTHESIS_DECISION = "synthesis_decision.json"
     const val SYNTHESIS_TRANSCRIPT = "synthesis_transcript.json"
     const val SYNTHESIS_METRICS = "synthesis_metrics.json"
 

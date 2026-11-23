@@ -252,6 +252,122 @@ object QualifierValidator {
             }.getOrDefault(0)
         }
     }
+
+    /**
+     * Structural validation for a custom marker hierarchy. Compilation only
+     * proves the annotations are legal Java; this proves they form the single
+     * root / single bottom strict lattice the Level 0 contract requires.
+     */
+    fun validateTypeUseLattice(sourceDir: File): List<String> {
+        if (!sourceDir.isDirectory) return listOf("custom_quals_src/ is missing")
+        val all = QualifierDiscovery.discover(sourceDir)
+        if (all.isEmpty()) return listOf("custom_quals_src/ contains no annotation declarations")
+
+        val problems = mutableListOf<String>()
+        all.filterNot { it.typeUse }.forEach {
+            problems += "@${it.simpleName} is missing @Target(ElementType.TYPE_USE)"
+        }
+        val qualifiers = all.filter { it.typeUse }
+        if (qualifiers.isEmpty()) return problems + "no TYPE_USE qualifiers discovered"
+
+        val bySimpleName = qualifiers.groupBy { it.simpleName }
+        bySimpleName.filterValues { it.size > 1 }.keys.forEach {
+            problems += "duplicate qualifier simple name '@$it'; qualifier names must be unique"
+        }
+        val unique = qualifiers.filter { bySimpleName.getValue(it.simpleName).size == 1 }
+        if (unique.isEmpty()) return problems
+
+        unique.forEach { qualifier ->
+            qualifier.subtypesOf.forEach { parent ->
+                if (parent !in bySimpleName) {
+                    problems += "@${qualifier.simpleName} declares @SubtypeOf parent '$parent' " +
+                        "that is not a declared qualifier"
+                }
+            }
+        }
+        findCycle(unique, unique.associateBy { it.simpleName })?.let { cycle ->
+            problems += "qualifier hierarchy contains a @SubtypeOf cycle: ${cycle.joinToString(" -> ")}"
+        }
+
+        val roots = unique.filter { it.isTop }
+        when {
+            roots.isEmpty() -> problems += "no root qualifier; exactly one qualifier must be " +
+                "annotated @DefaultQualifierInHierarchy or @SubtypeOf({})"
+            roots.size > 1 -> problems += "multiple root qualifiers: " +
+                roots.joinToString(", ") { "@${it.simpleName}" } + "; exactly one is required"
+        }
+        roots.filter { it.subtypesOf.isNotEmpty() }.forEach {
+            problems += "root qualifier @${it.simpleName} must not declare @SubtypeOf parents"
+        }
+
+        val parentNames = qualifiers.flatMap { it.subtypesOf }.toSet()
+        val bottoms = unique.filter { it.subtypesOf.isNotEmpty() && it.simpleName !in parentNames }
+        when {
+            bottoms.isEmpty() -> problems += "no bottom qualifier; a strict hierarchy needs exactly one"
+            bottoms.size > 1 -> problems += "multiple bottom qualifiers: " +
+                bottoms.joinToString(", ") { "@${it.simpleName}" } + "; exactly one is required"
+        }
+
+        if (roots.size == 1) {
+            val root = roots.single().simpleName
+            val byName = unique.associateBy { it.simpleName }
+            unique.forEach { qualifier ->
+                if (!reachesRoot(qualifier, byName, root)) {
+                    problems += "@${qualifier.simpleName} does not reach the root qualifier @$root"
+                }
+            }
+        }
+        return problems
+    }
+
+    private fun reachesRoot(
+        start: QualifierInfo,
+        byName: Map<String, QualifierInfo>,
+        root: String,
+    ): Boolean {
+        val seen = mutableSetOf<String>()
+        val stack = ArrayDeque<String>()
+        stack += start.simpleName
+        while (stack.isNotEmpty()) {
+            val name = stack.removeLast()
+            if (name == root) return true
+            if (!seen.add(name)) continue
+            byName[name]?.subtypesOf?.forEach { parent -> stack += parent }
+        }
+        return false
+    }
+
+    /** Returns one cycle as a child-to-parent path, or null when the graph is acyclic. */
+    private fun findCycle(
+        qualifiers: List<QualifierInfo>,
+        byName: Map<String, QualifierInfo>,
+    ): List<String>? {
+        val visiting = mutableSetOf<String>()
+        val visited = mutableSetOf<String>()
+
+        fun walk(name: String, path: MutableList<String>): List<String>? {
+            if (name in visiting) {
+                return path.dropWhile { it != name } + name
+            }
+            if (name in visited) return null
+            visiting += name
+            path += name
+            byName[name]?.subtypesOf.orEmpty().forEach { parent ->
+                if (parent in byName) {
+                    walk(parent, path)?.let { return it }
+                }
+            }
+            path.removeAt(path.lastIndex)
+            visiting -= name
+            visited += name
+            return null
+        }
+
+        qualifiers.forEach { qualifier ->
+            walk(qualifier.simpleName, mutableListOf())?.let { return it }
+        }
+        return null
+    }
 }
 
 object PlacementGuideParser {

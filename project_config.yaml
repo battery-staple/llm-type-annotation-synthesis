@@ -64,6 +64,9 @@ sample:
 synthesis:
   freedom_level: "level0"
   allowed_checkers: "all"
+  # The single built-in processor an agent may choose when allowed_checkers is
+  # "all" or "builtin_only". Never used as a silent fallback.
+  builtin_checker: "org.checkerframework.checker.nullness.NullnessChecker"
 
 checker:
   processor: "org.checkerframework.common.subtyping.SubtypingChecker"

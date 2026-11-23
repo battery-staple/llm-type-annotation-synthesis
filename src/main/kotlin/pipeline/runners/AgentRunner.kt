@@ -217,8 +217,12 @@ class CoroutineOpenCodeRunner(
                         val indexed = if (event.turnIndex <= 0) event.copy(turnIndex = maxOf(turnIndex, 1)) else event
                         logProgress(indexed)
                         if (indexed.eventType == AgentEventType.REASONING) {
-                            // Buffer reasoning until the run DB can be reconciled;
-                            // OpenCode may expose the same part in both sources.
+                            // Show the stream copy live, but buffer it for end-of-run DB
+                            // reconciliation: OpenCode may emit the same part in both
+                            // sources, and the run DB is authoritative for the durable
+                            // transcript. The live stream is provisional and discarded
+                            // once that transcript is committed.
+                            liveStream?.append(indexed)
                             streamReasoning += StreamReasoning(
                                 sessionId = metadata.sessionId,
                                 messageId = metadata.messageId,

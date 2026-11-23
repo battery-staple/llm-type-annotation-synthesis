@@ -24,9 +24,10 @@ private val logger = KotlinLogging.logger {}
  * parsed, so stages need no changes.
  *
  * The stream is best-effort telemetry: IO failures are logged once and never
- * propagate into the agent run. It lacks reasoning events, which the runner
- * reconciles only at the end; the durable transcript (CAS bundle or the
- * `agent_transcript` column) is authoritative and supersedes this file.
+ * propagate into the agent run. Reasoning events are provisional stream copies,
+ * which the runner reconciles with the run database at the end; the durable
+ * transcript (CAS bundle or the `agent_transcript` column) is authoritative and
+ * supersedes this file.
  */
 class TranscriptStream(val file: File) : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<TranscriptStream> {
