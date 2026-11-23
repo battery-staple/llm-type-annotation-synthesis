@@ -24,6 +24,23 @@
     expandedBatches: new Set(),
     collapsedBatches: new Set(),
     hideDiscardedInMatrix: false,
+    filters: {
+      // Facet key -> Set of selected values. Within a facet values are ORed;
+      // different facets are ANDed. Empty sets mean "no constraint".
+      facets: {
+        triageStatus: new Set(),
+        outcome: new Set(),
+        lifecycle: new Set(),
+        classification: new Set(),
+        triageMode: new Set(),
+        guardrails: new Set(),
+        verificationScope: new Set(),
+        model: new Set(),
+        repo: new Set(),
+      },
+      sort: "newest",
+    },
+    facetCatalog: {},
     placementDiffText: "",
     placementDiffRequest: 0,
     // Provisional transcript streamed while a step runs (see syncLiveTranscript).
@@ -481,6 +498,424 @@
       : outcome.label;
   }
 
+  // ---- Faceted Filtering ----
+  //
+  // Every facet maps a run to one or more filterable values. Selecting several
+  // values within a facet keeps runs matching any of them; selections across
+  // facets are combined with AND. Badges throughout the UI carry
+  // data-facet/data-facet-value so they can toggle a filter on click.
+
+  const TRIAGE_STATUS_ORDER = [
+    "verified",
+    "running",
+    "pending",
+    "non_bugfix",
+    "discarded_no_test",
+    "discarded_non_compiling",
+    "discarded_passes_unpatched",
+    "discarded_invalid_test_patch",
+    "discarded_regression_not_passing_on_fixed_commit",
+    "discarded_fixed_commit_unavailable",
+    "discarded_diff_too_large",
+    "discarded_build_broken",
+    "discarded_merge_commit",
+    "discarded",
+    "unknown",
+  ];
+
+  const OUTCOME_ORDER = [
+    "full_success",
+    "partial_success_regression_only",
+    "type_success_runtime_fail",
+    "fixer_incomplete",
+    "suite_failure",
+    "regression_introduced",
+    "verification_missing",
+    "triage_only",
+    "running",
+    "not_evaluated",
+  ];
+
+  const LIFECYCLE_ORDER = [
+    "completed",
+    "verified · downstream limit",
+    "running",
+    "interrupted",
+    "stopped at triage",
+  ];
+
+  /**
+   * Facets and clickable badges must agree on the exact value they represent.
+   * Some run-list columns are null for older/interrupted rows, so compute the
+   * effective value once and use it everywhere (see the later stage inspector).
+   */
+  function effectiveTriageStatus(run) {
+    if (run.triage_status) return run.triage_status;
+    const step = latestStep(run, "triage");
+    if (!step) return "pending";
+    if (isStepRunning(step)) return "running";
+    return step.success ? "verified" : "discarded";
+  }
+
+  function effectiveGuardrails(run) {
+    return run.key_config?.guardrails_mode || run.guardrails_mode || "unknown";
+  }
+
+  function effectiveVerificationScope(run) {
+    return run.key_config?.verification_scope || run.verification_scope || "unknown";
+  }
+
+  const FACET_DEFS = [
+    {
+      key: "triageStatus",
+      label: "Triage status",
+      shortLabel: "triage",
+      placeholder: "+ triage status",
+      values: (r) => [effectiveTriageStatus(r)],
+      display: (r, value) => triageStatusMeta(value).label,
+      order: TRIAGE_STATUS_ORDER,
+    },
+    {
+      key: "outcome",
+      label: "Outcome",
+      shortLabel: "outcome",
+      placeholder: "+ outcome",
+      values: (r) => [deriveOutcome(r).key],
+      display: (r) => deriveOutcome(r).label,
+      order: OUTCOME_ORDER,
+    },
+    {
+      key: "lifecycle",
+      label: "Run lifecycle",
+      shortLabel: "lifecycle",
+      placeholder: "+ lifecycle",
+      values: (r) => [deriveLifecycle(r).label],
+      display: (r) => deriveLifecycle(r).label,
+      order: LIFECYCLE_ORDER,
+    },
+    {
+      key: "classification",
+      label: "Classification",
+      shortLabel: "class",
+      placeholder: "+ classification",
+      values: (r) => [r.classification || "unknown"],
+    },
+    {
+      key: "triageMode",
+      label: "Triage mode",
+      shortLabel: "triage mode",
+      placeholder: "+ triage mode",
+      values: (r) => [r.key_config?.triage_mode || "manifest"],
+    },
+    {
+      key: "guardrails",
+      label: "Guardrails",
+      shortLabel: "guardrails",
+      placeholder: "+ guardrails",
+      values: (r) => [effectiveGuardrails(r)],
+    },
+    {
+      key: "verificationScope",
+      label: "Verification scope",
+      shortLabel: "scope",
+      placeholder: "+ scope",
+      values: (r) => [effectiveVerificationScope(r)],
+    },
+    {
+      key: "model",
+      label: "Model",
+      shortLabel: "model",
+      placeholder: "+ model",
+      values: (r) => [r.key_config?.model_default || "unknown"],
+    },
+    {
+      key: "repo",
+      label: "Repository",
+      shortLabel: "repo",
+      placeholder: "+ repo",
+      values: (r) => [r.repo_name || "unknown"],
+    },
+  ];
+
+  const FACET_BY_KEY = Object.fromEntries(FACET_DEFS.map((def) => [def.key, def]));
+
+  const SORT_OPTIONS = [
+    ["newest", "Newest first"],
+    ["oldest", "Oldest first"],
+    ["benchmark", "Benchmark A–Z"],
+    ["tokens_desc", "Most tokens"],
+    ["duration_desc", "Longest duration"],
+    ["outcome", "Outcome (success first)"],
+  ];
+
+  const OUTCOME_SORT_RANK = {
+    full_success: 0,
+    partial_success_regression_only: 1,
+    type_success_runtime_fail: 2,
+    fixer_incomplete: 3,
+    suite_failure: 4,
+    regression_introduced: 4,
+    verification_missing: 5,
+    triage_only: 6,
+    running: 7,
+    not_evaluated: 8,
+  };
+
+  function facetLabel(key) {
+    return FACET_BY_KEY[key]?.label || key;
+  }
+
+  function prettifyFacetValue(value) {
+    const v = String(value ?? "");
+    if (v === "unknown") return "unknown";
+    if (v.startsWith("discarded_")) return triageSkipLabel(v);
+    return v.replace(/_/g, " ");
+  }
+
+  function isFacetActive(key, value) {
+    return Boolean(state.filters.facets[key]?.has(value));
+  }
+
+  /**
+   * Render a clickable badge (or plain-text) control that toggles a facet
+   * filter. Uses a button so keyboard users get Enter/Space for free.
+   */
+  function facetControl(key, value, { cls = "", label = null, tooltip = "", plain = false, inner = null, tabbable = true } = {}) {
+    const active = isFacetActive(key, value);
+    const text = label === null || label === undefined ? String(value) : String(label);
+    const hint = `${active ? "Remove" : "Add"} ${facetLabel(key).toLowerCase()} filter: ${text}`;
+    const title = tooltip ? `${tooltip} ${hint}.` : `${hint}.`;
+    const classes = plain
+      ? `facet-link-plain${active ? " is-active" : ""}`
+      : `badge ${cls} facet-link${active ? " is-active" : ""}`.trim();
+    const body = inner !== null ? inner : esc(text);
+    const tabAttr = tabbable ? "" : ' tabindex="-1"';
+    return `<button type="button" class="${esc(classes)}" data-facet="${esc(key)}" data-facet-value="${esc(value)}" data-facet-tip="${esc(tooltip)}"${tabAttr} aria-pressed="${active}" title="${esc(title)}">${body}</button>`;
+  }
+
+  /** Re-apply active styling/tooltips without re-rendering a pane. */
+  function refreshFacetControl(el) {
+    const key = el.dataset.facet;
+    const value = el.dataset.facetValue;
+    if (!key || value === undefined) return;
+    const active = isFacetActive(key, value);
+    el.classList.toggle("is-active", active);
+    el.setAttribute("aria-pressed", String(active));
+    const text = el.textContent.trim();
+    const hint = `${active ? "Remove" : "Add"} ${facetLabel(key).toLowerCase()} filter: ${text}`;
+    const tip = el.dataset.facetTip || "";
+    el.title = tip ? `${tip} ${hint}.` : `${hint}.`;
+  }
+
+  function syncFacetControlStates(root = document) {
+    root.querySelectorAll("[data-facet][data-facet-value]").forEach(refreshFacetControl);
+  }
+
+  function facetBadge(key, value, cls, label, tooltip, tabbable = true) {
+    return facetControl(key, value, { cls, label, tooltip, tabbable });
+  }
+
+  /**
+   * The reason under an outcome badge is usually a triage decision or a
+   * lifecycle stop, so make it filter on that more specific facet.
+   */
+  function outcomeReasonControl(run, outcome, cls = "badge-muted", tabbable = true) {
+    if (!outcome.reasonLabel) return "";
+    if (outcome.kind === "triage_skipped" && run.triage_status) {
+      return facetBadge("triageStatus", run.triage_status, cls, outcome.reasonLabel, outcome.tooltip, tabbable);
+    }
+    const lifecycle = deriveLifecycle(run);
+    return facetBadge("lifecycle", lifecycle.label, cls, outcome.reasonLabel, lifecycle.tooltip, tabbable);
+  }
+
+  function resetFacetFilters() {
+    for (const set of Object.values(state.filters.facets)) set.clear();
+  }
+
+  function activeFilterCount() {
+    let count = 0;
+    for (const set of Object.values(state.filters.facets)) count += set.size;
+    if ($("runSearch") && $("runSearch").value.trim()) count += 1;
+    return count;
+  }
+
+  function toggleFacet(key, value) {
+    const set = state.filters.facets[key];
+    if (!set) return;
+    if (set.has(value)) set.delete(value);
+    else set.add(value);
+    applyFilters();
+  }
+
+  /** Keep keyboard focus on the equivalent control after a filter re-render. */
+  function restoreFacetFocus(key, value) {
+    const selector = `[data-facet="${CSS.escape(key)}"][data-facet-value="${CSS.escape(value)}"]:not([tabindex="-1"])`;
+    const candidates = [...document.querySelectorAll(selector)];
+    const el = candidates.find((node) => node.getClientRects().length > 0);
+    if (el) {
+      el.focus();
+      return;
+    }
+    const chip = document.querySelector(
+      `#activeFilters [data-remove-facet="${CSS.escape(key)}"][data-remove-value="${CSS.escape(value)}"]`
+    );
+    if (chip) chip.focus();
+    else $("runSearch").focus();
+  }
+
+  /** Build a value -> display label map for each facet from all loaded runs. */
+  function buildFacetCatalog() {
+    const catalog = {};
+    for (const def of FACET_DEFS) {
+      const labels = new Map();
+      for (const run of state.runs) {
+        for (const value of def.values(run)) {
+          if (!labels.has(value)) {
+            labels.set(value, def.display ? def.display(run, value) : String(value));
+          }
+        }
+      }
+      catalog[def.key] = labels;
+    }
+    state.facetCatalog = catalog;
+  }
+
+  function facetValueLabel(key, value) {
+    const label = state.facetCatalog?.[key]?.get(value);
+    return label === undefined ? prettifyFacetValue(value) : label;
+  }
+
+  function runMatchesSearch(run, query) {
+    const hay = [
+      run.run_id,
+      run.benchmark_id,
+      run.commit_hash,
+      run.pr_title,
+      run.pr_number ? `pr#${run.pr_number}` : "",
+      run.repo_name,
+      run.key_config?.model_default,
+      run.key_config?.model_triage,
+      run.triage_status,
+      run.triage_status ? triageSkipLabel(run.triage_status) : "",
+      effectiveTriageStatus(run),
+      run.discard_reason,
+      run.classification,
+      run.verdict,
+      run.verdict ? verdictLabel(run.verdict) : "",
+      run.key_config?.triage_mode,
+      run.guardrails_mode,
+      effectiveGuardrails(run),
+      run.verification_scope,
+      effectiveVerificationScope(run),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return hay.includes(query);
+  }
+
+  /**
+   * Apply all active filters. Pass ignoreFacet to compute the option list for
+   * one facet without letting that facet's own selection hide its alternatives.
+   */
+  function filterRuns({ ignoreFacet = null } = {}) {
+    const queryEl = $("runSearch");
+    const query = queryEl ? queryEl.value.trim().toLowerCase() : "";
+    return state.runs.filter((run) => {
+      for (const def of FACET_DEFS) {
+        if (def.key === ignoreFacet) continue;
+        const selected = state.filters.facets[def.key];
+        if (!selected || selected.size === 0) continue;
+        const values = def.values(run);
+        if (!values.some((value) => selected.has(value))) return false;
+      }
+      if (query && !runMatchesSearch(run, query)) return false;
+      return true;
+    });
+  }
+
+  function runDurationMs(run) {
+    if (!run.started_at || !run.completed_at) return -1;
+    const ms = new Date(run.completed_at) - new Date(run.started_at);
+    return Number.isNaN(ms) ? -1 : ms;
+  }
+
+  function compareNewest(a, b) {
+    return (
+      String(b.started_at || "").localeCompare(String(a.started_at || "")) ||
+      String(b.run_id || "").localeCompare(String(a.run_id || ""))
+    );
+  }
+
+  function sortRuns(runs) {
+    const sorted = [...runs];
+    switch (state.filters.sort) {
+      case "oldest":
+        sorted.sort((a, b) => -compareNewest(a, b));
+        break;
+      case "benchmark":
+        sorted.sort((a, b) => String(a.benchmark_id || "").localeCompare(String(b.benchmark_id || "")) || compareNewest(a, b));
+        break;
+      case "tokens_desc":
+        sorted.sort((a, b) => (b.llm_stats?.total_tokens || 0) - (a.llm_stats?.total_tokens || 0) || compareNewest(a, b));
+        break;
+      case "duration_desc":
+        sorted.sort((a, b) => runDurationMs(b) - runDurationMs(a) || compareNewest(a, b));
+        break;
+      case "outcome":
+        sorted.sort((a, b) => {
+          const rankA = OUTCOME_SORT_RANK[deriveOutcome(a).key] ?? 99;
+          const rankB = OUTCOME_SORT_RANK[deriveOutcome(b).key] ?? 99;
+          return rankA - rankB || compareNewest(a, b);
+        });
+        break;
+      case "newest":
+      default:
+        sorted.sort(compareNewest);
+        break;
+    }
+    return sorted;
+  }
+
+  function serializeFacets() {
+    const out = {};
+    for (const [key, set] of Object.entries(state.filters.facets)) {
+      if (set.size > 0) out[key] = [...set];
+    }
+    return out;
+  }
+
+  function normalizeFacetState(facets) {
+    const out = {};
+    for (const key of Object.keys(state.filters.facets)) {
+      const values = facets?.[key];
+      if (Array.isArray(values) && values.length > 0) {
+        out[key] = [...new Set(values)].sort();
+      }
+    }
+    return JSON.stringify(out);
+  }
+
+  function restoreFiltersFromUrl(saved) {
+    resetFacetFilters();
+    const facets = saved?.filters;
+    if (facets && typeof facets === "object" && !Array.isArray(facets)) {
+      for (const [key, values] of Object.entries(facets)) {
+        // JSON.parse can create keys such as "__proto__" or "constructor";
+        // only accept keys that are real facets backed by a Set.
+        if (!Object.hasOwn(state.filters.facets, key)) continue;
+        const set = state.filters.facets[key];
+        if (!(set instanceof Set) || !Array.isArray(values)) continue;
+        for (const value of values) {
+          if (typeof value === "string") set.add(value);
+        }
+      }
+    }
+    if (SORT_OPTIONS.some(([value]) => value === saved?.sort)) {
+      state.filters.sort = saved.sort;
+    }
+  }
+
   const CONFIG_PILL_TOOLTIPS = {
     model: "Default LLM model configured for pipeline stages",
     guardrails: "Guardrail enforcement mode (e.g., lenient vs strict)",
@@ -498,6 +933,9 @@
     if (state.activeRunTab) params.set("tab", state.activeRunTab);
     if (state.selectedStepName) params.set("stage", state.selectedStepName);
     if (state.activeStageTab) params.set("stageTab", state.activeStageTab);
+    const facets = serializeFacets();
+    if (Object.keys(facets).length > 0) params.set("f", JSON.stringify(facets));
+    if (state.filters.sort && state.filters.sort !== "newest") params.set("sort", state.filters.sort);
     const hash = `#${params.toString()}`;
     if (window.location.hash !== hash) {
       history.replaceState(null, "", hash);
@@ -508,11 +946,19 @@
     const raw = window.location.hash.replace(/^#/, "");
     if (!raw) return {};
     const params = new URLSearchParams(raw);
+    let filters = null;
+    try {
+      filters = params.get("f") ? JSON.parse(params.get("f")) : null;
+    } catch {
+      filters = null;
+    }
     return {
       run: params.get("run") || null,
       tab: params.get("tab") || null,
       stage: params.get("stage") || null,
       stageTab: params.get("stageTab") || null,
+      filters,
+      sort: params.get("sort") || null,
     };
   }
 
@@ -550,9 +996,12 @@
       }
     } else if (!state.selectedRunId && state.runs.length > 0) {
       const saved = readUrlState();
-      const targetRun = saved.run && state.runs.some((r) => r.run_id === saved.run)
+      const savedRunExists = Boolean(saved.run && state.runs.some((r) => r.run_id === saved.run));
+      const filtered = getFilteredRuns();
+      const targetRun = savedRunExists
         ? saved.run
-        : state.runs[0].run_id;
+        : filtered[0]?.run_id || (activeFilterCount() === 0 ? state.runs[0]?.run_id : null);
+      if (!targetRun) return;
       if (saved.tab) state.activeRunTab = saved.tab;
       if (saved.stage) state.selectedStepName = saved.stage;
       if (saved.stageTab) state.activeStageTab = saved.stageTab;
@@ -560,59 +1009,174 @@
     }
   }
 
-  function populateFilterOptions() {
-    const outcomes = new Map();
-    for (const r of state.runs) {
-      const outcome = deriveOutcome(r);
-      if (!outcomes.has(outcome.key)) {
-        outcomes.set(outcome.key, outcome.kind === "evaluated" ? outcome.label : (outcome.key === "not_evaluated" ? "not evaluated" : outcome.label));
+  function initFilterControls() {
+    $("filterFacets").innerHTML = FACET_DEFS.map(
+      (def) => `<select class="facet-select" data-facet="${esc(def.key)}" aria-label="Add ${esc(def.label.toLowerCase())} filter"><option value="">${esc(def.placeholder)}</option></select>`
+    ).join("");
+    $("sortSelect").innerHTML = SORT_OPTIONS.map(
+      ([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`
+    ).join("");
+    $("sortSelect").value = state.filters.sort;
+  }
+
+  /** Values and counts for one facet, respecting filters from every other facet. */
+  function facetOptions(def) {
+    const counts = new Map();
+    for (const run of filterRuns({ ignoreFacet: def.key })) {
+      for (const value of def.values(run)) {
+        counts.set(value, (counts.get(value) || 0) + 1);
       }
     }
-    const outcomeKeys = [...outcomes.keys()].sort((a, b) => outcomes.get(a).localeCompare(outcomes.get(b)));
-    const guardrails = [...new Set(state.runs.map((r) => r.guardrails_mode || "unknown"))].sort();
-    const triageModes = [...new Set(state.runs.map((r) => r.key_config?.triage_mode || "manifest"))].sort();
+    const selected = state.filters.facets[def.key] || new Set();
+    const values = [...counts.keys()].filter((value) => !selected.has(value));
+    const labelFor = (value) => facetValueLabel(def.key, value);
+    values.sort((a, b) => {
+      if (def.order) {
+        const ai = def.order.indexOf(a);
+        const bi = def.order.indexOf(b);
+        if (ai !== -1 || bi !== -1) {
+          return (ai === -1 ? Number.MAX_SAFE_INTEGER : ai) - (bi === -1 ? Number.MAX_SAFE_INTEGER : bi);
+        }
+      }
+      return labelFor(a).localeCompare(labelFor(b));
+    });
+    return values.map((value) => ({ value, label: labelFor(value), count: counts.get(value) }));
+  }
 
-    const vf = $("verdictFilter");
-    const prevV = vf.value;
-    vf.innerHTML = `<option value="">All outcomes</option>` + outcomeKeys.map((k) => `<option value="${esc(k)}">${esc(outcomes.get(k))}</option>`).join("");
-    vf.value = outcomeKeys.includes(prevV) ? prevV : "";
+  /**
+   * Update a facet select's options in place. Replacing the whole element (or
+   * its innerHTML) during auto-refresh would close an open dropdown and destroy
+   * keyboard focus; updating option nodes keeps it usable and never stale.
+   */
+  function updateFacetSelect(sel, placeholder, options) {
+    const first = sel.options[0];
+    if (!first) {
+      const placeholderOption = document.createElement("option");
+      placeholderOption.value = "";
+      placeholderOption.textContent = placeholder;
+      sel.appendChild(placeholderOption);
+    } else {
+      first.value = "";
+      first.textContent = placeholder;
+    }
+    while (sel.options.length > 1) sel.remove(1);
+    const frag = document.createDocumentFragment();
+    for (const opt of options) {
+      const optionEl = document.createElement("option");
+      optionEl.value = opt.value;
+      optionEl.textContent = `${opt.label} (${opt.count})`;
+      frag.appendChild(optionEl);
+    }
+    sel.appendChild(frag);
+    sel.value = "";
+  }
 
-    const gf = $("guardrailFilter");
-    const prevG = gf.value;
-    gf.innerHTML = `<option value="">All guardrails</option>` + guardrails.map((g) => `<option value="${esc(g)}">${esc(g)}</option>`).join("");
-    gf.value = guardrails.includes(prevG) ? prevG : "";
+  function populateFilterOptions() {
+    buildFacetCatalog();
+    for (const def of FACET_DEFS) {
+      const sel = document.querySelector(`#filterFacets select[data-facet="${def.key}"]`);
+      if (!sel) continue;
+      const selected = state.filters.facets[def.key];
+      sel.classList.toggle("has-filter", selected.size > 0);
+      sel.setAttribute(
+        "aria-label",
+        selected.size > 0 ? `${def.label}: ${selected.size} selected` : `Add ${def.label.toLowerCase()} filter`
+      );
+      const options = facetOptions(def);
+      const placeholder = options.length > 0 ? def.placeholder : `No ${def.label.toLowerCase()} values`;
+      updateFacetSelect(sel, placeholder, options);
+    }
+    $("sortSelect").value = state.filters.sort;
+    renderActiveFilters();
+    updateClearButton();
+  }
 
-    const tf = $("triageModeFilter");
-    const prevT = tf.value;
-    tf.innerHTML = `<option value="">All triage</option>` + triageModes.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
-    tf.value = triageModes.includes(prevT) ? prevT : "";
+  function renderActiveFilters() {
+    const chips = [];
+    const query = $("runSearch").value.trim();
+    if (query) {
+      chips.push(`
+        <span class="filter-chip filter-chip-search">
+          <span class="filter-chip-key">search</span>
+          <span class="filter-chip-val">${esc(query)}</span>
+          <button type="button" class="filter-chip-x" data-clear-search="1" aria-label="Clear search filter" title="Clear search">&times;</button>
+        </span>`);
+    }
+    for (const def of FACET_DEFS) {
+      const selected = state.filters.facets[def.key];
+      if (!selected || selected.size === 0) continue;
+      for (const value of selected) {
+        const label = facetValueLabel(def.key, value);
+        const known = state.facetCatalog?.[def.key]?.has(value);
+        chips.push(`
+          <span class="filter-chip${known ? "" : " filter-chip-stale"}"${known ? "" : ` title="This value is not present in the loaded runs"`}>
+            <span class="filter-chip-key">${esc(def.shortLabel)}</span>
+            <span class="filter-chip-val">${esc(label)}</span>
+            <button type="button" class="filter-chip-x" data-remove-facet="${esc(def.key)}" data-remove-value="${esc(value)}" aria-label="Remove ${esc(def.label)} filter ${esc(label)}" title="Remove this filter">&times;</button>
+          </span>`);
+      }
+    }
+    if (chips.length > 0) {
+      chips.push(`<button type="button" class="filter-chip filter-chip-clear" data-clear-filters="1" title="Clear all filters including search">Clear all</button>`);
+    }
+    $("activeFilters").innerHTML = chips.join("");
+  }
+
+  function updateClearButton() {
+    const btn = $("clearFiltersBtn");
+    if (btn) btn.disabled = activeFilterCount() === 0;
+  }
+
+  function clearAllFilters() {
+    resetFacetFilters();
+    state.selectedBatchId = null;
+    state.hideDiscardedInMatrix = false;
+    const search = $("runSearch");
+    if (search) search.value = "";
+    applyFilters();
+  }
+
+  function applyFilters() {
+    populateFilterOptions();
+    renderRunsList();
+    syncFacetControlStates();
+    saveUrlState();
+  }
+
+  function handleFacetSelectChange(event) {
+    const sel = event.target.closest("select[data-facet]");
+    if (!sel || !sel.value) return;
+    const value = sel.value;
+    sel.value = "";
+    toggleFacet(sel.dataset.facet, value);
+  }
+
+  function handleActiveFilterClick(event) {
+    const keyboardActivation = event.detail === 0;
+    if (event.target.closest("[data-clear-filters]")) {
+      clearAllFilters();
+      if (keyboardActivation) $("runSearch").focus();
+      return;
+    }
+    if (event.target.closest("[data-clear-search]")) {
+      $("runSearch").value = "";
+      applyFilters();
+      if (keyboardActivation) $("runSearch").focus();
+      return;
+    }
+    const btn = event.target.closest("[data-remove-facet]");
+    if (!btn) return;
+    const set = state.filters.facets[btn.dataset.removeFacet];
+    if (set) set.delete(btn.dataset.removeValue);
+    applyFilters();
+    if (keyboardActivation) {
+      const clearBtn = $("clearFiltersBtn");
+      (clearBtn.disabled ? $("runSearch") : clearBtn).focus();
+    }
   }
 
   function getFilteredRuns() {
-    const q = $("runSearch").value.trim().toLowerCase();
-    const vf = $("verdictFilter").value;
-    const gf = $("guardrailFilter").value;
-    const tf = $("triageModeFilter").value;
-
-    return state.runs.filter((r) => {
-      if (vf && deriveOutcome(r).key !== vf) return false;
-      if (gf && (r.guardrails_mode || "unknown") !== gf) return false;
-      if (tf && (r.key_config?.triage_mode || "manifest") !== tf) return false;
-      if (q) {
-        const hay = [
-          r.run_id,
-          r.benchmark_id,
-          r.commit_hash,
-          r.pr_title,
-          r.pr_number ? `pr#${r.pr_number}` : "",
-          r.key_config?.model_default,
-          r.triage_status,
-          r.discard_reason,
-        ].filter(Boolean).join(" ").toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
+    return sortRuns(filterRuns());
   }
 
   function renderRunCardHtml(r, isChild = false) {
@@ -630,18 +1194,26 @@
 
     const triageMode = r.key_config?.triage_mode || "manifest";
     const tokens = r.llm_stats?.total_tokens ? `${fmtNum(r.llm_stats.total_tokens)} tok` : "0 tok";
+    const reasonShowsTriage = Boolean(outcome.reasonLabel) && outcome.kind === "triage_skipped";
+    const triageStatus = effectiveTriageStatus(r);
+    const triageMeta = triageStatus !== "unknown" ? triageStatusMeta(triageStatus) : null;
+    const triageStatusBadge =
+      triageMeta && !reasonShowsTriage
+        ? facetBadge("triageStatus", triageStatus, triageMeta.cls, triageMeta.label, triageMeta.tooltip, false)
+        : "";
     return `
       <div class="run-card ${isChild ? "batch-child" : ""} ${active}" data-run-id="${esc(r.run_id)}" tabindex="-1">
         <div class="run-card-top">
           <span class="run-card-bench" title="${esc(r.benchmark_id)}">${esc(r.benchmark_id)}</span>
-          <span class="badge ${outcome.cls}" title="${esc(outcome.tooltip)}">${esc(outcome.label)}</span>
+          ${facetBadge("outcome", outcome.key, outcome.cls, outcome.label, outcome.tooltip, false)}
         </div>
-        ${outcome.reasonLabel ? `<div class="run-card-outcome-reason"><span class="badge badge-muted" title="${esc(outcome.tooltip)}">${esc(outcome.reasonLabel)}</span></div>` : ""}
+        ${outcome.reasonLabel ? `<div class="run-card-outcome-reason">${outcomeReasonControl(r, outcome, "badge-muted", false)}</div>` : ""}
         <div class="run-card-id" title="Started: ${esc(fmtTs(r.started_at))}">${esc(r.run_id.slice(0, 8))} &middot; ${esc(fmtTs(r.started_at))}</div>
         <div class="run-card-meta">
-          <span class="badge badge-muted" title="Triage mode: ${esc(triageMode)}">${esc(triageMode)}</span>
-          <span class="badge badge-muted" title="Guardrails mode: ${esc(r.guardrails_mode)}">${esc(r.guardrails_mode)}</span>
-          <span class="badge badge-muted" title="Verification scope: ${esc(r.verification_scope)}">${esc(r.verification_scope)}</span>
+          ${triageStatusBadge}
+          ${facetBadge("triageMode", triageMode, "badge-muted", triageMode, `Triage mode: ${triageMode}`, false)}
+          ${facetBadge("guardrails", effectiveGuardrails(r), "badge-muted", effectiveGuardrails(r), `Guardrails mode: ${effectiveGuardrails(r)}`, false)}
+          ${facetBadge("verificationScope", effectiveVerificationScope(r), "badge-muted", effectiveVerificationScope(r), `Verification scope: ${effectiveVerificationScope(r)}`, false)}
           <span class="muted" style="font-size:11px;" title="Total LLM tokens across all stages">${esc(tokens)}</span>
         </div>
         <div class="run-card-dots">${dots}</div>
@@ -649,18 +1221,37 @@
     `;
   }
 
+  /** Warn when the inspected run is not part of the filtered sidebar list. */
+  function updateHiddenRunBanner(filteredRuns) {
+    const el = $("filteredOutBanner");
+    if (!el) return;
+    const hidden = Boolean(
+      state.selectedRunId &&
+        state.runDetail &&
+        !filteredRuns.some((run) => run.run_id === state.selectedRunId)
+    );
+    el.classList.toggle("hidden", !hidden);
+  }
+
   function renderRunsList() {
     const filtered = getFilteredRuns();
-    $("runsCount").textContent = `${filtered.length} of ${state.runs.length} runs`;
+    const filterCount = activeFilterCount();
+    $("runsCount").textContent =
+      `${filtered.length} of ${state.runs.length} runs` +
+      (filterCount > 0 ? ` · ${filterCount} filter${filterCount === 1 ? "" : "s"}` : "");
+    updateClearButton();
+    updateHiddenRunBanner(filtered);
     if (state.viewMode === "matrix") renderMatrixView();
     const listEl = $("runsList");
 
     if (filtered.length === 0) {
-      listEl.innerHTML = `<div class="muted" style="padding:12px;">No matching runs.</div>`;
+      listEl.innerHTML = `<div class="runs-empty"><div class="muted">No matching runs.</div><button type="button" class="btn btn-sm" data-clear-filters="1">Clear filters</button></div>`;
+      listEl.querySelector("[data-clear-filters]")?.addEventListener("click", clearAllFilters);
       return;
     }
 
     const searchActive = Boolean($("runSearch").value.trim());
+    const facetFilterActive = FACET_DEFS.some((def) => state.filters.facets[def.key]?.size > 0);
     const items = [];
     const batchMap = new Map();
 
@@ -694,7 +1285,7 @@
       const incompleteCount = outcomes.filter((o) => ["failed", "interrupted", "stopped", "unknown"].includes(o.kind)).length;
       const runningCount = outcomes.filter((o) => o.kind === "running").length;
       const hasSelected = runs.some((r) => r.run_id === state.selectedRunId);
-      const autoExpanded = searchActive || hasSelected;
+      const autoExpanded = searchActive || facetFilterActive || hasSelected;
       const isExpanded =
         state.expandedBatches.has(item.batchId) ||
         (autoExpanded && !state.collapsedBatches.has(item.batchId));
@@ -821,6 +1412,7 @@
     renderRunHeader();
     populateCompareDropdown();
     switchRunTab(state.activeRunTab);
+    updateHiddenRunBanner(getFilteredRuns());
   }
 
   function renderRunHeader() {
@@ -828,14 +1420,14 @@
     const kc = r.key_config || {};
 
     const outcome = deriveOutcome(r);
-    $("hdrVerdictBadge").className = `badge ${outcome.cls}`;
-    $("hdrVerdictBadge").textContent = outcome.label;
-    $("hdrVerdictBadge").title = outcome.tooltip;
+    const verdictHost = $("hdrVerdictBadge");
+    verdictHost.className = "badge-host";
+    verdictHost.innerHTML = facetBadge("outcome", outcome.key, outcome.cls, outcome.label, outcome.tooltip);
 
     const lifecycle = deriveLifecycle(r);
-    $("hdrStatusBadge").className = `badge ${lifecycle.cls}`;
-    $("hdrStatusBadge").textContent = `run: ${lifecycle.label}`;
-    $("hdrStatusBadge").title = lifecycle.tooltip;
+    const lifecycleHost = $("hdrStatusBadge");
+    lifecycleHost.className = "badge-host";
+    lifecycleHost.innerHTML = facetBadge("lifecycle", lifecycle.label, lifecycle.cls, `run: ${lifecycle.label}`, lifecycle.tooltip);
 
     $("hdrBenchmark").textContent = r.benchmark_id;
     $("hdrRunId").textContent = r.run_id;
@@ -910,27 +1502,28 @@
     `;
 
     const pills = [
-      ["triage", kc.triage_mode || "manifest"],
-      ["triage_model", kc.triage_mode === "crawler" ? kc.model_triage : null],
-      ["depth", kc.triage_mode === "crawler" ? kc.triage_depth : null],
-      ["limit", kc.triage_mode === "crawler" ? kc.triage_limit : null],
-      ["threshold", kc.triage_mode === "crawler" ? kc.triage_bugfix_threshold : null],
-      ["model", kc.model_default],
-      ["guardrails", kc.guardrails_mode],
-      ["scope", kc.verification_scope],
-      ["freedom", kc.synthesis_freedom_level],
-      ["local_vars", kc.repair_local_var_annotations],
-      ["temp", kc.sample_temperature],
-      ["steps", kc.agent_steps ? `${kc.agent_steps.synthesis ?? "-"}/${kc.agent_steps.application ?? "-"}/${kc.agent_steps.repair ?? "-"}` : null],
-      ["timeout", kc.agent_timeout_ms ? `${Math.round(kc.agent_timeout_ms / 1000)}s` : null],
-    ].filter(([, v]) => v !== null && v !== undefined && v !== "");
+      { k: "triage", v: kc.triage_mode || "manifest", facet: "triageMode" },
+      { k: "triage_model", v: kc.triage_mode === "crawler" ? kc.model_triage : null },
+      { k: "depth", v: kc.triage_mode === "crawler" ? kc.triage_depth : null },
+      { k: "limit", v: kc.triage_mode === "crawler" ? kc.triage_limit : null },
+      { k: "threshold", v: kc.triage_mode === "crawler" ? kc.triage_bugfix_threshold : null },
+      { k: "model", v: kc.model_default, facet: "model" },
+      { k: "guardrails", v: kc.guardrails_mode, facet: "guardrails" },
+      { k: "scope", v: kc.verification_scope, facet: "verificationScope" },
+      { k: "freedom", v: kc.synthesis_freedom_level },
+      { k: "local_vars", v: kc.repair_local_var_annotations },
+      { k: "temp", v: kc.sample_temperature },
+      { k: "steps", v: kc.agent_steps ? `${kc.agent_steps.synthesis ?? "-"}/${kc.agent_steps.application ?? "-"}/${kc.agent_steps.repair ?? "-"}` : null },
+      { k: "timeout", v: kc.agent_timeout_ms ? `${Math.round(kc.agent_timeout_ms / 1000)}s` : null },
+    ].filter((pill) => pill.v !== null && pill.v !== undefined && pill.v !== "");
 
-    $("hdrConfigPills").innerHTML = pills.map(([k, v]) => `
-      <span class="cfg-pill" title="${esc(CONFIG_PILL_TOOLTIPS[k] || k)}">
-        <span class="cfg-pill-k">${esc(k)}:</span>
-        <span class="cfg-pill-v">${esc(v)}</span>
-      </span>
-    `).join("");
+    $("hdrConfigPills").innerHTML = pills.map(({ k, v, facet }) => {
+      const inner = `<span class="cfg-pill-k">${esc(k)}:</span><span class="cfg-pill-v">${esc(v)}</span>`;
+      const title = CONFIG_PILL_TOOLTIPS[k] || k;
+      if (!facet) return `<span class="cfg-pill" title="${esc(title)}">${inner}</span>`;
+      const active = isFacetActive(facet, v);
+      return `<button type="button" class="cfg-pill facet-link${active ? " is-active" : ""}" data-facet="${esc(facet)}" data-facet-value="${esc(v)}" aria-pressed="${active}" title="${esc(`${title}. Click to ${active ? "remove" : "add"} ${facetLabel(facet).toLowerCase()} filter: ${v}`)}">${inner}</button>`;
+    }).join("");
 
     $("logSizeBadge").textContent = r.log_available ? fmtBytes(r.log_size_bytes) : "none";
   }
@@ -1424,10 +2017,14 @@
       const tm = step.triage_metadata || {};
       const kc = r.key_config || {};
       const provenance = tm.source_provenance || kc.triage_mode || "manifest";
-      const triageStatus = r.triage_status || (isStepRunning(step) ? "running" : (step.success ? "verified" : "discarded"));
+      const triageStatus = effectiveTriageStatus(r);
       const triageMeta = triageStatusMeta(triageStatus);
       const discardReason = r.discard_reason || tm.discard_reason || "-";
       const classification = r.classification || tm.llm_classification || "-";
+      // Only the run-list column is a facet value; metadata-only fallbacks stay plain.
+      const classificationCell = r.classification
+        ? facetControl("classification", r.classification, { plain: true, inner: `<code>${esc(classification)}</code>`, label: classification, tooltip: "LLM triage classification" })
+        : `<code>${esc(classification)}</code>`;
       const score = r.bugfix_score ?? tm.bugfix_score;
       const threshold = kc.triage_bugfix_threshold;
       const regClass = tm.regression_test_class || r.regression_test_class;
@@ -1437,11 +2034,11 @@
 
       stageSpecific += `
         <div class="card">
-          <h4>Triage Details (<span class="badge badge-muted">${esc(provenance)}</span>)</h4>
+          <h4><span>Triage Details (triage mode: ${facetBadge("triageMode", provenance, "badge-muted", provenance, "Triage provenance")})</span></h4>
           <table class="data-table">
             <tbody>
-              <tr><th>Triage Status</th><td><span class="badge ${triageMeta.cls}" title="${esc(triageMeta.tooltip)}">${esc(triageMeta.label)}</span> <code class="muted">${esc(triageStatus)}</code></td><th>Discard Reason</th><td><code>${esc(discardReason)}</code></td></tr>
-              <tr><th>Classification</th><td><code>${esc(classification)}</code></td><th>Bugfix Score</th><td>${score !== null && score !== undefined ? `<code>${esc(score)}</code>${threshold !== null && threshold !== undefined ? ` (threshold: <code>${esc(threshold)}</code>)` : ""}` : "-"}</td></tr>
+              <tr><th>Triage Status</th><td>${facetBadge("triageStatus", triageStatus, triageMeta.cls, triageMeta.label, triageMeta.tooltip)} <code class="muted">${esc(triageStatus)}</code></td><th>Discard Reason</th><td><code>${esc(discardReason)}</code></td></tr>
+              <tr><th>Classification</th><td>${classificationCell}</td><th>Bugfix Score</th><td>${score !== null && score !== undefined ? `<code>${esc(score)}</code>${threshold !== null && threshold !== undefined ? ` (threshold: <code>${esc(threshold)}</code>)` : ""}` : "-"}</td></tr>
               <tr><th>Regression Test</th><td colspan="3"><code>${esc(regTest)}</code></td></tr>
               <tr><th>Path Audit</th><td><code>${esc(tm.path_audit_result || "-")}</code></td><th>C-1 Build</th><td><code>${esc(tm.c1_build_status || "-")}</code></td></tr>
               <tr><th>C-1 Test</th><td><code>${esc(tm.c1_test_status || "-")}</code></td><th>C Test</th><td><code>${esc(tm.c_test_status || "-")}</code></td></tr>
@@ -2598,6 +3195,10 @@
     if (tag === "input" || tag === "select" || tag === "textarea" || e.metaKey || e.ctrlKey || e.altKey) {
       return;
     }
+    // Arrow keys on filter controls should not navigate the run list.
+    if (e.target instanceof Element && e.target.closest(".sidebar-filters, [data-facet][data-facet-value]")) {
+      return;
+    }
 
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       const cards = [...$("runsList").querySelectorAll(".batch-card, .run-card")];
@@ -2757,11 +3358,11 @@
                       <span class="muted" style="font-size:11px;">${esc((r.commit_hash || "").slice(0, 8))}</span>
                     </button>
                   </td>
-                  <td><span class="badge badge-muted">${esc(mode)}</span></td>
+                  <td>${facetBadge("triageMode", mode, "badge-muted", mode, `Triage mode: ${mode}`)}</td>
                   ${STAGE_ORDER.map((s) => renderMatrixCell(r, s)).join("")}
                   <td>
-                    <span class="badge ${outcome.cls}" title="${esc(outcome.tooltip)}">${esc(outcome.label)}</span>
-                    ${outcome.reasonLabel ? `<div class="muted" style="font-size:11px;margin-top:2px;">${esc(outcome.reasonLabel)}</div>` : ""}
+                    ${facetBadge("outcome", outcome.key, outcome.cls, outcome.label, outcome.tooltip)}
+                    ${outcome.reasonLabel ? `<div class="muted" style="font-size:11px;margin-top:2px;">${outcomeReasonControl(r, outcome)}</div>` : ""}
                   </td>
                   <td>${esc(tokens)}</td>
                 </tr>
@@ -2789,17 +3390,18 @@
             ${runs.map((r) => {
               const st = latestStep(r, "triage");
               const mode = r.key_config?.triage_mode || "manifest";
-              const triageStatus = r.triage_status || (st ? (isStepRunning(st) ? "running" : (st.success ? "verified" : "discarded")) : "pending");
+              const triageStatus = effectiveTriageStatus(r);
               const triageMeta = triageStatusMeta(triageStatus);
+              const classification = r.classification || "";
               const regTest = r.regression_test_class
                 ? `${r.regression_test_class.split(".").pop()}.${r.regression_test_method || ""}`
                 : "-";
               return `
                 <tr class="matrix-focus-row" data-run-id="${esc(r.run_id)}" data-stage="triage">
                   <td><strong>${esc(r.benchmark_id)}</strong> <span class="muted" style="font-size:11px;">${esc((r.commit_hash || "").slice(0, 8))}</span></td>
-                  <td><span class="badge badge-muted">${esc(mode)}</span></td>
-                  <td><span class="badge ${triageMeta.cls}" title="${esc(triageMeta.tooltip)}">${esc(triageMeta.label)}</span></td>
-                  <td><code>${esc(r.classification || "-")}</code></td>
+                  <td>${facetBadge("triageMode", mode, "badge-muted", mode, `Triage mode: ${mode}`)}</td>
+                  <td>${facetBadge("triageStatus", triageStatus, triageMeta.cls, triageMeta.label, triageMeta.tooltip)}</td>
+                  <td>${classification ? facetControl("classification", classification, { plain: true, inner: `<code>${esc(classification)}</code>`, label: classification, tooltip: "LLM triage classification" }) : `<span class="muted">-</span>`}</td>
                   <td>${r.bugfix_score !== null && r.bugfix_score !== undefined ? `<code>${esc(r.bugfix_score)}</code>` : "-"}</td>
                   <td><code>${esc(r.discard_reason || "-")}</code></td>
                   <td><code>${esc(regTest)}</code></td>
@@ -2915,10 +3517,50 @@
   function init() {
     window.addEventListener("keydown", handleKeyDown, true);
     $("refreshBtn").addEventListener("click", () => loadRuns(true));
-    $("runSearch").addEventListener("input", renderRunsList);
-    $("verdictFilter").addEventListener("change", renderRunsList);
-    $("guardrailFilter").addEventListener("change", renderRunsList);
-    $("triageModeFilter").addEventListener("change", renderRunsList);
+
+    initFilterControls();
+    restoreFiltersFromUrl(readUrlState());
+    $("runSearch").addEventListener("input", () => applyFilters());
+    $("filterFacets").addEventListener("change", handleFacetSelectChange);
+    $("activeFilters").addEventListener("click", handleActiveFilterClick);
+    $("clearFiltersBtn").addEventListener("click", clearAllFilters);
+    $("showAllRunsBtn").addEventListener("click", clearAllFilters);
+    $("sortSelect").addEventListener("change", (e) => {
+      state.filters.sort = e.target.value;
+      renderRunsList();
+      saveUrlState();
+    });
+
+    window.addEventListener("hashchange", () => {
+      const saved = readUrlState();
+      if (
+        normalizeFacetState(saved.filters) === normalizeFacetState(serializeFacets()) &&
+        (saved.sort || "newest") === state.filters.sort
+      ) {
+        return;
+      }
+      restoreFiltersFromUrl(saved);
+      applyFilters();
+    });
+
+    // Any badge/control carrying a facet value toggles that filter. Capture
+    // phase stops the click from also navigating (e.g. selecting a run card).
+    document.addEventListener(
+      "click",
+      (event) => {
+        const target = event.target.closest("[data-facet][data-facet-value]");
+        if (!target) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const key = target.dataset.facet;
+        const value = target.dataset.facetValue;
+        const keyboardActivation = event.detail === 0;
+        toggleFacet(key, value);
+        if (keyboardActivation) restoreFacetFocus(key, value);
+      },
+      true
+    );
+
     $("viewModeInspector").addEventListener("click", () => setViewMode("inspector"));
     $("viewModeMatrix").addEventListener("click", () => setViewMode("matrix"));
 

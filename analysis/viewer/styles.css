@@ -152,9 +152,136 @@ code, pre {
   gap: 6px;
 }
 
+.filter-facets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.filter-facets select {
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+.filter-facets select.has-filter {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.filter-sort-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-sort-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.filter-sort-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.active-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.active-filters:empty {
+  display: none;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.filter-chip-key {
+  color: var(--text-muted);
+}
+
+.filter-chip-val {
+  font-weight: 600;
+}
+
+.filter-chip-x {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 3px;
+  border-radius: 50%;
+}
+
+.filter-chip-x:hover {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.filter-chip-stale {
+  border-color: rgba(248, 81, 73, 0.55);
+  background: var(--red-soft);
+}
+
+.filter-chip-stale .filter-chip-val {
+  text-decoration: line-through dotted;
+}
+
+.filter-chip-clear {
+  padding: 2px 8px;
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.filter-chip-clear:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.runs-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px;
+}
+
+.filter-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 8px 14px;
+  border: 1px solid rgba(210, 153, 34, 0.35);
+  border-radius: 8px;
+  background: var(--yellow-soft);
+  font-size: 12px;
+}
+
 .runs-count {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+.filter-hint {
+  font-size: 10px;
+  color: var(--text-dim);
 }
 
 .runs-list {
@@ -285,6 +412,61 @@ code, pre {
 .badge-blue { background: var(--accent-soft); color: var(--accent); border-color: rgba(88, 166, 255, 0.35); }
 .badge-purple { background: var(--purple-soft); color: var(--purple); border-color: rgba(163, 113, 247, 0.35); }
 .badge-muted { background: var(--bg-elev-2); color: var(--text-muted); border-color: var(--border); }
+
+.badge-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Clickable facet badges: any badge or inline value that toggles a filter. */
+.facet-link {
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 0.12s ease, outline-color 0.12s ease;
+}
+
+.facet-link:hover {
+  filter: brightness(1.3);
+}
+
+.facet-link.is-active {
+  outline: 1px solid currentColor;
+  outline-offset: 1px;
+}
+
+.cfg-pill.facet-link {
+  cursor: pointer;
+}
+
+.cfg-pill.facet-link:hover {
+  border-color: var(--accent);
+}
+
+.facet-link-plain {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.facet-link-plain:hover {
+  color: var(--accent);
+  text-decoration: underline dotted;
+}
+
+.facet-link-plain.is-active {
+  color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 
 .pill-count {
   display: inline-block;

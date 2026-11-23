@@ -29,18 +29,14 @@
       </div>
 
       <div class="sidebar-filters">
-        <input id="runSearch" type="search" placeholder="Filter by run ID, benchmark, PR..." autocomplete="off" />
-        <div class="filter-row">
-          <select id="verdictFilter" aria-label="Filter by outcome">
-            <option value="">All outcomes</option>
-          </select>
-          <select id="guardrailFilter" aria-label="Filter by guardrails">
-            <option value="">All guardrails</option>
-          </select>
-          <select id="triageModeFilter" aria-label="Filter by triage mode">
-            <option value="">All triage</option>
-          </select>
+        <input id="runSearch" type="search" placeholder="Search run ID, benchmark, repo, PR..." autocomplete="off" />
+        <div id="filterFacets" class="filter-facets"></div>
+        <div class="filter-sort-row">
+          <label class="filter-sort-label" for="sortSelect">Sort</label>
+          <select id="sortSelect" aria-label="Sort runs"></select>
+          <button id="clearFiltersBtn" class="btn btn-sm" title="Clear all filters">Clear</button>
         </div>
+        <div id="activeFilters" class="active-filters"></div>
         <div id="runsCount" class="runs-count">Loading runs...</div>
       </div>
 
@@ -61,6 +57,10 @@
       <div id="runView" class="run-view hidden">
         <!-- Run Header -->
         <header class="run-header">
+          <div id="filteredOutBanner" class="filter-banner hidden">
+            <span>This run is hidden by the active filters.</span>
+            <button id="showAllRunsBtn" class="btn btn-sm">Show all runs</button>
+          </div>
           <div class="run-title-row">
             <div class="run-title-left">
               <span id="hdrVerdictBadge" class="badge"></span>
