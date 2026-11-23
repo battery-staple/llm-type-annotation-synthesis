@@ -19,7 +19,6 @@
     autoRefreshTimer: null,
     viewMode: "inspector",
     matrixStage: null,
-    selectedBatchId: null,
     highlightedBatchId: null,
     expandedBatches: new Set(),
     collapsedBatches: new Set(),
@@ -28,6 +27,7 @@
       // Facet key -> Set of selected values. Within a facet values are ORed;
       // different facets are ANDed. Empty sets mean "no constraint".
       facets: {
+        batch: new Set(),
         triageStatus: new Set(),
         outcome: new Set(),
         lifecycle: new Set(),
@@ -567,6 +567,16 @@
 
   const FACET_DEFS = [
     {
+      // Toggled by the "N commits" pill on each batch card rather than by a
+      // sidebar select: batch IDs are opaque crawls, not useful dropdown rows.
+      key: "batch",
+      label: "Run batch",
+      shortLabel: "batch",
+      values: (r) => (r.batch_id ? [r.batch_id] : []),
+      display: (r, value) => String(value).slice(0, 8),
+      noSelect: true,
+    },
+    {
       key: "triageStatus",
       label: "Triage status",
       shortLabel: "triage",
@@ -1020,7 +1030,7 @@
   }
 
   function initFilterControls() {
-    $("filterFacets").innerHTML = FACET_DEFS.map(
+    $("filterFacets").innerHTML = FACET_DEFS.filter((def) => !def.noSelect).map(
       (def) => `<select class="facet-select" data-facet="${esc(def.key)}" aria-label="Add ${esc(def.label.toLowerCase())} filter"><option value="">${esc(def.placeholder)}</option></select>`
     ).join("");
     $("sortSelect").innerHTML = SORT_OPTIONS.map(
@@ -1139,7 +1149,6 @@
 
   function clearAllFilters() {
     resetFacetFilters();
-    state.selectedBatchId = null;
     state.hideDiscardedInMatrix = false;
     const search = $("runSearch");
     if (search) search.value = "";
@@ -1299,7 +1308,9 @@
       const isExpanded =
         state.expandedBatches.has(item.batchId) ||
         (autoExpanded && !state.collapsedBatches.has(item.batchId));
-      const isActiveBatch = state.highlightedBatchId === item.batchId || (state.viewMode === "matrix" && state.selectedBatchId === item.batchId);
+      const isActiveBatch =
+        state.highlightedBatchId === item.batchId ||
+        Boolean(state.filters.facets.batch?.has(item.batchId));
 
       const summaryPills = [
         passCount ? `<span class="badge badge-green">${passCount} pass</span>` : "",
@@ -1320,7 +1331,11 @@
             <div class="run-card-top">
               <button class="batch-toggle-btn" data-toggle-batch="${esc(item.batchId)}" tabindex="-1" aria-hidden="true" title="${isExpanded ? "Collapse" : "Expand"} commits">${isExpanded ? "&#x25BE;" : "&#x25B8;"}</button>
               <span class="run-card-bench" title="Crawl batch ${esc(item.batchId)}">${esc(repoLabel)}</span>
-              <button class="batch-filter-btn badge badge-muted" data-batch-filter="${esc(item.batchId)}" title="Show this batch in the Stage Matrix">${runs.length} commits</button>
+              ${facetControl("batch", item.batchId, {
+                cls: "badge-muted batch-filter-btn",
+                label: `${runs.length} commit${runs.length === 1 ? "" : "s"}`,
+                tooltip: `Filter the viewer to run batch ${item.batchId.slice(0, 8)} (${runs.length} commit${runs.length === 1 ? "" : "s"})`,
+              })}
             </div>
             <div class="run-card-id" title="Batch ID: ${esc(item.batchId)}">${esc(item.batchId.slice(0, 8))} &middot; ${esc(fmtTs(first.started_at))}</div>
             <div class="run-card-meta">
@@ -1371,15 +1386,6 @@
             toggleBatch(el.dataset.batchId, isExpanded(), true);
           }
         }
-      });
-    });
-
-    listEl.querySelectorAll(".batch-filter-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        state.selectedBatchId = btn.dataset.batchFilter;
-        setViewMode("matrix");
-        renderRunsList();
       });
     });
 
@@ -3540,10 +3546,6 @@
       `;
     }
 
-    const batchBanner = state.selectedBatchId
-      ? `<span class="badge badge-muted" style="margin-left:8px;">Batch: <code>${esc(state.selectedBatchId.slice(0, 8))}</code> <button id="clearBatchFilterBtn" class="btn btn-sm" style="margin-left:4px;padding:0 5px;" title="Show all batches">&times;</button></span>`
-      : "";
-
     const telemetry = state.telemetry || { db_operations: [], retries: [], subprocesses: [], recent_retries: [], notes: [] };
     const telemetryHtml = `<div class="grid-2 telemetry-grid">
       <div class="card"><h3>Database operation performance</h3>${telemetry.db_operations.length ? `<table class="data-table"><thead><tr><th>Operation</th><th>Calls</th><th>Failures</th><th>Avg ms</th><th>Max ms</th></tr></thead><tbody>${telemetry.db_operations.map((x) => `<tr><td>${esc(x.operation)}</td><td>${esc(fmtNum(x.calls))}</td><td>${esc(fmtNum(x.failures))}</td><td>${esc(Number(x.avg_duration_ms || 0).toFixed(2))}</td><td>${esc(Number(x.max_duration_ms || 0).toFixed(2))}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No DB operation telemetry${telemetry.notes.length ? ` · ${esc(telemetry.notes.join(" "))}` : ""}</p>`}</div>
@@ -3568,14 +3570,6 @@
       ${telemetryHtml}
     `;
 
-    const clearBatchBtn = $("clearBatchFilterBtn");
-    if (clearBatchBtn) {
-      clearBatchBtn.addEventListener("click", () => {
-        state.selectedBatchId = null;
-        renderRunsList();
-        renderMatrixView();
-      });
-    }
     const hideDiscardedEl = $("matrixHideDiscarded");
     if (hideDiscardedEl) {
       hideDiscardedEl.addEventListener("change", (e) => {
