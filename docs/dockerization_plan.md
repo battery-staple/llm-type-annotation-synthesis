@@ -1,9 +1,12 @@
 # Dockerization Plan: Containerized Builds and Agent Sessions
 
 Status: proposed (2026-11-23), revised the same day after a review against the
-code. Nothing in this plan is implemented yet. The bug 1 and bug 2 fixes
-(§7.5, §7.6) were checked with javac and Gradle 9.8 on minimal projects, not
-yet on the eval repos.
+code. Phase 0 is implemented on branch `phase0-harness-fixes` (see "Phase 0
+status" in §5); the later phases are not started. The Phase 0 review changed
+four parts of the design: the `init.d` script turned out to be written by a
+pipeline agent (§1), bug 4 uses an allowlist rather than clearing every
+inherited flag (§7.5), module projects also need `-Xlint:-exports` (§7.6), and
+the synthetic `.git` moved from Phase 2 to Phase 0 (§3.8).
 
 This plan runs the pipeline's builds and agent sessions inside controlled Docker
 containers so each target project builds in a known, pinned environment and
@@ -158,8 +161,8 @@ failure seen inside Docker can only come from Docker.
 | 2. Module projects cannot read the classpath jars; javac finds `module-info.java` through `-sourcepath` despite the exclusion | No | Keep `module-info.java` and pass `--add-modules`/`--add-reads` from `checker.init.gradle` (§7.6). |
 | 3. `checker-qual.jar` missing from the main compile classpath (breaks `-Werror` projects) | No | Add it to the main compile classpath in `checker.init.gradle`; module projects also need §7.6. |
 | 4. `checkerPass` inherits project compiler flags (`-Werror`, `-Xlint`) | No | Clear inherited `compilerArgs` in `checker.init.gradle`. |
-| `run-compile.sh` fails because the agent workspace has no `.git` | Partly | Synthetic one-commit `.git` in the workspace (§3.8); helper must also use the init script. |
-| Application prompt contradicts its tooling | No | Give the application agent a run-checker helper; fix the prompt. |
+| `run-compile.sh` fails because the agent workspace has no `.git` | Partly | Synthetic one-commit `.git` in the workspace (§3.8, done in Phase 0); helper uses the init script. |
+| Application prompt contradicts its tooling | No | Compile-only `run-compile.sh` through the init script; the agent never runs the checker, and the prompt states the non-triviality requirement only when `prompt.tell_non_triviality_error` is true (done in Phase 0). |
 | Agent not contained (filesystem search, `/tmp` writes, web requests, reads under `$HOME`) | **Yes** | Workspace-only mounts and an egress allowlist for agents; narrow mounts for build containers too, because they run agent-written code (§3.2, §3.6, §3.7). |
 | Caffeine pins JDK 26; Gradle would auto-download it | **Yes** | Pinned JDKs in the image, toolchain auto-download disabled, clear discard when a JDK is missing. |
 | Target repositories ship agent instruction files (`AGENTS.md` in RoaringBitmap, caffeine, wiremock; `CLAUDE.md` in caffeine, wiremock) that OpenCode reads | No | Exclude agent instruction and config files from every workspace export (§3.6). |
@@ -168,14 +171,29 @@ failure seen inside Docker can only come from Docker.
 
 ### Hidden host state
 
-`~/.gradle/init.d/zz-cf-compile-init.gradle` exists on the development machine.
-Gradle applies it to every build on the host: it adds `CUSTOM_QUAL_JAR_PATH` to
-`compileJava`/`compileTestJava` and rewrites `JavaCompile` arguments. Containers
-will not have it, so host and container runs would diverge. Phase 0 moves its
-behavior into `src/main/resources/templates/checker.init.gradle`, or deletes it
-if it is obsolete. Host runs currently depend on it, so after removing it,
-re-run `synthetic-id-swap` and `cmsx` on the host to confirm their verdicts are
-unchanged.
+`~/.gradle/init.d/zz-cf-compile-init.gradle` existed on the development machine.
+Gradle applied it to every build on the host: it added `CUSTOM_QUAL_JAR_PATH`
+to `compileJava`/`compileTestJava` and converted `JavaCompile` arguments to
+plain strings.
+
+**A pipeline agent wrote it.** The repair agent of cmsx run `0113bc38`
+created it with a shell heredoc at 2026-11-22T21:48Z (transcript
+`logs/transcripts/0113bc38-…/cbd078b2-….jsonl`, turns 49 and 52) to make its
+own checker invocations work, then rewrote it to get past a `GStringImpl`
+cast error. It is not harness configuration: it is an agent escape that changed
+the environment of every later host build, including the harness builds that
+score agents. All host runs after that time ran with it: the cmsx batch from
+22:19Z (including the `cmsx-be6f19da` success), and every JSqlParser,
+RoaringBitmap, Agrona, and caffeine run.
+
+Its two effects are already covered by the template (the qualifier jar on both
+compile classpaths; harness arguments are built as `String`s), so it was not
+migrated. Phase 0 moved it to `~/.gradle/init.d-quarantine/` (reversible).
+`synthetic-id-swap` and `cmsx` should be re-run on the host to confirm that
+their verdicts do not depend on it. Only one host write turned up in the
+transcripts; other agents only read under `$HOME` (`~/.gradle/caches`,
+`~/.m2`) while searching for jars. Until agents run in containers (Phase 2),
+the same escape remains possible on the host.
 
 Other host state that containers will not have:
 
@@ -403,6 +421,9 @@ which nothing reads. This makes the setting effective.
 
 ### 3.8 Synthetic `.git` in agent workspaces
 
+Implemented in Phase 0 (`Git.initSnapshot`), because agent helpers need it on
+the host too.
+
 After the sanitized export, run `git init && git add -A && git commit` in the
 workspace, with the identity passed inline (`-c user.name=… -c user.email=…`).
 Build scripts that call `git` during configuration then work, and there is
@@ -511,9 +532,10 @@ Modified:
 - `src/main/kotlin/pipeline/stages/ApplicationStage.kt` (`prepareWorkspace`),
   `src/main/kotlin/pipeline/stages/RepairStage.kt` (`prepareRepairWorkspace`,
   `writeRunCheckerScript`), and `src/main/kotlin/pipeline/stages/SynthesisStage.kt`
-  (`CHECKER_QUAL_JAR`): container paths with no `../` references, synthetic
-  `.git`, run-checker helper for application, budget counter in the session
-  state mount.
+  (`CHECKER_QUAL_JAR`): container paths with no `../` references (both
+  `run-compile.sh` and `run-checker.sh` still reach `../.pipeline-init`), budget
+  counter in the session state mount. The synthetic `.git` and the
+  compile-only application helper were done in Phase 0.
 - `src/main/kotlin/pipeline/stages/SynthesisStage.kt`: reject qualifier
   packages that are also packages of the project (§7.6).
 - `src/main/kotlin/pipeline/util/Support.kt` (`exportSanitized`): exclude
@@ -562,15 +584,45 @@ Corpus measurement (§7.4), new:
 
 | Phase | Work | Exit criteria | Estimate |
 |---|---|---|---|
-| **0. Harness fixes (no Docker)** | Bug 1 as a fixed `--release 8` (§7.5); bug 2 as the module-project design (§7.6); bug 3; bug 4 as the clean `checkerPass` configuration (§7.5); qualifier-package check in synthesis; move or remove the `init.d` script; application run-checker helper and prompt fix; agent instruction files excluded from the export | The JSqlParser and Agrona probe files pass on the host, and so does every other eval repo with the same triggering condition (see "Requirement: Fixes Must Be General"): the module fix on JSqlParser, RoaringBitmap, caffeine, and picocli (including its `src/main/java9` descriptor and JPMS test subprojects). `synthetic-id-swap` and `cmsx` verdicts unchanged after the `init.d` script is removed | 2–3 days |
+| **0. Harness fixes (no Docker)** | Bug 1 as a fixed `--release 8` (§7.5); bug 2 as the module-project design (§7.6); bug 3; bug 4 as the clean `checkerPass` configuration (§7.5); qualifier-package check in synthesis; quarantine the agent-written `init.d` script; compile-only application helper and prompt fix; synthetic `.git` (moved from Phase 2); agent instruction files excluded from the export; init script hashed into build-stage cache keys | The JSqlParser and Agrona probe files pass on the host, and so does every other eval repo with the same triggering condition (see "Requirement: Fixes Must Be General"): the module fix on JSqlParser, RoaringBitmap, caffeine, and picocli (including its `src/main/java9` descriptor and JPMS test subprojects). `synthetic-id-swap` and `cmsx` verdicts unchanged after the `init.d` script is removed | 2–3 days |
 | **0.5 Preflight (no Docker)** | Preflight stage, reason codes, `preflight_results` table, `pipeline preflight` CLI (§7.3); run on the 12 eval repos | Every eval repo ends in `pass` or a specific reason code, never `unknown`; results match the known issues in §1 | 2–3 days |
 | **1. Builds in a container** | Runtime image, `ExecutionBackend` with `ExecutionHandle`, `--init`, Gradle volume, narrow same-path mounts and harness directory, environment allowlist, `runtime_jdk`, image identity recorded, Docker startup checks | synthetic-id-swap and cmsx give the same verdicts on `local` and `docker`, with the host `JAVA_HOME` pinned to the image's JDK 21 for the local runs; preflight results on the 12 eval repos are identical on both backends except for the listed host-state differences (§1); JSqlParser checker time measured on both | 2–3 days |
-| **2. Agents in a container** | OpenCode in the container (all agent stages and the triage classifier), `/workspace` and `/harness` mounts, helper scripts on container paths, synthetic `.git`, offline Gradle for agents, egress proxy, OpenCode permission config, OpenCode version check, runtime downloads baked into the image | Containment canary test passes (below) | 3–4 days |
+| **2. Agents in a container** | OpenCode in the container (all agent stages and the triage classifier), `/workspace` and `/harness` mounts, helper scripts on container paths, offline Gradle for agents, egress proxy, OpenCode permission config, OpenCode version check, runtime downloads baked into the image | Containment canary test passes (below) | 3–4 days |
 | **3. Hardening** | Per-kind resource limits, labels and orphan cleanup, Ctrl+C handling, Docker-mode-only cache-key fields, Linux user and volume ownership, Docker-optional tests, README | A run killed with Ctrl+C leaves no containers; `./gradlew test` passes on a machine without Docker; existing local CAS bundles still hit after the cache-key change | 1–2 days |
 | **4. Corpus measurement** | Corpus tool (§4), sample selection, preflight on the sample, report (§7.4) | Selection rule fixed before running; report with pass rates per stratum and the reason-code distribution | 2–3 days |
 
 Phase 0.5 can run in parallel with Phase 0. Its probe checks reproduce bugs 1–4
 automatically, so they also serve as the regression tests for the Phase 0 fixes.
+
+### Phase 0 status (2026-11-23)
+
+Implemented on branch `phase0-harness-fixes`; the decisions behind each change
+are recorded in `deviations.md` items 57–63. Verified on the host with JDK 21
+running Gradle, using scripted versions of preflight checks P3–P5 (fixed
+`ProbeTop`/`ProbeBottom` lattice compiled with `--release 8`; a probe-annotated
+file in one main and one test package; `checkerPass` on that tree, then with
+one planted ill-typed return):
+
+| Repository (parent commit) | Trigger | P3 compile | P4 probe | P5 checker clean / planted |
+|---|---|---|---|---|
+| synthetic-id-swap `56aa665a` | none | pass | pass | 0 errors / exactly 1 |
+| cmsx `7ee122ff` | AutoValue, custom roots | pass | pass | 0 / exactly 1 |
+| JSqlParser `84f780cd` | JDK 17 toolchain, `module-info`, JavaCC | pass | pass | 0 / exactly 1 |
+| Agrona `21abef93` | `-Xlint:all -Werror`, `--release` in `compilerArgs` | pass | pass | 0 / exactly 1 |
+| RoaringBitmap `2863e96d` | `module-info` (moduleplugin), immutable `compilerArgs` | pass | pass | 0 / exactly 1 |
+| picocli `10509c0a` | Error Prone, `java9` descriptor | pass | pass | 0 / exactly 1 |
+| picocli JPMS test build | named modules | compiles; `module-info.class` kept | — | — |
+| caffeine | JDK 26 toolchain | not run: no JDK 26 (Phase 1) | | |
+
+With the old template, the same probes fail as described in the Background
+(bugs 2 and 3 on a minimal module project, bug 1 with a version-65 jar), and
+RoaringBitmap fails while creating `checkerPass`. That last failure was not in
+the original list.
+
+Not yet done for the Phase 0 exit: re-running `synthetic-id-swap` and `cmsx`
+through the full pipeline on the host to compare verdicts now that the
+agent-written `init.d` script is gone (this runs LLM agents), and a full
+pipeline run of JSqlParser and Agrona.
 
 ### Containment canary test
 
@@ -773,10 +825,19 @@ argument.
   flags) and projects that build on JDK 25 while their sources are 21 or lower.
 - **Give `checkerPass` a clean compiler configuration.** Rather than inheriting
   the project's `JavaCompile` settings and undoing them one at a time (`-Werror`,
-  `-Xlint`, Error Prone), set `compilerArgs` to exactly the checker flags. Keep
-  only the harness's own argument providers, and disable Error Prone on the
-  task when its extension is present. This is how Phase 0 should fix bug 4. The
-  five Error Prone repositories in §7.1 verify it.
+  `-Xlint`, Error Prone), a `doFirst` action keeps an allowlist of flags that
+  decide whether the sources compile (`--release`, `--add-exports`,
+  `--add-modules`, `--limit-modules`, `--enable-preview`, `-encoding`, boot
+  class path options, `-parameters`) and drops everything else with its value.
+  It keeps only the harness's own argument providers and disables Error Prone
+  when its extension is present. The plan first said "exactly the checker
+  flags", but Agrona passes `--release` through `compilerArgs` and projects
+  that use JDK-internal APIs need their `--add-exports`. Unknown flags are
+  dropped, because a missing flag fails visibly while an unknown kept flag could
+  change the diagnostics silently. The checker's own flags come from a
+  `CommandLineArgumentProvider`, because projects may assign an immutable list
+  to `compilerArgs` (RoaringBitmap), on which `addAll` throws while the task is
+  created. This is the bug 4 fix; picocli exercises it with Error Prone.
 - **Compile the qualifier jar with a fixed `--release 8`.** This is the bug 1
   fix; P3 verifies it on every repository. `--release N` sets the accepted
   syntax, the class-file version, and the standard library compiled against,
@@ -813,7 +874,12 @@ gives the module read access to the harness jars with javac flags, much as
      the name in the same `--add-reads` list. Gradle puts such a jar on the
      `--module-path`, where `ALL-UNNAMED` does not reach it. checker-qual
      declares `Automatic-Module-Name: org.checkerframework.checker.qual`, so
-     without this step bug 3 returns in module projects.
+     without this step bug 3 returns in module projects;
+   - `-Xlint:-exports`. A qualifier on an exported API makes javac warn
+     "class ProbeTop in module  is not exported", which `-Xlint:all -Werror`
+     builds fail on. The warning exists only because of the harness jars. This
+     case was missing from the first fixture, which had no annotated public
+     API.
 
    The flags come from a `CommandLineArgumentProvider` evaluated when the task
    runs, like the existing `CheckerQualsArgumentProvider`, so plugins that
@@ -847,13 +913,16 @@ init script and a version with these changes:
 | `checkerPass` with one planted ill-typed assignment | fails at `compileJava` | exactly one `[assignment]` error at the planted line |
 | Same project without `module-info.java` | not run | builds; no flags added |
 
-Not yet verified:
+Phase 0 verified this on JSqlParser, RoaringBitmap, and picocli (including
+its JPMS test build); see "Phase 0 status" in §5. Still not verified:
 
-- **Test runtime in module mode.** Tests that reflect on the annotations at
-  runtime would need the same flags as JVM arguments on `Test` tasks. Test
-  compilation passed.
-- **The eval repos.** JSqlParser, RoaringBitmap, caffeine, and picocli (the
-  Phase 0 exit criterion).
+- **Test runtime in module mode.** RoaringBitmap's tests run on the classpath
+  and pass with the annotated tree; picocli's JPMS test build compiles, but its
+  `test` task finds no tests at baseline (no `useJUnitPlatform()`). Tests that
+  run on the module path and reflect on the annotations would need the same
+  flags as JVM arguments on `Test` tasks.
+- **caffeine.** Its runtime toolchain is `max(javaVersion, 26)` unless it builds
+  on GraalVM, and no JDK 26 is installed; it waits for the Phase 1 image.
 - **Version mismatch.** A project that ships a different checker-qual version
   than the harness; the test used the same jar twice.
 

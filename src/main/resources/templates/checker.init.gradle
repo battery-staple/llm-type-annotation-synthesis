@@ -1,6 +1,10 @@
 // Rendered per-run checker.init.gradle.
 // Every harness parameter is read from the environment, a -D system property, or a
 // -P project property. Bare Groovy identifiers are never used for run parameters.
+//
+// Every rule below is a condition on the build (a task whose sources contain a
+// module descriptor, a project that configures every JavaCompile task), never
+// a check on a particular repository.
 def required = { Project project, String key ->
     def value = System.getenv(key)
     if (value == null) value = System.getProperty(key)
@@ -50,6 +54,217 @@ class CheckerQualsArgumentProvider implements org.gradle.process.CommandLineArgu
                 "-Aquals is only passed to custom qualifier hierarchies")
         }
         return []
+    }
+}
+
+// The checker's own flags (-processor, -Xmaxerrs, guardrail options). A provider,
+// not options.compilerArgs: projects may assign an immutable list to compilerArgs
+// in withType(JavaCompile) (RoaringBitmap assigns a Kotlin listOf), and a provider
+// survives a later reassignment while still being an @Input of the task.
+class CheckerArgumentsProvider implements org.gradle.process.CommandLineArgumentProvider {
+    @org.gradle.api.tasks.Input
+    List<String> checkerArgs
+
+    @Override
+    Iterable<String> asArguments() {
+        return checkerArgs
+    }
+}
+
+// Facts about the harness jars (checker-qual, the qualifier jar, CF_EXTRA_CLASSPATH).
+class HarnessJars {
+    /** The jar's Automatic-Module-Name, or null. Gradle puts such jars on the module path. */
+    static String automaticModuleName(File jar) {
+        if (!jar.isFile()) return null
+        def zip = new java.util.jar.JarFile(jar)
+        try {
+            return zip.manifest?.mainAttributes?.getValue('Automatic-Module-Name')?.trim() ?: null
+        } finally {
+            zip.close()
+        }
+    }
+
+    /**
+     * An explicit module cannot be made readable with --add-reads alone, and its
+     * exports decide what the project may use, so the harness does not support it.
+     */
+    static void rejectExplicitModule(File jar) {
+        if (!jar.isFile()) return
+        def zip = new java.util.jar.JarFile(jar)
+        try {
+            if (zip.getEntry('module-info.class') != null) {
+                throw new GradleException(
+                    "checker.init.gradle: harness jar ${jar} is an explicit module (contains module-info.class); " +
+                    "harness jars must be plain or automatic-module jars")
+            }
+        } finally {
+            zip.close()
+        }
+    }
+
+    /** The module name declared by a module-info.java, ignoring comments and annotations. */
+    static String declaredModuleName(File moduleInfo) {
+        def text = moduleInfo.getText('UTF-8')
+            .replaceAll(/(?s)\/\*.*?\*\//, ' ')
+            .replaceAll(/\/\/[^\n]*/, ' ')
+        def match = text =~ /(?:^|[\s;}])(?:open\s+)?module\s+([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\{/
+        if (!match.find()) {
+            throw new GradleException("checker.init.gradle: cannot read the module name from ${moduleInfo}")
+        }
+        return match.group(1).replaceAll(/\s+/, '')
+    }
+}
+
+// Lets a named module read the harness jars without editing its module-info.java.
+//
+// javac compiles a task whose sources contain module-info.java in module mode,
+// and a named module cannot read classpath jars (the unnamed module). Gradle
+// also finds the descriptor through -sourcepath, so excluding the file from the
+// source set does not avoid module mode. Instead the module is granted read
+// access, much as `requires static` would:
+//   --add-reads <module>=ALL-UNNAMED        harness jars on the classpath
+//   --add-modules <name> and --add-reads    harness jars with an Automatic-Module-Name,
+//                                           which Gradle puts on the module path
+// Evaluated when the task runs, like CheckerQualsArgumentProvider, so plugins that
+// configure every JavaCompile task early cannot trigger it at configuration time.
+// A task whose sources contain no module-info.java gets no arguments.
+class ModuleReadsArgumentProvider implements org.gradle.process.CommandLineArgumentProvider {
+    @org.gradle.api.tasks.Internal
+    org.gradle.api.file.FileCollection sources
+
+    @org.gradle.api.tasks.Internal
+    org.gradle.api.provider.Provider<Boolean> inferModulePath
+
+    @org.gradle.api.tasks.Internal
+    List<File> harnessJars
+
+    @org.gradle.api.tasks.Input
+    String getHarnessJarPaths() {
+        return harnessJars.collect { it.absolutePath }.join(File.pathSeparator)
+    }
+
+    @Override
+    Iterable<String> asArguments() {
+        def descriptors = sources.files.findAll { it.name == 'module-info.java' }
+        if (descriptors.isEmpty()) return []
+        def modules = descriptors.collect { HarnessJars.declaredModuleName(it) }.unique()
+        if (modules.size() != 1) {
+            throw new GradleException(
+                "checker.init.gradle: one compile task declares several modules ${modules}")
+        }
+        def module = modules[0]
+        harnessJars.each { HarnessJars.rejectExplicitModule(it) }
+        // Automatic modules are on the module path only when Gradle infers it.
+        def named = inferModulePath.getOrElse(true)
+            ? harnessJars.collect { HarnessJars.automaticModuleName(it) }.findAll { it != null }.unique()
+            : []
+        def args = []
+        if (!named.isEmpty()) {
+            args += ['--add-modules', named.join(',')]
+        }
+        args += ['--add-reads', "${module}=${(['ALL-UNNAMED'] + named).join(',')}".toString()]
+        // A qualifier on an exported API makes javac warn that the qualifier's
+        // module is not exported ("[exports] class ... in module  is not exported"),
+        // which -Xlint:all -Werror builds turn into a failure. The warning exists
+        // only because of the harness jars, so exactly that category is disabled.
+        args += ['-Xlint:-exports']
+        return args
+    }
+}
+
+// Gives checkerPass exactly the checker's compiler configuration.
+//
+// Projects configure every JavaCompile task through withType(JavaCompile), and
+// checkerPass is one. Inherited flags change what the checker reports: -Werror
+// turns "No processor claimed any of these annotations" into a failure that
+// prints no file-level errors, -Xlint adds warnings, Error Prone adds a compiler
+// plugin, -proc:none disables the checker, and -Xmaxerrs truncates diagnostics.
+// Only flags that decide whether the sources compile at all are kept (allowlist);
+// everything else is dropped. Unknown flags are dropped too: a missing flag makes
+// the compile fail visibly, while an unknown kept flag could silently change the
+// diagnostics.
+//
+// Runs as a doFirst action, after every configureEach action has been applied.
+// doFirst prepends, so later doFirst actions from plugins run before this one.
+class CheckerCompileSanitizer implements org.gradle.api.Action<org.gradle.api.Task> {
+    // Flags whose value is the next argument.
+    static final Set<String> KEEP_WITH_VALUE = [
+        '--release', '--add-exports', '--add-modules', '--limit-modules', '-encoding',
+        '--system', '-bootclasspath', '--boot-class-path', '-extdirs'
+    ] as Set
+    static final Set<String> KEEP_STANDALONE = [
+        '--enable-preview', '-XDignore.symbol.file', '-parameters'
+    ] as Set
+    static final List<String> KEEP_PREFIXES = [
+        '--release=', '--add-exports=', '--add-modules=', '--limit-modules=', '--system=',
+        '--boot-class-path=', '-Xbootclasspath:', '-Xbootclasspath/a:', '-Xbootclasspath/p:'
+    ]
+    // Dropped flags whose value is the next argument; the value is dropped with them.
+    static final Set<String> DROP_WITH_VALUE = [
+        '-processor', '-processorpath', '--processor-path', '--processor-module-path',
+        '-s', '-h', '-d', '-Xmaxerrs', '-Xmaxwarns', '-classpath', '-cp', '--class-path',
+        '--module-path', '-p', '--upgrade-module-path', '--patch-module', '--add-reads',
+        '--module-source-path', '--module-version', '--module', '-m', '-sourcepath',
+        '--source-path', '-source', '--source', '-target', '--target', '-profile',
+        '--default-module-for-created-files'
+    ] as Set
+
+    List<String> forkJvmArgs
+
+    String forkMaxHeap
+
+    org.gradle.api.file.FileCollection processorPath
+
+    static List<String> keepCompileSemantics(List<String> args) {
+        def kept = []
+        def i = 0
+        while (i < args.size()) {
+            def arg = args[i]
+            if (arg in KEEP_WITH_VALUE) {
+                kept << arg
+                if (i + 1 < args.size()) kept << args[i + 1]
+                i += 2
+            } else if (arg in DROP_WITH_VALUE) {
+                i += 2
+            } else if (arg in KEEP_STANDALONE || KEEP_PREFIXES.any { arg.startsWith(it) }) {
+                kept << arg
+                i += 1
+            } else {
+                // Dropped. A following non-flag argument is the value of an unknown
+                // flag, so it is dropped as well.
+                i += 1
+                while (i < args.size() && !args[i].startsWith('-')) i += 1
+            }
+        }
+        return kept
+    }
+
+    @Override
+    void execute(org.gradle.api.Task task) {
+        def compile = (org.gradle.api.tasks.compile.JavaCompile) task
+        // New lists throughout: the project may have assigned immutable ones.
+        def inherited = compile.options.compilerArgs.collect { it.toString() }
+        compile.options.compilerArgs = new ArrayList<String>(keepCompileSemantics(inherited))
+        // Keep only the harness's own argument providers. Error Prone, for one,
+        // contributes -Xplugin:ErrorProne through a provider.
+        // (The provider list itself is Gradle's own; CompileOptions has no setter for it.)
+        compile.options.compilerArgumentProviders.retainAll {
+            it instanceof CheckerQualsArgumentProvider || it instanceof CheckerArgumentsProvider
+        }
+        // The checker needs the javac internals exported to its fork, whatever the
+        // project set for its own compile forks.
+        def jvm = (compile.options.forkOptions.jvmArgs ?: []).collect { it.toString() }
+        compile.options.forkOptions.jvmArgs = new ArrayList<String>(jvm.findAll { !(it in forkJvmArgs) } + forkJvmArgs)
+        compile.options.forkOptions.memoryMaximumSize = forkMaxHeap
+        def errorprone = compile.options.extensions.findByName('errorprone')
+        if (errorprone != null) {
+            try {
+                errorprone.enabled = false
+            } catch (Exception ignored) {
+                // Older plugin versions; their provider was removed above.
+            }
+        }
+        compile.options.annotationProcessorPath = processorPath
     }
 }
 
@@ -112,19 +327,18 @@ allprojects { project ->
 
             // Extra harness-provided classpath entries (colon-separated). Never the processor.
             def extraCp = optional(project, 'CF_EXTRA_CLASSPATH', '')
-            def extraFiles = extraCp.split(java.io.File.pathSeparator).findAll { !it.trim().isEmpty() }
-                .collect { project.files(it) }
-                .inject(project.files()) { acc, f -> acc + f }
+            def extraJars = extraCp.split(java.io.File.pathSeparator)
+                .findAll { !it.trim().isEmpty() }
+                .collect { project.file(it) }
+            def extraFiles = project.files(extraJars)
+            def harnessJars = [checkerQualJar, customQualJar] + extraJars
 
             def main = project.sourceSets.main
-            // The qualifier jars and checker-qual are plain classpath entries. With a
-            // module-info.java in the main source set, javac compiles in module mode and
-            // a named module cannot read classpath types, so qualifier imports and the
-            // checker's own qual classes would not resolve. Compile such projects as
-            // classic classpath projects; the repository's files are left untouched.
-            main.java.exclude('**/module-info.java')
             project.tasks.register('checkerPass', JavaCompile) {
-                source = main.allJava
+                // checkerPass alone compiles in classpath mode: module boundaries do
+                // not affect type checking, and its output is discarded. The project's
+                // own compile keeps module-info.java (see ModuleReadsArgumentProvider).
+                source = main.allJava.matching { exclude '**/module-info.java' }
                 // `main.output` makes classes produced by the project's own
                 // annotation processors (for example AutoValue's generated
                 // `AutoValue_*` subclasses) and static weaving available to the
@@ -139,14 +353,19 @@ allprojects { project ->
                 targetCompatibility = targetCompat
                 options.fork = true
                 // Keep every jar (checker-qual, qualifiers) and main.output on the plain
-                // classpath even if a module-info.class sits in the build outputs.
+                // classpath even if a module-info.class sits in the build outputs, and
+                // give javac no source path through which it could rediscover the
+                // excluded descriptor.
                 modularity.inferModulePath.set(false)
+                options.sourcepath = project.files()
                 // Gradle's forked compiler worker defaults to a 512m heap, which the
                 // Checker Framework exhausts on large or generated sources (e.g. a JavaCC
                 // parser). Override with CF_FORK_MAX_HEAP.
-                options.forkOptions.memoryMaximumSize = optional(project, 'CF_FORK_MAX_HEAP', '4g')
-                options.forkOptions.jvmArgs.addAll(jvmArgs)
-                options.annotationProcessorPath = project.files(checkerJar, customQualJar)
+                def forkMaxHeap = optional(project, 'CF_FORK_MAX_HEAP', '4g')
+                options.forkOptions.memoryMaximumSize = forkMaxHeap
+                options.forkOptions.jvmArgs = new ArrayList<String>(jvmArgs)
+                def processorPath = project.files(checkerJar, customQualJar)
+                options.annotationProcessorPath = processorPath
 
                 // Do not add -Aonelinemsg or -AshowPrefixInWarningMessages here. They are
                 // version-specific Checker Framework options and cause "unrecognized option"
@@ -167,13 +386,29 @@ allprojects { project ->
                         '-Alint=cast:unsafe'
                     ])
                 }
-                options.compilerArgs.addAll(checkerArgs)
+                options.compilerArgumentProviders.add(new CheckerArgumentsProvider(checkerArgs: checkerArgs))
+                doFirst(new CheckerCompileSanitizer(
+                    forkJvmArgs: jvmArgs, forkMaxHeap: forkMaxHeap, processorPath: processorPath))
             }
 
-            // Qualifier jars are compile/runtime visible so normal compilation and
-            // tests resolve qualifier imports. The processor is never attached to
-            // normal compileJava/test tasks; only the dedicated checkerPass above runs it.
-            project.sourceSets.main.compileClasspath += project.files(customQualJar, extraFiles)
+            // Every other compile task whose sources declare a module reads the
+            // harness jars; tasks without a descriptor get no extra arguments.
+            project.tasks.withType(JavaCompile).configureEach { compileTask ->
+                if (compileTask.name == 'checkerPass') return
+                compileTask.options.compilerArgumentProviders.add(new ModuleReadsArgumentProvider(
+                    sources: compileTask.source,
+                    inferModulePath: compileTask.modularity.inferModulePath,
+                    harnessJars: harnessJars))
+            }
+
+            // Qualifier jars and checker-qual are compile/runtime visible so normal
+            // compilation and tests resolve qualifier imports, including a
+            // package-info.java that imports checker-qual defaulting annotations.
+            // Without checker-qual on the main classpath, javac warns "Cannot find
+            // annotation method 'value()' in type 'SubtypeOf'", which -Werror builds
+            // turn into a failure. The processor is never attached to normal
+            // compileJava/test tasks; only the dedicated checkerPass above runs it.
+            project.sourceSets.main.compileClasspath += project.files(checkerQualJar, customQualJar, extraFiles)
             project.sourceSets.test.compileClasspath += project.files(checkerQualJar, customQualJar, extraFiles)
             project.sourceSets.test.runtimeClasspath += project.files(checkerQualJar, customQualJar, extraFiles)
 

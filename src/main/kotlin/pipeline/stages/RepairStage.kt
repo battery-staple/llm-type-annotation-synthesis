@@ -573,6 +573,7 @@ internal fun prepareRepairWorkspace(worktree: File, workspace: File, checker: Ch
     }
     writeCheckerInitScript(workspace)
     writeRunCheckerScript(workspace, checker, ctx)
+    Git.initSnapshot(workspace)
 }
 
 /** Re-exports accepted edits back into the agent workspace before the next agent turn. */

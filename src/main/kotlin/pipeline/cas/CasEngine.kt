@@ -291,6 +291,11 @@ object StageCodeFingerprint {
     }
 }
 
+private val CHECKER_INIT_SCRIPT_SHA: String by lazy { Hashing.sha256(pipeline.runners.CheckerInitScript.template()) }
+
+/** Stages whose Gradle invocations pass `checker.init.gradle`. */
+private val INIT_SCRIPT_STAGES = setOf(StageName.APPLICATION, StageName.REPAIR, StageName.VERIFICATION)
+
 /** Deterministic cache-key construction shared by every stage. */
 object CacheKeys {
     fun compute(
@@ -303,15 +308,19 @@ object CacheKeys {
         extra: Map<String, Any?> = emptyMap(),
         includeSampleIdentity: Boolean = true
     ): CasKey {
-        val runtime = mapOf(
-            "java_version" to System.getProperty("java.version"),
-            "java_vendor" to System.getProperty("java.vendor"),
-            "os_name" to System.getProperty("os.name"),
-            "checker_framework_home" to ctx.config.environment.checkerFrameworkHome,
-            "source_compatibility" to ctx.sourceCompatibility,
-            "target_compatibility" to ctx.targetCompatibility,
-            "gradle_wrapper" to ctx.build.wrapperExecutable
-        )
+        val runtime = buildMap<String, Any?> {
+            put("java_version", System.getProperty("java.version"))
+            put("java_vendor", System.getProperty("java.vendor"))
+            put("os_name", System.getProperty("os.name"))
+            put("checker_framework_home", ctx.config.environment.checkerFrameworkHome)
+            put("source_compatibility", ctx.sourceCompatibility)
+            put("target_compatibility", ctx.targetCompatibility)
+            put("gradle_wrapper", ctx.build.wrapperExecutable)
+            // The init script is a resource, not bytecode, so StageCodeFingerprint
+            // does not see it. Only stages whose builds use it hash it, so a
+            // template change does not invalidate synthesis bundles.
+            if (stage in INIT_SCRIPT_STAGES) put("checker_init_script", CHECKER_INIT_SCRIPT_SHA)
+        }
         // Deterministic stages omit sample identity: a different seed cannot
         // change their output, so including it would only create duplicate
         // bundles for byte-identical artifacts.

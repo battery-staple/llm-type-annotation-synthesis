@@ -119,6 +119,28 @@ object Git {
 
     fun revParse(cwd: File, ref: String): String = requireOk(run(cwd, "rev-parse", ref), "git rev-parse $ref")
 
+    /**
+     * Turns an agent workspace into a one-commit repository holding exactly its
+     * current files. Build scripts that call `git` during configuration
+     * (`git describe`, `git rev-parse HEAD`) then work, while the workspace still
+     * carries no project history. The identity is passed inline, and hooks,
+     * templates, and signing from the user's Git configuration are disabled.
+     */
+    fun initSnapshot(dir: File) {
+        val noUserConfig = arrayOf(
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "commit.gpgsign=false",
+            "-c", "user.name=pipeline",
+            "-c", "user.email=pipeline@localhost",
+        )
+        requireOk(run(dir, *noUserConfig, "init", "-q", "--template=", "."), "git init (workspace snapshot)")
+        requireOk(run(dir, *noUserConfig, "add", "-A", "-f", "."), "git add (workspace snapshot)")
+        requireOk(
+            run(dir, *noUserConfig, "commit", "-q", "--no-verify", "--allow-empty", "-m", "workspace snapshot"),
+            "git commit (workspace snapshot)"
+        )
+    }
+
     /** Like [requireOk] but preserves the exact stdout bytes (unified diffs need their trailing newline). */
     fun requireOkRaw(result: ProcResult, action: String): String {
         if (result.exitCode != 0) {

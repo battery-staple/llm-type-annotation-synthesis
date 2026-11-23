@@ -157,6 +157,18 @@ object FileOps {
         ".venv", "__pycache__"
     )
 
+    /**
+     * Agent instruction and configuration files, excluded at any depth. Target
+     * repositories ship them for their own contributors' agents (RoaringBitmap,
+     * caffeine, and wiremock have `AGENTS.md`; caffeine and wiremock have
+     * `CLAUDE.md`), and OpenCode reads them as instructions. A project-level
+     * OpenCode config could also override the harness's permission config. The
+     * rule is about file names, not about any repository.
+     */
+    val AGENT_CONFIG_NAMES = setOf(
+        "AGENTS.md", "CLAUDE.md", "opencode.json", "opencode.jsonc", ".opencode", ".claude"
+    )
+
     val DEFAULT_EXCLUDED_FILE_SUFFIXES = listOf(
         ".patch", ".diff", "test_patch.diff", "triage_metadata.json",
         "test_results.xml", "suite_results.xml", "repair.patch", "annotations.patch"
@@ -205,6 +217,7 @@ object FileOps {
                 val first = relative.getName(0).toString()
                 if (Files.isSymbolicLink(path)) return@forEach
                 if (first in DEFAULT_EXCLUDED_DIRS) return@forEach
+                if (relative.any { it.toString() in AGENT_CONFIG_NAMES }) return@forEach
                 if (excludeTests && isUnderTestRoots(relative.toString(), testRoots)) {
                     return@forEach
                 }

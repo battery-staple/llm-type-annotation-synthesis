@@ -11,8 +11,24 @@ import pipeline.ports.JavacCompiler
 import pipeline.ports.JavacDiagnostic
 import pipeline.ports.JavacResult
 
-/** In-process qualifier compiler: compiles sources and packages classes into a jar. */
+/**
+ * In-process qualifier compiler: compiles sources and packages classes into a jar.
+ *
+ * The jar is loaded by every JVM that touches the target project: the javac that
+ * compiles it (often an older Gradle toolchain JDK), the javac running
+ * `checkerPass`, and test JVMs that reflect on the annotations. Without
+ * `--release`, the class files would carry the pipeline JVM's version (65 on
+ * JDK 21), which a JDK 17 toolchain rejects with "bad class file ... wrong
+ * version". A fixed `--release 8` (class-file version 52) is readable by every
+ * JDK in the supported envelope and does not depend on a project's configured
+ * Java level, which may be a default rather than a fact.
+ */
 class JavacRunner : JavacCompiler {
+
+    companion object {
+        /** Qualifier sources may use only Java 8 features (TYPE_USE arrived in 8). */
+        const val QUALIFIER_RELEASE = "8"
+    }
 
     override fun compileAndPackageJar(
         sourceFiles: List<File>,
@@ -41,7 +57,13 @@ class JavacRunner : JavacCompiler {
                     javax.tools.StandardLocation.CLASS_OUTPUT,
                     listOf(tmpDir)
                 )
-                val options = mutableListOf("-proc:none", "-d", tmpDir.absolutePath)
+                val options = mutableListOf(
+                    "--release", QUALIFIER_RELEASE,
+                    // JDK 21 warns that --release 8 is obsolete; the warning is expected.
+                    "-Xlint:-options",
+                    "-proc:none",
+                    "-d", tmpDir.absolutePath,
+                )
                 if (classpath.isNotEmpty()) {
                     options += "-cp"
                     options += classpath.joinToString(File.pathSeparator) { it.absolutePath }

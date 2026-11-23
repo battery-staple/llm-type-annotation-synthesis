@@ -564,8 +564,9 @@ internal fun prepareWorkspace(worktree: File, workspace: File, lattice: Synthesi
             StandardCopyOption.COPY_ATTRIBUTES,
         )
     }
-    writeCheckerInitScript(workspace)
     writeRunCompileScript(workspace, lattice.toCheckerConfig(), ctx)
+    writeCheckerInitScript(workspace)
+    Git.initSnapshot(workspace)
 }
 
 /**

@@ -129,9 +129,14 @@ values). Never name concrete repository symbols, files, or the regression test.
 - Do not spawn subagents or delegate to another agent.
 - Write only inside the current working directory. Never modify the pipeline
   repository or any other checkout outside it.
-- Every custom qualifier source must compile with `javac -proc:none` against
-  `checker-qual.jar`.
+- Every custom qualifier source must compile with
+  `javac --release 8 -proc:none -cp "$CHECKER_QUAL_JAR"`, so use only Java 8
+  language features and APIs. The harness compiles the qualifier jar exactly
+  this way.
 - The hierarchy root must be written literally as `@SubtypeOf({})` (an explicitly
   registered empty supertype edge); never leave the root without `@SubtypeOf`.
+- Put the qualifiers in a package of their own. It must not be a package that
+  the project already declares (for example a package from the commit diff):
+  the harness rejects such a lattice.
 - Keep the package stable; the harness discovers all `@Target(TYPE_USE)`
   qualifiers automatically for `-Aquals`.

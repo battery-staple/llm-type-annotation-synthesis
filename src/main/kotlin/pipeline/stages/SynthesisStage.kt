@@ -135,6 +135,10 @@ class SynthesisStage(
         var attempt = 0
         var prompt = basePrompt
         var lastProblems: List<String> = listOf("synthesis agent has not run yet")
+        val projectPackages = ProjectPackages.atCommit(ctx.repoDir, bug.parentHash.hash)
+        if (projectPackages == null) {
+            logger.warn { "could not read project packages at ${bug.parentHash}; qualifier package check skipped" }
+        }
         var accepted = false
         var acceptedDecision: SynthesisDecision? = null
         val decisionPolicy = SynthesisDecisionPolicy(
@@ -203,6 +207,11 @@ class SynthesisStage(
                         decisionProblems,
                     )
                 )
+                if (projectPackages != null) {
+                    val qualifierPackages = QualifierDiscovery.discover(sourcesWorkspace)
+                        .map { it.packageName }.filter { it.isNotBlank() }.toSet()
+                    addAll(ProjectPackages.collisions(qualifierPackages, projectPackages))
+                }
             }
             if (problems.isEmpty()) {
                 accepted = true
@@ -628,4 +637,41 @@ internal fun tokenSums(transcript: List<AgentTranscriptEvent>): Triple<Int, Int,
         total += usage.totalTokens
     }
     return Triple(prompt, completion, total)
+}
+
+/**
+ * Packages the project declares at a given commit.
+ *
+ * A package belongs to exactly one module, so a qualifier placed in a package
+ * that a module project also owns stays invisible to that module even with
+ * `--add-reads` (a split package). Synthesis rejects such lattices. The scan
+ * reads `package` declarations of every committed `.java` file at the commit,
+ * not paths, because source-root layouts vary; packages that exist only in
+ * generated sources are not seen.
+ */
+internal object ProjectPackages {
+    private val declaration = Regex("""^\s*package\s+([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*;""")
+
+    /** Returns null when the packages cannot be read (the check is then skipped). */
+    fun atCommit(repoDir: File, commit: String): Set<String>? {
+        val result = pipeline.util.Git.run(
+            repoDir, "grep", "-h", "-I", "-E",
+            "-e", "^[[:space:]]*package[[:space:]]+[A-Za-z_\$][A-Za-z0-9_\$.]*[[:space:]]*;",
+            commit, "--", "*.java",
+        )
+        // git grep exits 1 when nothing matches, which is a valid empty result.
+        if (result.exitCode != 0 && result.exitCode != 1) return null
+        return parse(result.stdout)
+    }
+
+    fun parse(grepOutput: String): Set<String> =
+        grepOutput.lineSequence().mapNotNull { declaration.find(it)?.groupValues?.get(1) }.toSet()
+
+    /** Problems for qualifier packages that the project also declares. */
+    fun collisions(qualifierPackages: Set<String>, projectPackages: Set<String>): List<String> =
+        qualifierPackages.intersect(projectPackages).sorted().map { pkg ->
+            "qualifier package `$pkg` is also a package of the project; a package belongs to one " +
+                "module, so the project could not read the qualifiers. Move the qualifiers to a " +
+                "package the project does not declare."
+        }
 }
