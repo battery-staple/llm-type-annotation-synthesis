@@ -1376,7 +1376,11 @@
     listEl.querySelectorAll(".run-card").forEach((el) => {
       el.addEventListener("click", () => {
         if (state.viewMode !== "inspector") setViewMode("inspector");
-        selectRun(el.dataset.runId, false);
+        const runId = el.dataset.runId;
+        selectRun(runId, false);
+        [...listEl.querySelectorAll(".run-card")]
+          .find((card) => card.dataset.runId === runId)
+          ?.focus();
       });
     });
   }
@@ -1549,6 +1553,30 @@
   }
 
   // ---- Stage Stepper & Inspector ----
+  /** Phases that actually ran, in display order (not-run placeholders are skipped). */
+  function executableStepNames() {
+    return [...new Set((state.runDetail?.steps || []).map((s) => s.step_name))];
+  }
+
+  /** Focus the card of the currently selected phase after a re-render. */
+  function focusSelectedStepCard() {
+    const card = [...$("stageStepper").querySelectorAll(".step-card:not(.not-run)")]
+      .find((el) => el.dataset.stepName === state.selectedStepName);
+    card?.focus();
+    card?.scrollIntoView({ block: "nearest" });
+  }
+
+  /** Select a phase (latest attempt), optionally preserving keyboard focus on its card. */
+  function selectStepByName(name, focusCard = false) {
+    const matching = (state.runDetail?.steps || []).filter((s) => s.step_name === name);
+    const latest = matching[matching.length - 1];
+    state.selectedStepName = name;
+    state.selectedStepId = latest ? latest.step_id : null;
+    renderStageStepper();
+    renderStageInspector();
+    if (focusCard) focusSelectedStepCard();
+  }
+
   function renderStageStepper() {
     const steps = state.runDetail.steps || [];
     const byName = {};
@@ -1580,7 +1608,7 @@
       const attBadge = attempts.length > 1 ? ` (${attempts.length} att)` : "";
       const stateLabel = dotCls === "skip" ? "skipped" : (dotCls === "running" ? "running" : (dotCls === "warn" ? "incomplete" : (latest.cache_hit ? "cached" : (latest.success ? "completed" : "failed"))));
       return `
-        <button class="step-card ${active}" data-step-name="${esc(name)}">
+        <button class="step-card ${active}" data-step-name="${esc(name)}" tabindex="-1">
           <div class="step-card-top">
             <span class="step-name">${esc(name)}${esc(attBadge)}</span>
             <span class="stage-dot ${dotCls}"></span>
@@ -1594,15 +1622,7 @@
     }).join("");
 
     $("stageStepper").querySelectorAll(".step-card:not(.not-run)").forEach((el) => {
-      el.addEventListener("click", () => {
-        const name = el.dataset.stepName;
-        const matching = (state.runDetail.steps || []).filter((s) => s.step_name === name);
-        const latest = matching[matching.length - 1];
-        state.selectedStepName = name;
-        state.selectedStepId = latest ? latest.step_id : null;
-        renderStageStepper();
-        renderStageInspector();
-      });
+      el.addEventListener("click", () => selectStepByName(el.dataset.stepName, true));
     });
   }
 
@@ -3154,6 +3174,30 @@
     });
   }
 
+  /** Focus the selected run in the left bar (or its batch card when collapsed). */
+  function focusSelectedRunCard() {
+    const list = $("runsList");
+    const cards = [...list.querySelectorAll(".run-card")];
+    let target = cards.find((el) => el.dataset.runId === state.selectedRunId);
+    if (!target && state.selectedRunId) {
+      const batchId = state.runs.find((r) => r.run_id === state.selectedRunId)?.batch_id;
+      if (batchId) {
+        target = [...list.querySelectorAll(".batch-card")].find((el) => el.dataset.batchId === batchId);
+      }
+    }
+    if (!target && state.highlightedBatchId) {
+      target = [...list.querySelectorAll(".batch-card")].find((el) => el.dataset.batchId === state.highlightedBatchId);
+    }
+    target ||= list.querySelector(".batch-card, .run-card");
+    if (target?.classList.contains("run-card")) {
+      state.highlightedBatchId = null;
+      list.querySelectorAll(".batch-card.active").forEach((el) => el.classList.remove("active"));
+      target.classList.add("active");
+    }
+    target?.focus();
+    target?.scrollIntoView({ block: "nearest" });
+  }
+
   function handleKeyDown(e) {
     if (e.key === "Escape") {
       if (!$("artifactModal").classList.contains("hidden")) {
@@ -3166,27 +3210,51 @@
       }
     }
 
-    const ctrlTab = e.key === "Tab" && e.ctrlKey && !e.metaKey && !e.altKey;
-    const stageArrowFallback = e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight");
-    if ((ctrlTab || stageArrowFallback) && state.activeRunTab === "stages" && state.runDetail) {
-      const executedNames = [...new Set((state.runDetail.steps || []).map((s) => s.step_name))];
-      if (executedNames.length) {
+    const hasModifiers = e.metaKey || e.ctrlKey || e.altKey;
+    const target = e.target instanceof Element ? e.target : null;
+    const inRunsList = Boolean(target?.closest("#runsList"));
+    const inStepper = Boolean(target?.closest("#stageStepper"));
+    const phasesAvailable = state.activeRunTab === "stages" && Boolean(state.runDetail);
+    const phasesVisible = phasesAvailable && state.viewMode === "inspector";
+
+    // Tab toggles focus between the sidebar run list and the phase stepper.
+    if (e.key === "Tab" && !hasModifiers && phasesVisible && (inRunsList || inStepper)) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (inRunsList) focusSelectedStepCard();
+      else focusSelectedRunCard();
+      return;
+    }
+
+    // With a phase focused, arrow keys select the previous/next phase.
+    const isArrow = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key);
+    if (isArrow && !hasModifiers && phasesVisible && inStepper) {
+      const names = executableStepNames();
+      if (names.length > 1) {
         e.preventDefault();
         e.stopPropagation();
-        const idx = executedNames.indexOf(state.selectedStepName);
-        const goesBackward = ctrlTab ? e.shiftKey : e.key === "ArrowLeft";
+        const idx = names.indexOf(state.selectedStepName);
+        const goesBackward = e.key === "ArrowLeft" || e.key === "ArrowUp";
         const nextIdx = goesBackward
           ? Math.max(0, idx === -1 ? 0 : idx - 1)
-          : Math.min(executedNames.length - 1, idx + 1);
-        const nextName = executedNames[nextIdx];
-        if (nextName && nextName !== state.selectedStepName) {
-          const matching = (state.runDetail.steps || []).filter((s) => s.step_name === nextName);
-          const latest = matching[matching.length - 1];
-          state.selectedStepName = nextName;
-          state.selectedStepId = latest ? latest.step_id : null;
-          renderStageStepper();
-          renderStageInspector();
-        }
+          : Math.min(names.length - 1, idx + 1);
+        selectStepByName(names[nextIdx], true);
+      }
+      return;
+    }
+
+    // Keep Ctrl+Shift+Arrow as a global fallback for changing phases.
+    const stageArrowFallback = e.ctrlKey && e.shiftKey && !e.metaKey && !e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight");
+    if (stageArrowFallback && phasesAvailable) {
+      const names = executableStepNames();
+      if (names.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        const idx = names.indexOf(state.selectedStepName);
+        const nextIdx = e.key === "ArrowLeft"
+          ? Math.max(0, idx === -1 ? 0 : idx - 1)
+          : Math.min(names.length - 1, idx + 1);
+        selectStepByName(names[nextIdx], inStepper);
       }
       return;
     }
