@@ -151,6 +151,13 @@ class StopAfterTest {
         requirePreflightForStop(null, preflightEnabled = false)
     }
 
+    /** A preflight result must not depend on this machine's Gradle caches or downloaded JDKs. */
+    @Test
+    fun `preflight runs Gradle without the build cache or toolchain downloads`() {
+        assertTrue("--no-build-cache" in PREFLIGHT_GRADLE_ARGS)
+        assertTrue("-Porg.gradle.java.installations.auto-download=false" in PREFLIGHT_GRADLE_ARGS)
+    }
+
     @Test
     fun `preflight is off unless enabled`() {
         assertFalse(pipeline.config.ProjectConfig().preflight.enabled)

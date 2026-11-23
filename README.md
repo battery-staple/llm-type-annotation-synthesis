@@ -166,7 +166,10 @@ For a benchmark it checks the parent commit; for a `repos.yaml` entry,
 `preflight_commit` or the head of the default branch. `--skip-suite` skips the
 full suite and `--no-cache` ignores cached results. The summary compares each
 outcome with the entry's `expected_preflight` prediction. Preflight never lets
-Gradle download a toolchain, so a missing JDK is reported as `jdk_unavailable`.
+Gradle download a toolchain, so a missing JDK is reported as `jdk_unavailable`,
+and it runs with `--no-build-cache`, so the full suite really runs even in
+projects that enable Gradle's build cache. The other stages keep the project's
+cache setting.
 
 ### Crawler mode
 

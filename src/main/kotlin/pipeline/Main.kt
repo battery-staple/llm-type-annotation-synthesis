@@ -79,11 +79,23 @@ private fun checkRepoClean(benchmarkRepo: File) {
  */
 internal const val NO_TOOLCHAIN_DOWNLOAD = "-Porg.gradle.java.installations.auto-download=false"
 
+/**
+ * Preflight never reads or writes Gradle's build cache. Projects that enable it
+ * (`org.gradle.caching=true`, as JSqlParser and resilience4j do) would otherwise
+ * restore test results from an earlier build: P7 then measures a suite that
+ * did not run, and the verdict depends on what this machine's cache holds. The
+ * other stages keep the project's cache setting.
+ */
+internal const val NO_BUILD_CACHE = "--no-build-cache"
+
+/** Every argument preflight adds to its Gradle invocations. */
+internal val PREFLIGHT_GRADLE_ARGS = listOf(NO_TOOLCHAIN_DOWNLOAD, NO_BUILD_CACHE)
+
 /** Gradle runners for one build configuration, sharing one build semaphore. */
 internal class Runners(config: ProjectConfig, section: pipeline.config.BuildSection, source: String, target: String) {
     private val builds = Semaphore(config.concurrency.builds)
     val build = GradleBuildRunner(config, section, source, target, builds)
-    val preflight = GradleBuildRunner(config, section, source, target, builds, listOf(NO_TOOLCHAIN_DOWNLOAD))
+    val preflight = GradleBuildRunner(config, section, source, target, builds, PREFLIGHT_GRADLE_ARGS)
 }
 
 private fun buildOrchestrator(

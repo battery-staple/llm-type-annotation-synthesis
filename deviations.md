@@ -471,10 +471,18 @@ the crawler) are not listed unless the code had to interpret the plan.
     level. A `benchmarks.yaml` value that disagrees is reported in the report,
     not used; the later stages still use the configured value until the
     section 7.5 change feeds the probe value into `checkerPass`.
-67. **Preflight never downloads a toolchain.** Every preflight Gradle call
-    passes `-Porg.gradle.java.installations.auto-download=false`, so a missing
-    JDK is `jdk_unavailable` on the host as in Docker. The later stages do not
-    pass it yet; a repository that passes preflight already has its JDKs.
+67. **Preflight never downloads a toolchain and never uses the build cache.**
+    Every preflight Gradle call passes
+    `-Porg.gradle.java.installations.auto-download=false`, so a missing JDK is
+    `jdk_unavailable` on the host as in Docker, and `--no-build-cache`.
+    `cleanTest` removes a test task's outputs but not Gradle's build cache, so
+    in a project that enables the cache (JSqlParser, resilience4j) the test
+    task was restored `FROM-CACHE`: JSqlParser's 7,550-test suite "ran" in 1 s,
+    which makes P7's timeout check meaningless and ties the result to this
+    machine's cache. The later stages pass neither flag and keep the project's
+    cache setting: repaired code has new inputs, so verification misses the
+    cache anyway, and up-to-date checks already skip repeated unchanged
+    builds within one worktree.
 68. **Cache key: the build configuration, not the sources.** The key hashes
     every committed file except Java sources under the production and test
     roots (Java files in `buildSrc` and in included builds, found by their own

@@ -1,8 +1,8 @@
 # Dockerization Plan: Containerized Builds and Agent Sessions
 
 Status: proposed (2026-11-23), revised the same day after a review against the
-code. Phase 0 is implemented on branch `phase0-harness-fixes` (see "Phase 0
-status" in §5); the later phases are not started. The Phase 0 review changed
+code. Phases 0 and 0.5 are implemented on branch `dockerization` (see "Phase 0
+status" and "Phase 0.5 status" in §5); the later phases are not started. The Phase 0 review changed
 four parts of the design: the `init.d` script turned out to be written by a
 pipeline agent (§1), bug 4 uses an allowlist rather than clearing every
 inherited flag (§7.5), module projects also need `-Xlint:-exports` (§7.6), and
@@ -596,7 +596,7 @@ automatically, so they also serve as the regression tests for the Phase 0 fixes.
 
 ### Phase 0 status (2026-11-23)
 
-Implemented on branch `phase0-harness-fixes`; the decisions behind each change
+Implemented on branch `dockerization`; the decisions behind each change
 are recorded in `deviations.md` items 57–63. Verified on the host with JDK 21
 running Gradle, using scripted versions of preflight checks P3–P5 (fixed
 `ProbeTop`/`ProbeBottom` lattice compiled with `--release 8`; a probe-annotated
@@ -623,6 +623,68 @@ Not yet done for the Phase 0 exit: re-running `synthetic-id-swap` and `cmsx`
 through the full pipeline on the host to compare verdicts now that the
 agent-written `init.d` script is gone (this runs LLM agents), and a full
 pipeline run of JSqlParser and Agrona.
+
+### Phase 0.5 status (2026-11-23)
+
+Done on branch `dockerization`. Preflight is an opt-in stage
+(`pipeline run --preflight`) plus the standalone `pipeline preflight`
+command; `deviations.md` items 64-75 record the decisions. Predictions
+(`expected_preflight`) were committed before the first run, together with the
+reason-code list.
+
+Results on the eval repositories, one target per repository, with no
+toolchain downloads and no Gradle build cache:
+
+| Repository | Result | Suite (P7) | Prediction | Basis |
+|---|---|---|---|---|
+| synthetic-id-swap | pass | 5 tests, 1 s | pass | phase0_probes |
+| cmsx (`cmsx-assignment-extension`) | pass | 569 tests, 33 s | pass | phase0_probes |
+| JSqlParser (`jsqlparser-index-kind`) | pass | 7,550 tests, 19 s | pass | phase0_probes |
+| RoaringBitmap (`roaringbitmap-runcontainer-foreach`) | pass | 35,607 tests, 59 s | pass | phase0_probes |
+| Agrona (`agrona-readline-unsigned`) | pass | 20,725 tests, 20 s | pass | phase0_probes |
+| picocli | pass | 2,281 tests, 3 s | pass | phase0_probes |
+| reactor-core | pass | 10,026 tests, 148 s | `checker_jdk_unsupported` | blind |
+| resilience4j | pass | 249 tests, 10 s | pass | blind |
+| JsonPath | pass | 930 tests, 1 s | pass | blind |
+| wiremock | pass | 5,372 tests, 47 s | `suite_timeout` | blind |
+| jobrunr | unsupported, P1 `gradle_runtime_unsupported` | - | `test_requires_docker` | blind |
+| caffeine | disabled | - | `suite_timeout` | phase0_probes |
+
+Every repository ends in `pass` or a specific reason code; none is
+`unknown`. jobrunr's Micronaut build plugin needs Gradle itself to run on
+JDK 25, which the Phase 1 `runtime_jdk` setting provides. caffeine is
+commented out of the manifests: its full suite cannot finish within the build
+timeout (`docs/candidate_commits.md`, "Disabled for now: caffeine"). All six
+`phase0_probes` predictions that produced a result were right, but only two of
+the five blind ones. Reading build files alone predicts preflight poorly.
+
+The first run of this set ended in two `unknown` results, which led to fixes
+that apply to any repository:
+
+- An init-script `allprojects` block broke `buildSrc` convention plugins that
+  use version-catalog accessors (wiremock, P3). Setup now uses
+  `gradle.beforeProject`.
+- A build plugin that needs a newer JVM than the one running Gradle (jobrunr)
+  is now classified as `gradle_runtime_unsupported`.
+
+Two gaps in the Phase 0 sanitizer were found by review and fixed: a project
+`doFirst` could still add `-proc:none` after the sanitizer, and a project's
+argument providers were dropped whole instead of passing through the
+allowlist. The build cache had to be disabled for preflight: in projects that
+enable it, the test task was restored `FROM-CACHE`, and JSqlParser's suite
+"ran" in 1 s.
+
+A 20-commit cmsx crawl with preflight enabled ended with 6 commits
+`unsupported` at P7 (`suite_fails_at_baseline`): `ICSFactoryTest`'s DTSTAMP
+test (2 commits; it looks clock-dependent) and `ViewAsTest.testAssignments`
+(4 commits) already fail at C-1. Those commits never reached triage.
+
+Regression tests for the Phase 0 and 0.5 fixes are in the `fixtureTest`
+suite (Gradle TestKit, run by `./gradlew check`) and in unit tests. Each
+was checked to fail against the code before its fix. One fix has no
+fixture test: the `beforeProject` change needs a `buildSrc` with Kotlin DSL
+catalog accessors, which requires downloading the `kotlin-dsl` plugin; the
+wiremock preflight covers it.
 
 ### Containment canary test
 

@@ -69,6 +69,7 @@ class PreflightStage(
             "java_home" to ctx.config.environment.javaHome,
             "gradle_user_home" to ctx.config.environment.gradleUserHome,
             "toolchain_auto_download" to false,
+            "gradle_build_cache" to false,
         )
         return CacheKeys.compute(
             ctx = ctx,
