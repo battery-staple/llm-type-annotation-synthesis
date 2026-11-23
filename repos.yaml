@@ -76,18 +76,21 @@ repos:
       compile_task: "compileJava"
       test_task: "test"
       checker_task: "checkerPass"
-  - id: "caffeine"
-    repo_url: "eval-repos/caffeine"
-    default_branch: "master"
-    source_compatibility: "11"
-    target_compatibility: "11"
-    build:
-      tool: "gradle"
-      wrapper_executable: "./gradlew"
-      subproject: "caffeine"
-      compile_task: "compileJava"
-      test_task: "test"
-      checker_task: "checkerPass"
+  # caffeine is disabled for now (2026-11-23): its full test suite takes far longer than
+  # the 900 s build timeout. See docs/candidate_commits.md, "Disabled for now:
+  # caffeine". Uncomment to re-enable.
+  # - id: "caffeine"
+  #   repo_url: "eval-repos/caffeine"
+  #   default_branch: "master"
+  #   source_compatibility: "11"
+  #   target_compatibility: "11"
+  #   build:
+  #     tool: "gradle"
+  #     wrapper_executable: "./gradlew"
+  #     subproject: "caffeine"
+  #     compile_task: "compileJava"
+  #     test_task: "test"
+  #     checker_task: "checkerPass"
 
   # --- preflight-only entries (no curated benchmark yet) -------------------
   # Commits are the eval-repos submodule pins as of 2026-11-23.

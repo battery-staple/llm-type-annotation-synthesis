@@ -123,3 +123,18 @@ Two more constraints matter:
 `synthetic-id-swap`, `cmsx-assignment-extension` and `jsqlparser-index-kind` predate this review and are unlabelled.
 
 Rejected promotion: caffeine `5993fc2e` (equals-receiver reversal). Flagging `cachedValue.equals(value)` needs a receiver qualifier on the JDK's `Object.equals`, which requires `.astub` overlays (not in MVP).
+
+## Disabled for now: caffeine (2026-11-23)
+
+Both caffeine benchmarks (`caffeine-agetof-tagbit`, `caffeine-putifabsent-read-expiry`) and the `caffeine` crawler target in `repos.yaml` are commented out. Uncomment them to re-enable. The build integration works: Phase 0's probes passed checks P3-P5 at `07156f73`, and the checker runs on caffeine's JDK 25 toolchain. The problem is the test suite.
+
+- **The full suite cannot finish within the build timeout.** Application and verification both run the project's full `test` task, and every Gradle invocation has a 900 s timeout (`agent.timeout_ms`). Caffeine's `test` task runs the whole `@CacheSpec`-parameterized suite: 19 test files use `@CacheSpec`, and `AsMapTest` alone has 295. Each test runs across many cache configurations, and caffeine's own CI shards this suite across jobs. A run would hit the timeout in application, retry, and fail without a verdict. Preflight would report `suite_timeout` after spending the full 15 minutes finding out.
+- **The JDK it needs comes from host state.** At the benchmark commits caffeine compiles and runs on JDK 25. That JDK is on this machine only because Gradle auto-downloaded Zulu 25 into `~/.gradle/jdks`. Preflight disables auto-download, and the Docker runtime image (Phase 1) would need JDK 25 added.
+- **Not measured yet.** The suite's actual duration was never measured. The one preflight attempt on `caffeine-putifabsent-read-expiry` ended in a transient error, not a result. The timeout expectation comes from the build configuration and caffeine's CI.
+
+What would bring it back:
+- narrowing what the pipeline runs, either test selection or a benchmark-level setting that uses caffeine's own scope properties (`implementation`, `compute`, `keys`, `values`, `stats`, `shardCount`, `shardIndex` on the `test` task);
+- or a longer timeout for this benchmark;
+- plus JDK 25 in the runtime image.
+
+Leaving caffeine out removes `caffeine-putifabsent-read-expiry`, one of the three benchmarks with `expected_fit: good`.
