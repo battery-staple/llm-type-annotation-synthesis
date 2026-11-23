@@ -86,97 +86,6 @@ class CheckerInitScriptTest {
         }
     }
 
-    /**
-     * JSqlParser's JavaCC plugin realizes every JavaCompile task during
-     * configuration, `checkerPass` included, even when only `compileJava` runs.
-     * The -Aquals check must therefore wait until checkerPass executes, not run
-     * when the task is configured.
-     */
-    @Test
-    fun `template defers the -Aquals check to checkerPass execution`() {
-        val template = resourceText("/templates/checker.init.gradle")
-        val registerBlock = template.substringAfter("project.tasks.register('checkerPass', JavaCompile) {")
-            .substringBefore("// Every other compile task whose sources declare a module")
-        assertContains(registerBlock, "options.compilerArgumentProviders.add(")
-        assertFalse("CF_AQUALS is required" in registerBlock, "the check must not run while the task is configured")
-        assertFalse("-Aquals=" in registerBlock, "-Aquals must come from the argument provider")
-
-        val provider = template.substringAfter("class CheckerQualsArgumentProvider")
-            .substringBefore("class CheckerArgumentsProvider")
-        assertContains(provider, "Iterable<String> asArguments()")
-        assertContains(provider, "CF_AQUALS is required for custom_qualifier_hierarchy")
-        assertContains(provider, "CF_AQUALS must be empty for builtin_checker")
-        // Both values stay @Input so a changed lattice is not reported UP-TO-DATE.
-        assertEquals(2, Regex("""@org\.gradle\.api\.tasks\.Input""").findAll(provider).count())
-    }
-
-    /**
-     * Module projects (JSqlParser, RoaringBitmap, caffeine, picocli): excluding
-     * module-info.java from the source set did not avoid module mode, because
-     * javac rediscovered it through -sourcepath, and it stripped the descriptor
-     * from the project's own compile. The descriptor is kept, and the module is
-     * granted read access to the harness jars instead.
-     */
-    @Test
-    fun `template keeps module descriptors and grants module reads per task`() {
-        val template = resourceText("/templates/checker.init.gradle")
-        assertFalse("main.java.exclude" in template, "the main source set must keep module-info.java")
-        val provider = template.substringAfter("class ModuleReadsArgumentProvider")
-            .substringBefore("class CheckerCompileSanitizer")
-        assertContains(provider, "it.name == 'module-info.java'")
-        assertContains(provider, "'--add-reads'")
-        assertContains(provider, "'--add-modules'")
-        assertContains(provider, "ALL-UNNAMED")
-        val wiring = template.substringAfter("project.tasks.withType(JavaCompile).configureEach { compileTask ->")
-        assertContains(wiring.substringBefore("}"), "if (compileTask.name == 'checkerPass') return")
-    }
-
-    @Test
-    fun `checkerPass alone compiles in classpath mode without the descriptor`() {
-        val registerBlock = checkerPassBlock()
-        assertContains(registerBlock, "exclude '**/module-info.java'")
-        assertContains(registerBlock, "modularity.inferModulePath.set(false)")
-        assertContains(registerBlock, "options.sourcepath = project.files()")
-    }
-
-    /**
-     * Agrona: -Werror without checker-qual on the main classpath fails on
-     * "Cannot find annotation method 'value()' in type 'SubtypeOf'", and a
-     * package-info.java importing checker-qual does not compile at all.
-     */
-    @Test
-    fun `checker-qual is on the main compile classpath`() {
-        val template = resourceText("/templates/checker.init.gradle")
-        assertContains(
-            template,
-            "project.sourceSets.main.compileClasspath += project.files(checkerQualJar, customQualJar, extraFiles)"
-        )
-    }
-
-    /**
-     * Agrona configures every JavaCompile task with -Xlint:all -Werror, and
-     * checkerPass inherited them. The sanitizer runs at execution, after every
-     * configureEach action, and keeps only compile-semantics flags.
-     */
-    @Test
-    fun `checkerPass replaces inherited compiler flags at execution time`() {
-        val registerBlock = checkerPassBlock()
-        assertContains(registerBlock, "doFirst(new CheckerCompileSanitizer(")
-        val sanitizer = resourceText("/templates/checker.init.gradle")
-            .substringAfter("class CheckerCompileSanitizer")
-            .substringBefore("allprojects {")
-        // Kept: flags without which sources may not compile (agrona passes --release in compilerArgs).
-        listOf("'--release'", "'--add-exports'", "'--enable-preview'", "'-encoding'").forEach {
-            assertContains(sanitizer, it)
-        }
-        // Dropped with their values, so a value cannot become a stray argument.
-        listOf("'-processorpath'", "'-Xmaxerrs'", "'--add-reads'").forEach {
-            assertContains(sanitizer.substringAfter("DROP_WITH_VALUE"), it)
-        }
-        assertContains(sanitizer, "it instanceof CheckerQualsArgumentProvider || it instanceof CheckerArgumentsProvider")
-        assertContains(sanitizer, "findByName('errorprone')")
-    }
-
     @Test
     fun `application compile helper uses the harness init script and never runs the checker`() {
         val root = Files.createTempDirectory("run-compile-script").toFile()
@@ -210,22 +119,6 @@ class CheckerInitScriptTest {
             FileOps.deleteRecursively(root)
         }
     }
-
-    @Test
-    fun `application prompt states the non-triviality requirement only when the flag is set`() {
-        assertEquals("", nonTrivialityRequirement(false))
-        assertContains(nonTrivialityRequirement(true), "at least one")
-        val template = PromptTemplates.load("application.md")
-        assertFalse("at least one" in template, "the requirement must come only from the flag")
-        assertContains(template, "{{non_triviality_requirement}}")
-        assertContains(template, "./run-compile.sh")
-        assertFalse("classpath you set up yourself" in template)
-    }
-
-    private fun checkerPassBlock(): String =
-        resourceText("/templates/checker.init.gradle")
-            .substringAfter("project.tasks.register('checkerPass', JavaCompile) {")
-            .substringBefore("// Every other compile task whose sources declare a module")
 
     private fun checker(root: File) = CheckerConfig(
         customQualsJar = File(root, "custom-quals.jar"),

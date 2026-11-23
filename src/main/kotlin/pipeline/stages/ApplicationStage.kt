@@ -104,37 +104,8 @@ class ApplicationStage(
         val workspace = ctx.agentWorkspaceDir.resolve("application_${ctx.runId}")
         prepareWorkspace(worktree, workspace, lattice, ctx)
 
-        val builtin = if (lattice.checkerCategory == CheckerCategory.BUILTIN_CHECKER) {
-            BuiltinCheckerCatalog.get(lattice.processor)
-        } else {
-            null
-        }
-        val qualifierNames = builtin?.qualifierNames ?: lattice.qualifierClassNames.map { it.value }
-        val importPrefixes = builtin?.let { setOf(it.importPrefix) }
-            ?: QualifierDiscovery.packagePrefixes(lattice.customQualsSrcDir)
-                .ifEmpty { setOf("org.checkerframework") }
-        val checkerModeNote = if (builtin != null) {
-            "This run uses the built-in ${builtin.displayName} (`${builtin.processor}`). " +
-                "Apply that checker's annotations, listed below, according to the placement guide; " +
-                "do not invent custom qualifier names."
-        } else {
-            "This run uses a synthesized marker qualifier hierarchy. Use only the qualifiers listed below."
-        }
-        val basePrompt = PromptTemplates.render(
-            template,
-            mapOf(
-                "placement_guide" to lattice.placementGuideFile.readText(),
-                "qualifier_names" to qualifierNames.joinToString(", "),
-                "qualifier_import_prefixes" to importPrefixes.joinToString(", "),
-                "checker_mode_note" to checkerModeNote,
-                "custom_quals_jar_path" to ".agent-libs/custom-quals.jar",
-                "non_triviality_requirement" to nonTrivialityRequirement(ctx.config.prompt.tellNonTrivialityError),
-                "production_roots" to pipeline.validators.SourceRoots.display(ctx.productionRoots),
-                "production_globs" to pipeline.validators.SourceRoots.displayGlobs(ctx.productionRoots),
-                "test_roots" to pipeline.validators.SourceRoots.display(ctx.testRoots),
-                "test_globs" to pipeline.validators.SourceRoots.displayGlobs(ctx.testRoots),
-            ),
-        )
+        val builtin = builtinCheckerOf(lattice)
+        val basePrompt = applicationPrompt(template, lattice, ctx)
 
         val fullTranscript = mutableListOf<AgentTranscriptEvent>()
         val guardrailEvents = mutableListOf<GuardrailEventRecord>()
@@ -514,6 +485,41 @@ class ApplicationStage(
     companion object {
         val MIRROR_EXCLUDES = setOf(".agent-libs", "run-compile.sh")
     }
+}
+
+/** The built-in checker [lattice] selects, or null for a synthesized qualifier hierarchy. */
+internal fun builtinCheckerOf(lattice: SynthesizedLattice) =
+    if (lattice.checkerCategory == CheckerCategory.BUILTIN_CHECKER) BuiltinCheckerCatalog.get(lattice.processor) else null
+
+/** The application prompt for [lattice], rendered from the `application.md` [template]. */
+internal fun applicationPrompt(template: String, lattice: SynthesizedLattice, ctx: RunContext): String {
+    val builtin = builtinCheckerOf(lattice)
+    val qualifierNames = builtin?.qualifierNames ?: lattice.qualifierClassNames.map { it.value }
+    val importPrefixes = builtin?.let { setOf(it.importPrefix) }
+        ?: QualifierDiscovery.packagePrefixes(lattice.customQualsSrcDir)
+            .ifEmpty { setOf("org.checkerframework") }
+    val checkerModeNote = if (builtin != null) {
+        "This run uses the built-in ${builtin.displayName} (`${builtin.processor}`). " +
+            "Apply that checker's annotations, listed below, according to the placement guide; " +
+            "do not invent custom qualifier names."
+    } else {
+        "This run uses a synthesized marker qualifier hierarchy. Use only the qualifiers listed below."
+    }
+    return PromptTemplates.render(
+        template,
+        mapOf(
+            "placement_guide" to lattice.placementGuideFile.readText(),
+            "qualifier_names" to qualifierNames.joinToString(", "),
+            "qualifier_import_prefixes" to importPrefixes.joinToString(", "),
+            "checker_mode_note" to checkerModeNote,
+            "custom_quals_jar_path" to ".agent-libs/custom-quals.jar",
+            "non_triviality_requirement" to nonTrivialityRequirement(ctx.config.prompt.tellNonTrivialityError),
+            "production_roots" to pipeline.validators.SourceRoots.display(ctx.productionRoots),
+            "production_globs" to pipeline.validators.SourceRoots.displayGlobs(ctx.productionRoots),
+            "test_roots" to pipeline.validators.SourceRoots.display(ctx.testRoots),
+            "test_globs" to pipeline.validators.SourceRoots.displayGlobs(ctx.testRoots),
+        ),
+    )
 }
 
 /**

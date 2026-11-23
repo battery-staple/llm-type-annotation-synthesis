@@ -33,6 +33,20 @@ object PreflightSupport {
         "Gradle requires JVM",
         "Could not initialize class org.codehaus.groovy",
         "Your build is currently configured to use incompatible Java",
+        // A build plugin that needs a newer JVM than the one running Gradle (jobrunr's Micronaut plugin).
+        "Dependency requires at least JVM runtime version",
+    )
+
+    /**
+     * Failures while Gradle configures the build rather than while it compiles.
+     * From P3 on, P2 has already configured the same build without the init
+     * script, so a configuration failure there was caused by the init script.
+     */
+    private val CONFIGURATION_FAILURE = listOf(
+        "A problem occurred configuring",
+        "An exception occurred applying plugin request",
+        "Could not create task",
+        "A problem occurred evaluating",
     )
 
     private val CHECKER_JDK = listOf(
@@ -88,7 +102,9 @@ object PreflightSupport {
             return PreflightReason.QUALIFIER_NOT_ON_CLASSPATH
         }
         if (check == "P5" && CHECKER_JDK.any { it in output }) return PreflightReason.CHECKER_JDK_UNSUPPORTED
-        if ("checker.init.gradle:" in output || Regex("""checker_init_\w+\$""").containsMatchIn(output)) {
+        if ("checker.init.gradle:" in output || Regex("""checker_init_\w+\$""").containsMatchIn(output) ||
+            CONFIGURATION_FAILURE.any { it in output }
+        ) {
             return PreflightReason.INIT_SCRIPT_FAILURE
         }
         if ((check == "P6" || check == "P7") && requiresDocker(output)) return PreflightReason.TEST_REQUIRES_DOCKER

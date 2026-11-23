@@ -69,6 +69,15 @@ class PreflightPersistenceTest {
         )
     }
 
+    /** readVerdict threw on the NULL verdict these lifecycle states have in the view. */
+    @Test
+    fun `triage-only run has no verdict`() = withDb { db ->
+        val runId = RunId("run-triage-only")
+        db.recordRunStart(run(runId))
+        db.finishRun(runId, "triage_only")
+        assertNull(db.readVerdict(runId))
+    }
+
     @Test
     fun `preflight results keep the report and the reason code`() = withDb { db ->
         val runId = RunId("run-preflight")

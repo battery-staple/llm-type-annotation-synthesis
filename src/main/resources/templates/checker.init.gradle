@@ -184,8 +184,11 @@ class ModuleReadsArgumentProvider implements org.gradle.process.CommandLineArgum
 // the compile fail visibly, while an unknown kept flag could silently change the
 // diagnostics.
 //
-// Runs as a doFirst action, after every configureEach action has been applied.
-// doFirst prepends, so later doFirst actions from plugins run before this one.
+// Placement: it must run after every other configuration of the task, including
+// doFirst actions a project adds (which can append -proc:none at execution
+// time). After the task graph is ready, install() inserts it directly before
+// the task's compile action, behind every doFirst. If that action cannot be
+// identified, it falls back to running first.
 class CheckerCompileSanitizer implements org.gradle.api.Action<org.gradle.api.Task> {
     // Flags whose value is the next argument.
     static final Set<String> KEEP_WITH_VALUE = [
@@ -242,15 +245,24 @@ class CheckerCompileSanitizer implements org.gradle.api.Action<org.gradle.api.Ta
     @Override
     void execute(org.gradle.api.Task task) {
         def compile = (org.gradle.api.tasks.compile.JavaCompile) task
+        def ours = { it instanceof CheckerQualsArgumentProvider || it instanceof CheckerArgumentsProvider }
+        // Arguments from the project's own providers pass through the same
+        // allowlist as compilerArgs: an --add-exports from a provider is kept,
+        // and Error Prone's -Xplugin:ErrorProne is dropped. A provider that
+        // fails is dropped.
+        def provided = compile.options.compilerArgumentProviders.findAll { !ours(it) }.collectMany { provider ->
+            try {
+                provider.asArguments().collect { it.toString() }
+            } catch (Exception ignored) {
+                []
+            }
+        }
         // New lists throughout: the project may have assigned immutable ones.
         def inherited = compile.options.compilerArgs.collect { it.toString() }
-        compile.options.compilerArgs = new ArrayList<String>(keepCompileSemantics(inherited))
-        // Keep only the harness's own argument providers. Error Prone, for one,
-        // contributes -Xplugin:ErrorProne through a provider.
+        compile.options.compilerArgs = new ArrayList<String>(
+            keepCompileSemantics(inherited) + keepCompileSemantics(provided))
         // (The provider list itself is Gradle's own; CompileOptions has no setter for it.)
-        compile.options.compilerArgumentProviders.retainAll {
-            it instanceof CheckerQualsArgumentProvider || it instanceof CheckerArgumentsProvider
-        }
+        compile.options.compilerArgumentProviders.retainAll { ours(it) }
         // The checker needs the javac internals exported to its fork, whatever the
         // project set for its own compile forks.
         def jvm = (compile.options.forkOptions.jvmArgs ?: []).collect { it.toString() }
@@ -266,9 +278,37 @@ class CheckerCompileSanitizer implements org.gradle.api.Action<org.gradle.api.Ta
         }
         compile.options.annotationProcessorPath = processorPath
     }
+
+    static final String EXTRA_PROPERTY = 'lltasCheckerCompileSanitizer'
+
+    private static boolean isClosureAction(Object action) {
+        def name = action instanceof org.gradle.api.Describable ? action.displayName : ''
+        return name ==~ /Execute do(First|Last) \{\} action/
+    }
+
+    /** Inserts the sanitizer directly before the compile action of [task]. */
+    static void install(org.gradle.api.Task task) {
+        if (!(task instanceof org.gradle.api.plugins.ExtensionAware)) return
+        def extra = task.extensions.extraProperties
+        if (!extra.has(EXTRA_PROPERTY)) return
+        def sanitizer = extra.get(EXTRA_PROPERTY)
+        def index = task.actions.findIndexOf { !isClosureAction(it) }
+        if (index >= 0) {
+            task.actions.add(index, sanitizer)
+        } else {
+            task.doFirst(sanitizer)
+        }
+    }
 }
 
-allprojects { project ->
+gradle.taskGraph.whenReady { graph ->
+    graph.allTasks.each { CheckerCompileSanitizer.install(it) }
+}
+
+// beforeProject, not allprojects: an init-script allprojects block, even an empty
+// one, breaks buildSrc convention plugins that use type-safe version-catalog
+// accessors ("Extension of type 'LibrariesForLibs' does not exist", wiremock).
+gradle.beforeProject { project ->
     project.plugins.withId('java') {
         project.afterEvaluate {
             def cfHome = required(project, 'CHECKERFRAMEWORK_HOME')
@@ -387,7 +427,7 @@ allprojects { project ->
                     ])
                 }
                 options.compilerArgumentProviders.add(new CheckerArgumentsProvider(checkerArgs: checkerArgs))
-                doFirst(new CheckerCompileSanitizer(
+                extensions.extraProperties.set(CheckerCompileSanitizer.EXTRA_PROPERTY, new CheckerCompileSanitizer(
                     forkJvmArgs: jvmArgs, forkMaxHeap: forkMaxHeap, processorPath: processorPath))
             }
 

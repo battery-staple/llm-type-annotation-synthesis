@@ -43,3 +43,40 @@ tasks.test {
     useJUnitPlatform()
     maxHeapSize = "1g"
 }
+
+// Gradle fixture tests: run the real checker.init.gradle with Gradle TestKit on
+// small generated projects (src/fixtureTest). They take about a minute, so they
+// are a separate suite that `check` runs and `test` does not.
+testing {
+    suites {
+        register<JvmTestSuite>("fixtureTest") {
+            useJUnitJupiter("5.10.2")
+            dependencies {
+                implementation(project())
+                implementation(gradleTestKit())
+                implementation("org.jetbrains.kotlin:kotlin-test-junit5:2.4.21")
+            }
+            targets.all {
+                testTask.configure {
+                    maxHeapSize = "1g"
+                    shouldRunAfter(tasks.test)
+                    systemProperty(
+                        "lltas.checkerFrameworkHome",
+                        layout.projectDirectory.dir("vendor/checker-framework-3.42.0").asFile.absolutePath
+                    )
+                    systemProperty("lltas.testKitDir", layout.buildDirectory.dir("testkit").get().asFile.absolutePath)
+                    systemProperty("lltas.gradleHome", gradle.gradleHomeDir!!.absolutePath)
+                }
+            }
+        }
+    }
+}
+
+// Lets the fixture tests use the harness's internal helpers, as `test` can.
+kotlin.target.compilations.named("fixtureTest") {
+    associateWith(kotlin.target.compilations.getByName("main"))
+}
+
+tasks.named("check") {
+    dependsOn(testing.suites.named("fixtureTest"))
+}

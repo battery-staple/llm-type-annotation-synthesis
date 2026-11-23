@@ -442,3 +442,79 @@ the crawler) are not listed unless the code had to interpret the plan.
     resource, so `StageCodeFingerprint` did not see template-only changes.
     Application, repair, and verification keys now include its hash; synthesis
     and triage, which do not use it, are unaffected.
+
+## Build-integration preflight (Dockerization plan, Phase 0.5)
+
+64. **Preflight is an optional pipeline stage between ingestion and triage.**
+    It is off by default, so a run has the original six stages and step
+    numbers; `pipeline run --preflight` or `preflight.enabled: true` adds it
+    (the plan has it always on). `pipeline preflight` always runs it. It runs
+    checks P1-P7 at clean C-1 in its own worktree, with no LLM call, and stops
+    at the first failure. An unsupported repository is a successful,
+    cacheable preflight whose report says `unsupported`; the run ends with
+    lifecycle status `unsupported`, the outcome is stored in
+    `preflight_results`, and `v_evaluation_verdicts` gives it outcome kind
+    `unsupported` and no verdict, so it is excluded from evaluation metrics.
+    With preflight, the step numbers after ingestion shift by one (triage is
+    step 3); without it they are unchanged.
+65. **P7 runs the full test suite**, which the plan did not have. Application
+    and verification both run the full suite under the build timeout, so a
+    suite that cannot finish (`suite_timeout`) or already fails at C-1
+    (`suite_fails_at_baseline`) means no run on that repository can reach a
+    verdict. `preflight.suite_check: false` or `pipeline preflight
+    --skip-suite` skips it.
+66. **The source level comes from the build.** P1 reads the compile task's
+    `release`, then a `--release` in its `compilerArgs` (Agrona), then its
+    `sourceCompatibility`; P2 then reads the class-file version of the
+    compiled classes, which also covers builds where a plugin sets the level
+    at execution time (RoaringBitmap). Preflight's own checker runs use that
+    level. A `benchmarks.yaml` value that disagrees is reported in the report,
+    not used; the later stages still use the configured value until the
+    section 7.5 change feeds the probe value into `checkerPass`.
+67. **Preflight never downloads a toolchain.** Every preflight Gradle call
+    passes `-Porg.gradle.java.installations.auto-download=false`, so a missing
+    JDK is `jdk_unavailable` on the host as in Docker. The later stages do not
+    pass it yet; a repository that passes preflight already has its JDKs.
+68. **Cache key: the build configuration, not the sources.** The key hashes
+    every committed file except Java sources under the production and test
+    roots (Java files in `buildSrc` and in included builds, found by their own
+    settings file, count as build logic), plus the P6 test class source, the
+    init script, the probe templates, and the configuration that affects
+    builds. Outcomes that depend on the sources, such as a checker crash on new
+    syntax or a newly failing test, are rechecked by the later stages.
+69. **Reason codes added to the plan's list**: `gradle_runtime_unsupported`,
+    `init_script_failure`, `checker_jdk_unsupported`, `checker_misreport`,
+    `suite_timeout`, and `suite_fails_at_baseline`. The codes were fixed, and
+    `expected_preflight` predictions recorded, in a commit before the first
+    preflight run.
+70. **CAS directory artifacts validate by digest.** `CasEngine.validateArtifacts`
+    treated only `custom_quals_src` as a directory, so any other registered
+    directory (preflight's logs) made its bundle fail validation and never hit.
+71. **CAS staging directories carry their owner's PID.** Startup cleanup
+    deleted every `.staging-*` directory, so starting a second pipeline process
+    destroyed a bundle another process was still writing (it wiped an
+    in-progress preflight). Only directories of dead owners are removed now;
+    directories with the old naming are removed after six hours.
+72. **The checker flag sanitizer runs directly before the compile action.** A
+    project `doFirst` runs at execution time and can append `-proc:none`,
+    which silently disabled the checker because the sanitizer ran first. After
+    the task graph is ready, the init script inserts the sanitizer behind every
+    `doFirst`, before the first action that is not a `doFirst`/`doLast`
+    closure; if none exists, it runs first as before.
+73. **Project argument providers pass through the allowlist** instead of being
+    dropped whole. Error Prone's `-Xplugin:ErrorProne` is still dropped, while
+    an `--add-exports` a project supplies through a provider is kept, so
+    sources that compile normally also compile in `checkerPass`.
+74. **The init script registers its per-project setup with
+    `gradle.beforeProject`, not `allprojects`.** An init-script `allprojects`
+    block, even an empty one, breaks `buildSrc` convention plugins that use
+    type-safe version-catalog accessors ("Extension of type 'LibrariesForLibs'
+    does not exist"); wiremock failed P3 on it, and the pre-Phase-0 template
+    had the same problem.
+75. **Gradle fixture tests.** `src/fixtureTest` runs the real init script with
+    Gradle TestKit on generated offline projects, one per build condition that
+    broke the harness (module descriptors, `-Werror`, inherited and late
+    compiler flags, argument providers, immutable `compilerArgs`, the agent's
+    compile helper). Every checker assertion requires planted errors to be
+    reported, so a checker that silently did not run fails the test. The suite
+    runs under `./gradlew check`, not `./gradlew test`.

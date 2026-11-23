@@ -321,7 +321,9 @@ object CacheKeys {
         configSlice: Map<String, Any?>,
         promptTemplate: String?,
         extra: Map<String, Any?> = emptyMap(),
-        includeSampleIdentity: Boolean = true
+        includeSampleIdentity: Boolean = true,
+        /** Hash of `checker.init.gradle`; a parameter only so tests can show what it invalidates. */
+        initScriptSha: String = CHECKER_INIT_SCRIPT_SHA
     ): CasKey {
         val runtime = buildMap<String, Any?> {
             put("java_version", System.getProperty("java.version"))
@@ -334,7 +336,7 @@ object CacheKeys {
             // The init script is a resource, not bytecode, so StageCodeFingerprint
             // does not see it. Only stages whose builds use it hash it, so a
             // template change does not invalidate synthesis bundles.
-            if (stage in INIT_SCRIPT_STAGES) put("checker_init_script", CHECKER_INIT_SCRIPT_SHA)
+            if (stage in INIT_SCRIPT_STAGES) put("checker_init_script", initScriptSha)
         }
         // Deterministic stages omit sample identity: a different seed cannot
         // change their output, so including it would only create duplicate

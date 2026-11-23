@@ -53,6 +53,20 @@ class PreflightSupportTest {
         assertEquals(PreflightReason.INIT_SCRIPT_FAILURE, PreflightSupport.classify("P3", output, false))
     }
 
+    /** wiremock: an init-script `allprojects` block broke its buildSrc catalog accessors. */
+    @Test
+    fun `a configuration failure after a clean baseline is init_script_failure`() {
+        val output = """
+            * What went wrong:
+            An exception occurred applying plugin request [id: 'wiremock.common-conventions']
+            > Failed to apply plugin 'wiremock.common-conventions'.
+               > Extension of type 'LibrariesForLibs' does not exist.
+        """.trimIndent()
+        assertEquals(PreflightReason.INIT_SCRIPT_FAILURE, PreflightSupport.classify("P3", output, false))
+        // In P2 the init script is absent, so the same failure is a broken baseline.
+        assertEquals(PreflightReason.BASELINE_COMPILE_FAILED, PreflightSupport.classify("P2", output, false))
+    }
+
     @Test
     fun `error prone in a failing compile is foreign_compiler_plugin`() {
         val output = "> Task :compileJava FAILED\n/w/A.java:3: error: [ErrorProne] An unhandled exception was thrown by the Error Prone static analysis plugin."
@@ -72,6 +86,12 @@ class PreflightSupportTest {
         assertEquals(PreflightReason.JDK_UNAVAILABLE, PreflightSupport.classify("P2", toolchain, false))
         val runtime = "BUG! exception in phase 'semantic analysis': Unsupported class file major version 71"
         assertEquals(PreflightReason.GRADLE_RUNTIME_UNSUPPORTED, PreflightSupport.classify("P1", runtime, false))
+        // jobrunr: its Micronaut build plugin needs Gradle itself to run on JDK 25.
+        val plugin = """
+            > Could not resolve io.micronaut.gradle:micronaut-gradle-plugin:5.0.2.
+                 > Dependency requires at least JVM runtime version 25. This build uses a Java 21 JVM.
+        """.trimIndent()
+        assertEquals(PreflightReason.GRADLE_RUNTIME_UNSUPPORTED, PreflightSupport.classify("P1", plugin, false))
     }
 
     @Test
