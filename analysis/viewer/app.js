@@ -742,8 +742,14 @@
   function toggleFacet(key, value) {
     const set = state.filters.facets[key];
     if (!set) return;
-    if (set.has(value)) set.delete(value);
-    else set.add(value);
+    if (set.has(value)) {
+      set.delete(value);
+    } else {
+      // The Stage Matrix compares commits within a single crawl. Selecting a
+      // batch is exclusive so its runs are never mixed with another batch's.
+      if (key === "batch") set.clear();
+      set.add(value);
+    }
     applyFilters();
   }
 
@@ -907,7 +913,11 @@
         const set = state.filters.facets[key];
         if (!(set instanceof Set) || !Array.isArray(values)) continue;
         for (const value of values) {
-          if (typeof value === "string") set.add(value);
+          if (typeof value !== "string") continue;
+          // Keep the restored batch selection consistent with toggleFacet:
+          // exactly one batch at a time.
+          if (key === "batch" && set.size > 0) break;
+          set.add(value);
         }
       }
     }
@@ -3389,8 +3399,11 @@
   function renderMatrixView() {
     const el = $("matrixView");
     let runs = getFilteredRuns();
-    if (state.selectedBatchId) {
-      runs = runs.filter((r) => r.batch_id === state.selectedBatchId);
+    const batchId = state.filters.facets.batch?.values().next().value || null;
+    if (batchId) {
+      // A batch is one crawl; the matrix must never mix in runs from other
+      // batches (including legacy runs that carry no batch_id at all).
+      runs = runs.filter((r) => r.batch_id === batchId);
     }
     if (state.hideDiscardedInMatrix) {
       runs = runs.filter((r) => !isTriageSkipped(r));
@@ -3540,7 +3553,7 @@
     el.innerHTML = `
       <div class="matrix-toolbar">
         <div>
-          <h2 style="margin:0 0 4px 0;">Stage Matrix <span class="muted" style="font-size:13px;font-weight:400;">(${runs.length} commit${runs.length === 1 ? "" : "s"})</span>${batchBanner}</h2>
+          <h2 style="margin:0 0 4px 0;">Stage Matrix <span class="muted" style="font-size:13px;font-weight:400;">(${runs.length} commit${runs.length === 1 ? "" : "s"})</span>${batchId ? `<span class="badge badge-muted" style="margin-left:8px;">Batch: <code>${esc(batchId.slice(0, 8))}</code></span>` : ""}</h2>
           <div class="muted" style="font-size:12px;">Click a stage column or pill to compare one stage across all commits; click any row or cell to inspect that commit.</div>
         </div>
         <div class="matrix-stage-pills">
