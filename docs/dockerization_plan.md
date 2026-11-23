@@ -6,7 +6,127 @@ This plan runs the pipeline's builds and agent sessions inside controlled Docker
 containers so each target project builds in a known, pinned environment and
 agents cannot reach the host. It follows from the JSqlParser and Agrona runs,
 which exposed harness bugs, host-state dependencies, and an agent sandbox that
-does not contain the agent.
+does not contain the agent. The Background section describes those runs.
+
+---
+
+## Background: The JSqlParser and Agrona Runs
+
+Until these runs, only `synthetic-id-swap` and `cmsx` had been through the
+pipeline. Both are small, compile on JDK 17 or 21 without unusual compiler
+settings, and have no `module-info.java`. JSqlParser and Agrona were the first
+real third-party repositories, and the application stage failed on every
+attempt for both.
+
+Each harness bug below was reproduced with a probe file outside the pipeline,
+so the failures do not depend on agent behavior. An earlier fix (commit
+`ea7745f`) had already addressed qualifiers missing from compile and test
+builds; it was found on JSqlParser, whose JavaCC plugin configures every
+`JavaCompile` task even when only `compileJava` runs.
+
+### Harness bugs
+
+1. **Qualifier jar built for the wrong Java version (JSqlParser).** `JavacRunner`
+   compiles the synthesized qualifiers inside the pipeline's own JVM (JDK 21)
+   and passes no `--release` flag, so the jar contains Java 21 class files
+   (version 65). JSqlParser compiles through a Gradle toolchain on JDK 17,
+   which cannot read them. The error appears as `bad class file … wrong
+   version 65.0`, which then surfaces as "package does not exist" for the
+   qualifier imports. The project's configured Java level does not matter;
+   only the JDK that compiles it does. Related risk: the jar's version follows
+   whatever JVM runs the pipeline. Launched without `JAVA_HOME`, that is the
+   default `java` on the development machine's `PATH`, JDK 27, and the jar
+   would break every repository, `cmsx` included.
+
+2. **Module compilation (JSqlParser; also RoaringBitmap, caffeine).** Projects
+   with a `module-info.java` in their main sources are compiled in module mode.
+   The init script excludes `module-info.java`, but Gradle's module inference
+   still treats the project as a module, and a named module cannot read
+   classpath jars. Result: `package … is not visible` for the qualifier
+   packages.
+
+3. **`checker-qual.jar` missing from the main compile classpath (Agrona).** The
+   init script adds it to test compilation only. Agrona compiles with
+   `-Werror`, so the warning `Cannot find annotation method 'value()' in type
+   'SubtypeOf'` fails the build. Untested but likely: any `package-info.java`
+   using `@DefaultQualifier` fails the same way.
+
+4. **`checkerPass` inherits the project's compiler flags (Agrona).** Agrona
+   configures every `JavaCompile` task through `withType(JavaCompile)`, so the
+   checker task picks up `-Werror` and `-Xlint`. The warning "No processor
+   claimed…" becomes an error, and the checker fails without reporting any
+   file-level errors. That outcome risks being scored as zero type errors, or
+   as a checker that never ran.
+
+### Agent tooling and containment
+
+- **`run-compile.sh` fails on JSqlParser.** The agent workspace is a sanitized
+  export with no `.git`, and JSqlParser's build calls `git` during
+  configuration. Where the helper does run, it compiles without the qualifier
+  jar, so it cannot check annotated code.
+- **The application prompt contradicts itself.** It tells the agent to put the
+  qualifier jar on the classpath, which requires editing build files the agent
+  is forbidden to touch, and says the checker must report errors without
+  giving the agent any way to run it. On JSqlParser the agent spent an entire
+  15-minute session trying to run the checker by hand.
+- **The sandbox does not contain the agent.** During these runs the agent found
+  the vendored Checker Framework through a search of the whole filesystem,
+  wrote to `/tmp`, made web requests (GitHub, the Checker Framework docs), and
+  read files under the user's home directory. The guards only audit the diff
+  the agent produces; nothing restricts what it can read or reach.
+
+### Environment and scale
+
+- **Checker cost.** The checker took about 4m45s on unannotated JSqlParser.
+  Annotated code is slower, the Gradle timeout is 900 s, and repair allows up
+  to 20 checker runs.
+- **Unavailable JDKs.** caffeine pins JDK 26 for both compiling and running
+  Gradle. It is not installed, so Gradle would try to download it, and
+  Checker Framework 3.42 (December 2023) may not run on it.
+- **Host state.** Builds depend on whatever the host provides: the JDK on
+  `PATH`, `JAVA_HOME`, and user-global Gradle init scripts (§1, "Hidden host
+  state").
+
+### Not addressed by this plan
+
+These were also observed but are not environment problems:
+
+- **Lattice defaults versus repair rules (cmsx).** Unannotated literals and
+  enum constants default to the lattice's top qualifier, so errors such as
+  `setHidden(false)` cannot be fixed without casts or annotated locals, both of
+  which repair forbids. Expect `fixer_incomplete` verdicts wherever a lattice
+  behaves like this.
+- **Triage near the threshold is not reproducible.** JSqlParser commit
+  `32d00421` passed triage once and failed the next time (0.72 against 0.75).
+- **Laptop sleep and the shared checkout.** See §1.
+
+### Requirement: Fixes Must Be General
+
+JSqlParser and Agrona are where these bugs surfaced, not what they are about.
+The toolchain mismatch affects any project compiled by an older JDK; module
+mode affects any project with a `module-info.java`; the `-Werror` interactions
+affect any project with strict compiler flags. Every fix in this plan must
+therefore work for any Gradle-based Java repository, not only the one that
+exposed the problem:
+
+- **No per-repository special cases** in harness code, the init script, or the
+  runtime image: no checks on benchmark IDs, repository names, or paths.
+  Per-benchmark settings in `benchmarks.yaml` describe facts about a
+  repository (source roots, JDK, subproject), never workarounds.
+- **State each fix as a condition** ("any project whose main compile uses
+  `-Werror`") and fix the mechanism behind it.
+- **Verify on more than one repository.** A fix is done when it works on every
+  eval repo that has the triggering condition, not just the one where it was
+  found. For example, the module-mode fix must also pass on RoaringBitmap,
+  caffeine, and picocli.
+- **Verify with preflight** (§7.3) across all eval repos, so a fix for one
+  repository cannot quietly break another.
+- **If a general fix is not possible,** add the case to the out-of-scope list
+  in §7.2 with a reason code. Do not add a special case.
+
+The target is any Gradle-based Java repository inside the supported envelope
+(§7.2). The envelope's exclusions are explicit and meant to shrink over time,
+and the corpus measurement (§7.4) shows how much of the ecosystem it covers.
 
 ---
 
@@ -251,7 +371,7 @@ Preflight (§7), new:
 
 | Phase | Work | Exit criteria | Estimate |
 |---|---|---|---|
-| **0. Harness fixes (no Docker)** | Bugs 1–4 (bug 4 implemented as the clean `checkerPass` configuration in §7.5); move or remove the `init.d` script; application run-checker helper and prompt fix | The JSqlParser and Agrona probe files pass on the host | 1–2 days |
+| **0. Harness fixes (no Docker)** | Bugs 1–4 (bug 4 implemented as the clean `checkerPass` configuration in §7.5); move or remove the `init.d` script; application run-checker helper and prompt fix | The JSqlParser and Agrona probe files pass on the host, and so does every other eval repo with the same triggering condition (see "Requirement: Fixes Must Be General") | 1–2 days |
 | **0.5 Preflight (no Docker)** | Preflight stage, reason codes, `preflight_results` table, `pipeline preflight` CLI (§7.3); run on the 12 eval repos | Every eval repo ends in `pass` or a specific reason code, never `unknown`; results match the known issues in §1 | 2–3 days |
 | **1. Builds in a container** | Runtime image, `ExecutionBackend`, Gradle volume, same-path mounts, `runtime_jdk`, image digest recorded | synthetic-id-swap and cmsx give the same verdicts on `local` and `docker`; preflight results on the 12 eval repos are identical on both backends; JSqlParser checker time measured on both | 2–3 days |
 | **2. Agents in a container** | OpenCode in the container, workspace-only mounts, synthetic `.git`, offline Gradle for agents, egress proxy, OpenCode permission config | Containment canary test passes (below) | 3–4 days |
