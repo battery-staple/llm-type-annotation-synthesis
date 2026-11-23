@@ -202,6 +202,12 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
         database(config).use { db ->
             // Sequential MVP: a run still marked running is stale.
             db.markStaleRunningRuns()
+            // Ctrl+C skips finishRun; record the interruption so the viewer
+            // stops showing this process's runs as live. No-op on normal exit.
+            Runtime.getRuntime().addShutdownHook(Thread({
+                runCatching { db.markOwnRunsInterrupted() }
+                    .onFailure { System.err.println("Could not mark interrupted runs: $it") }
+            }, "mark-runs-interrupted"))
             if (config.triage.mode == pipeline.stages.TriageMode.CRAWLER) {
                 val crawlerFile = File(config.triage.reposFile)
                 val targets = pipeline.config.CrawlerManifestLoader.load(crawlerFile, config)

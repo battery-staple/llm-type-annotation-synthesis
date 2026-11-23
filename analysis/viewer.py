@@ -1038,12 +1038,14 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
     with connect_db(db_path) as conn:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(evaluation_runs)").fetchall()}
         batch_col = "r.batch_id" if "batch_id" in cols else "NULL AS batch_id"
+        owner_col = "r.owner_pid" if "owner_pid" in cols else "NULL AS owner_pid"
         runs = rows_to_dicts(
             conn.execute(
                 f"""
                 SELECT
                     r.run_id,
                     {batch_col},
+                    {owner_col},
                     r.benchmark_id,
                     r.commit_hash,
                     r.sample_index,
@@ -1120,6 +1122,7 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
             run_id = r["run_id"]
             r["key_config"] = extract_key_config(cfg, r)
             r["steps"] = steps_by_run.get(run_id, [])
+            reconcile_run_status(r)
             mark_in_progress(r["steps"], r.get("status"))
             r["llm_stats"] = llm_by_run.get(
                 run_id,
@@ -1180,6 +1183,7 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
             return None
 
         run = dict(run_row)
+        reconcile_run_status(run)
         config_snapshot = safe_json_loads(run.get("config_snapshot"), {}) or {}
         run["config_snapshot"] = config_snapshot
         run["key_config"] = extract_key_config(config_snapshot, run)
@@ -1317,6 +1321,53 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
         return run
 
 
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
+    except OSError:
+        return False
+    return True
+
+
+def reconcile_run_status(run: dict[str, Any]) -> None:
+    """Show a run whose pipeline process is gone as interrupted.
+
+    The pipeline marks its runs interrupted from a shutdown hook, but a hard
+    kill (SIGKILL, crash, power loss) leaves the row `running` until the next
+    pipeline start reconciles it. The viewer is read-only, so it applies the
+    same owner_pid liveness rule as markStaleRunningRuns to what it displays.
+    """
+    if run.get("status") != "running":
+        return
+    pid = run.get("owner_pid")
+    if pid is None or not pid_alive(int(pid)):
+        run["status"] = "interrupted"
+
+
+def live_run_ids(db_path: Path) -> list[str]:
+    """Runs still `running` after liveness reconciliation.
+
+    A hard-killed pipeline writes nothing, so the DB mtime alone never tells the
+    page to refresh; the client also reloads when this list changes.
+    """
+    try:
+        with connect_db(db_path) as conn:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(evaluation_runs)").fetchall()}
+            owner_col = "owner_pid" if "owner_pid" in cols else "NULL AS owner_pid"
+            rows = rows_to_dicts(conn.execute(
+                f"SELECT run_id, status, {owner_col} FROM evaluation_runs WHERE status='running'"
+            ).fetchall())
+    except (sqlite3.Error, FileNotFoundError):
+        return []
+    for r in rows:
+        reconcile_run_status(r)
+    return sorted(r["run_id"] for r in rows if r["status"] == "running")
+
+
 def mark_in_progress(steps: list[dict[str, Any]], run_status: str | None) -> None:
     """Flag steps that are genuinely executing.
 
@@ -1387,7 +1438,12 @@ class ViewerHandler(BaseHTTPRequestHandler):
                     if p.exists()
                 ]
                 mtime = max(mtimes) if mtimes else None
-                self.send_json({"ok": True, "db_path": str(self.db_path), "db_mtime": mtime})
+                self.send_json({
+                    "ok": True,
+                    "db_path": str(self.db_path),
+                    "db_mtime": mtime,
+                    "live_runs": live_run_ids(self.db_path),
+                })
                 return
 
             if path == "/api/runs":

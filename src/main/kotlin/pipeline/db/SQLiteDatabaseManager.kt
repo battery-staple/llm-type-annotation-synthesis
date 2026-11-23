@@ -196,6 +196,39 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
         }
     }
 
+    /**
+     * Mark runs this process still owns as `interrupted`. Meant for a JVM
+     * shutdown hook (Ctrl+C / SIGTERM): the orchestrator never reaches
+     * [finishRun], and [markStaleRunningRuns] would only reconcile the row on
+     * the next pipeline start, so the viewer would keep showing it as running.
+     *
+     * Uses its own connection because the shared one may be mid-transaction on
+     * another thread, or already closed, when shutdown hooks run.
+     */
+    fun markOwnRunsInterrupted() {
+        val now = Instant.now().toString()
+        val pid = ProcessHandle.current().pid()
+        openConnection(databaseFile).use { c ->
+            c.createStatement().use { it.execute("PRAGMA busy_timeout=5000") }
+            c.prepareStatement(
+                """UPDATE step_trajectories SET success=0, completed_at=?
+                   WHERE completed_at IS NULL AND run_id IN
+                     (SELECT run_id FROM evaluation_runs WHERE status='running' AND owner_pid=?)"""
+            ).use { s ->
+                s.setString(1, now)
+                s.setLong(2, pid)
+                s.executeUpdate()
+            }
+            c.prepareStatement(
+                "UPDATE evaluation_runs SET status='interrupted', completed_at=? WHERE status='running' AND owner_pid=?"
+            ).use { s ->
+                s.setString(1, now)
+                s.setLong(2, pid)
+                s.executeUpdate()
+            }
+        }
+    }
+
     override suspend fun finishRun(runId: pipeline.stages.RunId, status: String) {
         // Run finalization must survive coroutine cancellation; otherwise an
         // interrupted run stays "running" in telemetry forever.

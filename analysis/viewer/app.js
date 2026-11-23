@@ -2539,8 +2539,11 @@
         state.autoRefreshTimer = setInterval(async () => {
           try {
             const health = await apiGet("/api/health");
-            if (health.db_mtime && health.db_mtime !== state.lastDbMtime) {
-              state.lastDbMtime = health.db_mtime;
+            // live_runs changes when a pipeline process dies without writing
+            // to the DB (e.g. kill -9), which db_mtime alone would miss.
+            const fingerprint = `${health.db_mtime}|${(health.live_runs || []).join(",")}`;
+            if (health.db_mtime && fingerprint !== state.lastDbMtime) {
+              state.lastDbMtime = fingerprint;
               await loadRuns(true);
             }
           } catch {
