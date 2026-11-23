@@ -3267,6 +3267,10 @@
     if (e.target instanceof Element && e.target.closest(".sidebar-filters, [data-facet][data-facet-value]")) {
       return;
     }
+    // Keep arrow keys available for scrolling inside the matrix view.
+    if (state.viewMode === "matrix" && target?.closest("#matrixView")) {
+      return;
+    }
 
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       const cards = [...$("runsList").querySelectorAll(".batch-card, .run-card")];
