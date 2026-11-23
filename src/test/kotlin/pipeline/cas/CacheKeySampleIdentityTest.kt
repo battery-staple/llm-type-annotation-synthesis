@@ -82,13 +82,13 @@ class CacheKeySampleIdentityTest {
     )
 
     private val noopRunner = object : BuildRunner {
-        override suspend fun compile(worktreeDir: File, customQualsJar: File?, extraClasspath: List<File>): BuildResult =
+        override suspend fun compile(worktreeDir: File, checker: pipeline.stages.CheckerConfig?, extraClasspath: List<File>): BuildResult =
             error("build port must not be used for cache-key computation")
 
         override suspend fun runTests(
             worktreeDir: File,
             testFilter: TestCoordinate?,
-            customQualsJar: File?,
+            checker: pipeline.stages.CheckerConfig?,
             extraClasspath: List<File>
         ): TestRunResult = error("build port must not be used for cache-key computation")
 

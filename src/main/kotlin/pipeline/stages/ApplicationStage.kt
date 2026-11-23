@@ -67,7 +67,7 @@ class ApplicationStage(
             "tell_non_triviality_error" to ctx.config.prompt.tellNonTrivialityError,
             "checker_processor" to ctx.config.checker.processor,
             "checker_category" to checkerCategoryName(ctx.config.checker.category),
-            "checker_quals" to ctx.config.checker.quals,
+            "checker_quals" to RETIRED_CHECKER_QUALS_KEY,
             "build_timeout_ms" to ctx.config.agent.timeoutMs,
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
             "production_roots" to ctx.productionRoots.sorted(),
@@ -176,14 +176,14 @@ class ApplicationStage(
                 continue
             }
             val metrics = BuildMetrics(ctx, buildRunner)
-            val compile = metrics.compile("application compile", worktree, lattice.customQualsJar)
+            val compile = metrics.compile("application compile", worktree, lattice.toCheckerConfig())
             if (!compile.success) {
                 feedback = "Compilation of the annotated tree failed:\n" + compile.output.take(8000)
                 resetWorktree(worktree)
                 prepareWorkspace(worktree, workspace, lattice, ctx)
                 continue
             }
-            val tests = metrics.tests("pre-existing suite", worktree, null, lattice.customQualsJar)
+            val tests = metrics.tests("pre-existing suite", worktree, null, lattice.toCheckerConfig())
             val runId = TelemetryIds.id()
             testRun = TestRunRecord(
                 runId,

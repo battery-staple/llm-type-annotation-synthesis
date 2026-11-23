@@ -23,6 +23,8 @@ import pipeline.db.TelemetryProjection
 import pipeline.ports.AgentRunner
 import pipeline.ports.BuildRunner
 import pipeline.runners.BuildMetrics
+import pipeline.runners.CheckerInitScript
+import pipeline.runners.qualifiedTask
 import pipeline.util.FileOps
 import pipeline.util.Git
 import pipeline.util.Hashing
@@ -486,7 +488,7 @@ internal fun prepareRepairWorkspace(worktree: File, workspace: File, checker: Ch
             StandardCopyOption.COPY_ATTRIBUTES,
         )
     }
-    writeCheckerInitScript(workspace, checker, ctx)
+    writeCheckerInitScript(workspace)
     writeRunCheckerScript(workspace, checker, ctx)
 }
 
@@ -496,91 +498,12 @@ internal fun refreshWorkspace(worktree: File, workspace: File, checker: CheckerC
 }
 
 /**
- * Renders the checker init script consumed by the agent-side run-checker.sh.
- * It mirrors the harness template from the implementation plan (selected processor
- * over main sources only, -Aquals for custom hierarchies only).
+ * Writes the checker init script consumed by the agent-side run-checker.sh. It
+ * is the bundled harness template itself, not a copy, so the checker the agent
+ * runs matches the checker that scores its repair.
  */
-internal fun writeCheckerInitScript(workspace: File, checker: CheckerConfig, ctx: RunContext) {
-    val initDir = workspace.parentFile.resolve(".pipeline-init")
-    initDir.mkdirs()
-    initDir.resolve("checker.init.gradle").writeText(
-        """
-        def required = { Project project, String key ->
-            def value = System.getenv(key)
-            if (value == null) value = System.getProperty(key)
-            if (value == null) value = project.findProperty(key)
-            if (value == null || value.toString().trim().isEmpty()) {
-                throw new GradleException("checker.init.gradle: missing required configuration '${'$'}{key}'")
-            }
-            return value.toString()
-        }
-        def optional = { Project project, String key, String fallback ->
-            def value = System.getenv(key)
-            if (value == null) value = System.getProperty(key)
-            if (value == null) value = project.findProperty(key)
-            return (value == null || value.toString().trim().isEmpty()) ? fallback : value.toString()
-        }
-        allprojects { project ->
-            project.plugins.withId('java') {
-                project.afterEvaluate {
-                    def cfHome = required(project, 'CHECKERFRAMEWORK_HOME')
-                    def customQualJarPath = required(project, 'CUSTOM_QUAL_JAR_PATH')
-                    def processorName = required(project, 'CF_PROCESSOR')
-                    def qualsOpt = optional(project, 'CF_AQUALS', '')
-                    def checkerCategory = required(project, 'CF_CHECKER_CATEGORY')
-                    def guardrailsMode = optional(project, 'GUARDRAILS_MODE', 'lenient')
-                    def projectSourceCompat = String.valueOf(project.sourceCompatibility ?: org.gradle.api.JavaVersion.current())
-                    def projectTargetCompat = String.valueOf(project.targetCompatibility ?: project.sourceCompatibility ?: org.gradle.api.JavaVersion.current())
-                    def sourceCompat = optional(project, 'CF_SOURCE_COMPATIBILITY', projectSourceCompat)
-                    def targetCompat = optional(project, 'CF_TARGET_COMPATIBILITY', projectTargetCompat)
-                    def checkerJar = project.file("${'$'}{cfHome}/checker/dist/checker.jar")
-                    def checkerQualJar = project.file("${'$'}{cfHome}/checker/dist/checker-qual.jar")
-                    def customQualJar = project.file(customQualJarPath)
-                    [checkerJar, checkerQualJar, customQualJar].each { artifact ->
-                        if (!artifact.exists()) {
-                            throw new GradleException("checker.init.gradle: missing required artifact ${'$'}{artifact}")
-                        }
-                    }
-                    def javacPackages = ['api', 'code', 'comp', 'file', 'main', 'model', 'parser', 'processing', 'tree', 'util', 'jvm']
-                    def jvmArgs = []
-                    javacPackages.each { pkg ->
-                        jvmArgs += "--add-exports=jdk.compiler/com.sun.tools.javac.${'$'}{pkg}=ALL-UNNAMED"
-                        jvmArgs += "--add-opens=jdk.compiler/com.sun.tools.javac.${'$'}{pkg}=ALL-UNNAMED"
-                    }
-                    def main = project.sourceSets.main
-                    project.tasks.register('checkerPass', JavaCompile) {
-                        source = main.allJava
-                        // Include compiled output so annotation-processor
-                        // generated classes (AutoValue, JPA weaving) resolve;
-                        // the normal compile runs those processors.
-                        classpath = project.files(main.output, main.compileClasspath, checkerQualJar, customQualJar)
-                        dependsOn project.tasks.named('compileJava')
-                        destinationDirectory.set(project.layout.buildDirectory.dir('checker-classes'))
-                        sourceCompatibility = sourceCompat
-                        targetCompatibility = targetCompat
-                        options.fork = true
-                        options.forkOptions.jvmArgs.addAll(jvmArgs)
-                        options.annotationProcessorPath = project.files(checkerJar, customQualJar)
-                        def checkerArgs = ['-processor', processorName, '-Xmaxerrs', '10000', '-Xmaxwarns', '10000']
-                        if (checkerCategory == 'custom_qualifier_hierarchy') {
-                            if (qualsOpt.isEmpty()) {
-                                throw new GradleException("checker.init.gradle: CF_AQUALS is required for custom_qualifier_hierarchy")
-                            }
-                            checkerArgs.add("-Aquals=${'$'}{qualsOpt}")
-                        }
-                        if (guardrailsMode == 'strict') {
-                            checkerArgs.addAll(['-AignoreRawTypeArguments=false', '-AinvariantArrays', '-AcheckPurityAnnotations', '-Alint=cast:unsafe'])
-                        }
-                        options.compilerArgs.addAll(checkerArgs)
-                    }
-                    project.tasks.withType(Test).configureEach { testTask ->
-                        testTask.classpath += project.files(checkerQualJar, customQualJar)
-                    }
-                }
-            }
-        }
-        """.trimIndent(),
-    )
+internal fun writeCheckerInitScript(workspace: File) {
+    CheckerInitScript.writeTo(workspace.parentFile.resolve(".pipeline-init"))
 }
 
 /**
@@ -615,7 +538,7 @@ internal fun writeRunCheckerScript(workspace: File, checker: CheckerConfig, ctx:
         export CF_SOURCE_COMPATIBILITY="${ctx.sourceCompatibility}"
         export CF_TARGET_COMPATIBILITY="${ctx.targetCompatibility}"
         export GUARDRAILS_MODE="${ctx.config.guardrails.mode.name.lowercase()}"
-        exec ./gradlew :checkerPass --init-script "${'$'}SCRIPT_DIR/../.pipeline-init/checker.init.gradle"
+        exec ${ctx.build.wrapperExecutable} ${qualifiedTask(ctx.build, ctx.build.checkerTask)} --init-script "${'$'}SCRIPT_DIR/../.pipeline-init/checker.init.gradle"
         """.trimIndent(),
     )
     script.setExecutable(true)

@@ -10,6 +10,8 @@ import kotlinx.coroutines.runBlocking
 import pipeline.config.BuildSection
 import pipeline.config.ProjectConfig
 import pipeline.ports.TestStatus
+import pipeline.stages.CheckerCategory
+import pipeline.stages.CheckerConfig
 import pipeline.stages.Fqcn
 import pipeline.stages.TestCoordinate
 import pipeline.util.FileOps
@@ -74,9 +76,52 @@ class GradleBuildRunnerTest {
     fun `compile task is root-qualified too`() = runBlocking {
         val dir = tempDir("gradle-runner-compile")
         try {
-            val result = runner().compile(dir, customQualsJar = null)
+            val result = runner().compile(dir, checker = null)
             assertTrue(result.success, "fake compile must succeed: ${result.output}")
             assertTrue(":compileJava" in FakeGradle.args(dir), "got: ${FakeGradle.args(dir)}")
+        } finally {
+            FileOps.deleteRecursively(dir)
+        }
+    }
+
+    /**
+     * Compile and test builds inject the init script, which registers
+     * checkerPass; plugins such as JavaCC configure it even when only
+     * compileJava runs. They must carry the synthesized lattice, not a static
+     * config value (formerly `checker.quals: []`).
+     */
+    @Test
+    fun `compile and test pass the lattice qualifiers to the init script`() = runBlocking {
+        val dir = tempDir("gradle-runner-checker-env")
+        try {
+            File(dir, "gradlew").writeText(
+                """
+                #!/usr/bin/env bash
+                printf '%s\n' "${'$'}CF_AQUALS" "${'$'}CF_CHECKER_CATEGORY" "${'$'}CF_PROCESSOR" "${'$'}CUSTOM_QUAL_JAR_PATH" >> "${'$'}PWD/env.txt"
+                printf '%s\n' "${'$'}@" > "${'$'}PWD/args.txt"
+                exit 0
+                """.trimIndent() + "\n"
+            )
+            val jar = File(dir, "lattice/custom-quals.jar")
+            val checker = CheckerConfig(
+                customQualsJar = jar,
+                processor = "org.checkerframework.common.subtyping.SubtypingChecker",
+                checkerCategory = CheckerCategory.CUSTOM_QUALIFIER_HIERARCHY,
+                qualifierClassNames = listOf(Fqcn("q.IndexKind"), Fqcn("q.IndexKindBottom"))
+            )
+
+            runner().compile(dir, checker = checker)
+            assertTrue("--init-script" in FakeGradle.args(dir), "compile must inject the init script")
+            runner().runTests(dir, testFilter = null, checker = checker)
+            assertTrue("--init-script" in FakeGradle.args(dir), "test must inject the init script")
+
+            val expected = listOf(
+                "q.IndexKind,q.IndexKindBottom",
+                "custom_qualifier_hierarchy",
+                "org.checkerframework.common.subtyping.SubtypingChecker",
+                jar.absolutePath,
+            )
+            assertEquals(expected + expected, File(dir, "env.txt").readLines())
         } finally {
             FileOps.deleteRecursively(dir)
         }

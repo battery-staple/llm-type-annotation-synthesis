@@ -102,8 +102,9 @@ data class SynthesisSection(
 @Serializable
 data class CheckerSection(
     val processor: String = "org.checkerframework.common.subtyping.SubtypingChecker",
-    val category: CheckerCategory = CheckerCategory.CUSTOM_QUALIFIER_HIERARCHY,
-    val quals: List<String> = emptyList()
+    val category: CheckerCategory = CheckerCategory.CUSTOM_QUALIFIER_HIERARCHY
+    // No `quals` key: qualifiers are per-run synthesis output, never static config.
+    // Every Gradle invocation takes them from the SynthesizedLattice.
 )
 
 @Serializable

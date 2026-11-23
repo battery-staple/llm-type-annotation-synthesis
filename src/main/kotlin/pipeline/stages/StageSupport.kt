@@ -41,6 +41,14 @@ internal fun buildConfigSlice(build: BuildSection): Map<String, Any?> = mapOf(
     "checker_task" to build.checkerTask,
 )
 
+/**
+ * Cache-key value for the retired `checker.quals` config key. It was always
+ * `[]` and is no longer read: every Gradle invocation now takes its qualifiers
+ * from the synthesized lattice. Pinning the old slot to its only value keeps
+ * existing CAS keys (including LLM-stage bundles) valid.
+ */
+internal val RETIRED_CHECKER_QUALS_KEY: List<String> = emptyList()
+
 /** Outcome-affecting wall-clock budget used by every Gradle invocation. */
 internal fun buildTimeoutConfig(ctx: RunContext): Map<String, Any?> =
     mapOf("build_timeout_ms" to ctx.config.agent.timeoutMs)

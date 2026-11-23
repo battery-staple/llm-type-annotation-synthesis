@@ -18,6 +18,41 @@ def optional = { Project project, String key, String fallback ->
     return (value == null || value.toString().trim().isEmpty()) ? fallback : value.toString()
 }
 
+// Supplies -Aquals to checkerPass and validates it against the checker category.
+//
+// The check must not run when the task is configured. Plugins may realize every
+// JavaCompile task during configuration, even for builds that only request
+// compileJava or test (the JavaCC plugin's JavaToJavaccDependencyAction streams
+// tasks.withType(JavaCompile) in afterEvaluate). A configure-time throw would
+// then fail builds that never run the checker. Gradle calls asArguments() only
+// when checkerPass executes. The @Input fields still take part in up-to-date
+// checks, so a changed lattice re-runs the checker.
+class CheckerQualsArgumentProvider implements org.gradle.process.CommandLineArgumentProvider {
+    @org.gradle.api.tasks.Input
+    String checkerCategory
+
+    @org.gradle.api.tasks.Input
+    String quals
+
+    @Override
+    Iterable<String> asArguments() {
+        if (checkerCategory == 'custom_qualifier_hierarchy') {
+            // SubtypingChecker refuses to run without -Aquals or -AqualDirs.
+            if (quals.isEmpty()) {
+                throw new GradleException(
+                    "checker.init.gradle: CF_AQUALS is required for custom_qualifier_hierarchy")
+            }
+            return ["-Aquals=${quals}".toString()]
+        }
+        if (!quals.isEmpty()) {
+            throw new GradleException(
+                "checker.init.gradle: CF_AQUALS must be empty for builtin_checker; " +
+                "-Aquals is only passed to custom qualifier hierarchies")
+        }
+        return []
+    }
+}
+
 allprojects { project ->
     project.plugins.withId('java') {
         project.afterEvaluate {
@@ -122,17 +157,8 @@ allprojects { project ->
                     '-Xmaxerrs', '10000',
                     '-Xmaxwarns', '10000'
                 ]
-                if (checkerCategory == 'custom_qualifier_hierarchy') {
-                    if (quals.isEmpty()) {
-                        throw new GradleException(
-                            "checker.init.gradle: CF_AQUALS is required for custom_qualifier_hierarchy")
-                    }
-                    checkerArgs.add("-Aquals=${quals}".toString())
-                } else if (!quals.isEmpty()) {
-                    throw new GradleException(
-                        "checker.init.gradle: CF_AQUALS must be empty for builtin_checker; " +
-                        "-Aquals is only passed to custom qualifier hierarchies")
-                }
+                options.compilerArgumentProviders.add(
+                    new CheckerQualsArgumentProvider(checkerCategory: checkerCategory, quals: quals))
                 if (guardrailsMode == 'strict') {
                     checkerArgs.addAll([
                         '-AignoreRawTypeArguments=false',

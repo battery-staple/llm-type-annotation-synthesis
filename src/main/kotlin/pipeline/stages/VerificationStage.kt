@@ -65,12 +65,12 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             "verification_scope" to ctx.config.verification.scope.name.lowercase(),
             "verification_baseline" to ctx.config.verification.baseline,
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
-            // runTests receives the custom-quals jar, so its injected init
-            // script reads these project-level checker settings even though
-            // the dedicated checker pass uses the lattice's values.
+            // Every Gradle call here (checker and runTests) takes the lattice's
+            // processor, category and qualifiers, which stageInput already keys.
+            // These project-level entries are kept only so existing keys stay valid.
             "checker_processor" to ctx.config.checker.processor,
             "checker_category" to ctx.config.checker.category.name.lowercase(),
-            "checker_quals" to ctx.config.checker.quals,
+            "checker_quals" to RETIRED_CHECKER_QUALS_KEY,
             "source_compatibility" to ctx.sourceCompatibility,
             "target_compatibility" to ctx.targetCompatibility
         )
@@ -147,7 +147,7 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         var regXmlName: String? = null
         if (testPatchOk) {
             log.info { "Verification: running T_reg ${input.sample.regressionTest}" }
-            val result = metrics.tests("regression test", worktree, testFilter = input.sample.regressionTest, customQualsJar = input.lattice.customQualsJar)
+            val result = metrics.tests("regression test", worktree, testFilter = input.sample.regressionTest, checker = input.lattice.toCheckerConfig())
             regResult = result
             val hasPassed = result.outcomes.any { it.status == TestStatus.PASSED }
             val hasFailure = result.outcomes.any { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
@@ -181,7 +181,7 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
         var suiteXmlName: String? = null
         if (input.verificationScope == VerificationScope.FULL_SUITE) {
             log.info { "Verification: running pre-existing suite" }
-            val suiteResult = metrics.tests("full suite", worktree, testFilter = null, customQualsJar = input.lattice.customQualsJar)
+            val suiteResult = metrics.tests("full suite", worktree, testFilter = null, checker = input.lattice.toCheckerConfig())
             if (suiteResult.timedOut) {
                 recordTestTelemetry(ctx, input, suiteResult, "pre_existing_suite", null)
                 return StageResult.TransientFailure(RuntimeException("Verification suite timed out"), 0, emptyList())

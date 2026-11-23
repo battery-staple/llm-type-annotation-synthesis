@@ -32,11 +32,11 @@ class BuildMetricsTest {
         var testResult = TestRunResult(true, 0, emptyList(), emptyList(), false, 0, "")
         var checkerResult = CheckerResult(true, 0, true, 0, 0, emptyList(), File("checker.log"))
         var throwOnCompile = false
-        override suspend fun compile(worktreeDir: File, customQualsJar: File?, extraClasspath: List<File>): BuildResult {
+        override suspend fun compile(worktreeDir: File, checker: pipeline.stages.CheckerConfig?, extraClasspath: List<File>): BuildResult {
             if (throwOnCompile) throw IllegalStateException("runner broke")
             return compileResult
         }
-        override suspend fun runTests(worktreeDir: File, testFilter: TestCoordinate?, customQualsJar: File?, extraClasspath: List<File>) = testResult
+        override suspend fun runTests(worktreeDir: File, testFilter: TestCoordinate?, checker: pipeline.stages.CheckerConfig?, extraClasspath: List<File>) = testResult
         override suspend fun runChecker(worktreeDir: File, checkerHome: File, customQualsJar: File, processor: String,
                                         quals: List<Fqcn>, checkerCategory: CheckerCategory, guardrailsMode: GuardrailsMode) = checkerResult
     }

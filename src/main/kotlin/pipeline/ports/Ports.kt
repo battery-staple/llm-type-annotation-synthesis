@@ -11,6 +11,7 @@ import pipeline.db.RetryEvent
 import pipeline.db.SubprocessMetricRecord
 import pipeline.stages.AgentTranscriptEvent
 import pipeline.stages.CheckerCategory
+import pipeline.stages.CheckerConfig
 import pipeline.stages.CommitClassification
 import pipeline.stages.EvalVerdict
 import pipeline.stages.Fqcn
@@ -125,16 +126,23 @@ data class CheckerResult(
 )
 
 interface BuildRunner {
+    /**
+     * Compiles the tree. A non-null [checker] injects the checker init script so
+     * sources annotated with the synthesized qualifiers resolve them; it must be
+     * the same lattice the checker pass uses, because the init script reads the
+     * full checker configuration even when only `compileJava` runs.
+     */
     suspend fun compile(
         worktreeDir: File,
-        customQualsJar: File? = null,
+        checker: CheckerConfig? = null,
         extraClasspath: List<File> = emptyList()
     ): BuildResult
 
+    /** Runs tests; [checker] has the same meaning as in [compile]. */
     suspend fun runTests(
         worktreeDir: File,
         testFilter: TestCoordinate? = null,
-        customQualsJar: File? = null,
+        checker: CheckerConfig? = null,
         extraClasspath: List<File> = emptyList()
     ): TestRunResult
 

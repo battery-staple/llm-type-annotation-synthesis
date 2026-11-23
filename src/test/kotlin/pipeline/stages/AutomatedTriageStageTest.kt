@@ -93,13 +93,13 @@ class AutomatedTriageStageTest {
     )
 
     private val unusedBuildRunner = object : BuildRunner {
-        override suspend fun compile(worktreeDir: File, customQualsJar: File?, extraClasspath: List<File>): BuildResult =
+        override suspend fun compile(worktreeDir: File, checker: pipeline.stages.CheckerConfig?, extraClasspath: List<File>): BuildResult =
             BuildResult(true, 0, "ok")
 
         override suspend fun runTests(
             worktreeDir: File,
             testFilter: TestCoordinate?,
-            customQualsJar: File?,
+            checker: pipeline.stages.CheckerConfig?,
             extraClasspath: List<File>
         ): TestRunResult = TestRunResult(
             success = true,
@@ -273,13 +273,13 @@ class AutomatedTriageStageTest {
             val db = RecordingDatabase()
             val testCoord = TestCoordinate(Fqcn("com.example.AppTest"), "testFix")
             val buildRunner = object : BuildRunner {
-                override suspend fun compile(worktreeDir: File, customQualsJar: File?, extraClasspath: List<File>): BuildResult =
+                override suspend fun compile(worktreeDir: File, checker: pipeline.stages.CheckerConfig?, extraClasspath: List<File>): BuildResult =
                     BuildResult(true, 0, "ok")
 
                 override suspend fun runTests(
                     worktreeDir: File,
                     testFilter: TestCoordinate?,
-                    customQualsJar: File?,
+                    checker: pipeline.stages.CheckerConfig?,
                     extraClasspath: List<File>
                 ): TestRunResult {
                     val isC1 = worktreeDir.name == "c1"

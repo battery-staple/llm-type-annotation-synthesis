@@ -10,19 +10,20 @@ import pipeline.stages.RunContext
 import pipeline.stages.TestCoordinate
 import pipeline.stages.Fqcn
 import pipeline.stages.CheckerCategory
+import pipeline.stages.CheckerConfig
 import pipeline.stages.GuardrailsMode
 import pipeline.db.SubprocessMetricRecord
 
 /** Times Gradle calls and persists their outcome without affecting stage behavior. */
 class BuildMetrics(private val ctx: RunContext, private val runner: BuildRunner) {
-    suspend fun compile(label: String, worktreeDir: File, customQualsJar: File? = null,
+    suspend fun compile(label: String, worktreeDir: File, checker: CheckerConfig? = null,
                         extraClasspath: List<File> = emptyList()): BuildResult = measured("compile", label,
-        { runner.compile(worktreeDir, customQualsJar, extraClasspath) },
+        { runner.compile(worktreeDir, checker, extraClasspath) },
         { Triple(it.success, it.exitCode, it.timedOut) to if (it.success) null else it.output })
 
     suspend fun tests(label: String, worktreeDir: File, testFilter: TestCoordinate? = null,
-                      customQualsJar: File? = null, extraClasspath: List<File> = emptyList()): TestRunResult = measured("test", label,
-        { runner.runTests(worktreeDir, testFilter, customQualsJar, extraClasspath) },
+                      checker: CheckerConfig? = null, extraClasspath: List<File> = emptyList()): TestRunResult = measured("test", label,
+        { runner.runTests(worktreeDir, testFilter, checker, extraClasspath) },
         { Triple(it.success, it.exitCode, it.timedOut) to if (it.success) null else it.output })
 
     suspend fun checker(label: String, worktreeDir: File, checkerHome: File, customQualsJar: File,

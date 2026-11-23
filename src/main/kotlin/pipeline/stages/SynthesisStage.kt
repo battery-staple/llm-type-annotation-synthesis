@@ -59,7 +59,7 @@ class SynthesisStage(
             "model_synthesis" to ctx.config.model.synthesisModel,
             "checker_processor" to ctx.config.checker.processor,
             "checker_category" to checkerCategoryName(ctx.config.checker.category),
-            "checker_quals" to ctx.config.checker.quals,
+            "checker_quals" to RETIRED_CHECKER_QUALS_KEY,
             "agent_steps_synthesis" to ctx.config.agent.steps.synthesis,
             "agent_timeout_ms" to ctx.config.agent.timeoutMs,
             "internet_access" to ctx.config.repair.internetAccess,

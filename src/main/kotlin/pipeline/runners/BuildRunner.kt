@@ -17,6 +17,7 @@ import pipeline.ports.TestOutcome
 import pipeline.ports.TestRunResult
 import pipeline.ports.TestStatus
 import pipeline.stages.CheckerCategory
+import pipeline.stages.CheckerConfig
 import pipeline.stages.Fqcn
 import pipeline.stages.GuardrailsMode
 import pipeline.stages.TestCoordinate
@@ -37,7 +38,7 @@ class GradleBuildRunner(
 
     override suspend fun compile(
         worktreeDir: File,
-        customQualsJar: File?,
+        checker: CheckerConfig?,
         extraClasspath: List<File>
     ): BuildResult {
         val env = baseEnv().toMutableMap()
@@ -46,20 +47,7 @@ class GradleBuildRunner(
             prefixed(build.compileTask),
             "--console=plain", "--stacktrace", "--no-watch-fs"
         )
-        if (customQualsJar != null) {
-            val script = renderInitScript(worktreeDir)
-            args += listOf("--init-script", script.absolutePath)
-            env.putAll(
-                checkerEnv(
-                    processor = config.checker.processor,
-                    quals = config.checker.quals.map { Fqcn(it) },
-                    checkerCategory = config.checker.category,
-                    guardrailsMode = config.guardrails.mode,
-                    customQualsJar = customQualsJar,
-                    extraClasspath = extraClasspath
-                )
-            )
-        }
+        if (checker != null) addCheckerInit(worktreeDir, checker, extraClasspath, args, env)
         val result = runGradle(worktreeDir, args, env)
         return BuildResult(
             success = result.exitCode == 0 && !result.timedOut,
@@ -72,7 +60,7 @@ class GradleBuildRunner(
     override suspend fun runTests(
         worktreeDir: File,
         testFilter: TestCoordinate?,
-        customQualsJar: File?,
+        checker: CheckerConfig?,
         extraClasspath: List<File>
     ): TestRunResult {
         val env = baseEnv().toMutableMap()
@@ -87,20 +75,7 @@ class GradleBuildRunner(
             args += "--tests"
             args += testFilter.gradleFilter
         }
-        if (customQualsJar != null) {
-            val script = renderInitScript(worktreeDir)
-            args += listOf("--init-script", script.absolutePath)
-            env.putAll(
-                checkerEnv(
-                    processor = config.checker.processor,
-                    quals = config.checker.quals.map { Fqcn(it) },
-                    checkerCategory = config.checker.category,
-                    guardrailsMode = config.guardrails.mode,
-                    customQualsJar = customQualsJar,
-                    extraClasspath = extraClasspath
-                )
-            )
-        }
+        if (checker != null) addCheckerInit(worktreeDir, checker, extraClasspath, args, env)
         val result = runGradle(worktreeDir, args, env)
         val output = result.output
         val xmlFiles = findTestXml(worktreeDir)
@@ -187,13 +162,34 @@ class GradleBuildRunner(
 
     // --- Helpers ---------------------------------------------------------
 
-    private fun prefixed(task: String): String {
-        val sub = build.subproject.trim().trim(':')
-        // An empty subproject means the repository root project. Qualify the
-        // task explicitly so `test` does not fan out to unrelated subprojects
-        // (CMSX includes `:regression`, where a `--tests` filter matches no
-        // tests and fails the whole invocation).
-        return if (sub.isEmpty()) ":$task" else ":$sub:$task"
+    private fun prefixed(task: String): String = qualifiedTask(build, task)
+
+    /**
+     * Injects the init script for a compile/test invocation. The env carries the
+     * synthesized lattice, not a static config value: the init script registers
+     * `checkerPass` in every such build, and plugins that eagerly realize all
+     * `JavaCompile` tasks (JavaCC's `JavaToJavaccDependencyAction`) configure it
+     * even when only `compileJava` or `test` was requested.
+     */
+    private fun addCheckerInit(
+        worktreeDir: File,
+        checker: CheckerConfig,
+        extraClasspath: List<File>,
+        args: MutableList<String>,
+        env: MutableMap<String, String>
+    ) {
+        val script = renderInitScript(worktreeDir)
+        args += listOf("--init-script", script.absolutePath)
+        env.putAll(
+            checkerEnv(
+                processor = checker.processor,
+                quals = checker.qualifierClassNames,
+                checkerCategory = checker.checkerCategory,
+                guardrailsMode = config.guardrails.mode,
+                customQualsJar = checker.customQualsJar,
+                extraClasspath = extraClasspath
+            )
+        )
     }
 
     private fun baseEnv(): Map<String, String> = buildMap {
@@ -231,14 +227,8 @@ class GradleBuildRunner(
 
     /** Copies the bundled init script outside the worktree so it is never part of a diff. */
     private fun renderInitScript(worktreeDir: File): File {
-        val template = GradleBuildRunner::class.java.getResourceAsStream("/templates/checker.init.gradle")?.bufferedReader()?.readText()
-            ?: error("checker.init.gradle template not found on classpath")
         val anchor = worktreeDir.absoluteFile.parentFile ?: worktreeDir.absoluteFile
-        val dir = anchor.resolve(".pipeline-init")
-        dir.mkdirs()
-        val script = dir.resolve("checker.init.gradle")
-        script.writeText(template)
-        return script
+        return CheckerInitScript.writeTo(anchor.resolve(".pipeline-init"))
     }
 
     private suspend fun runGradle(

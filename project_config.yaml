@@ -68,7 +68,6 @@ synthesis:
 checker:
   processor: "org.checkerframework.common.subtyping.SubtypingChecker"
   category: "custom_qualifier_hierarchy"
-  quals: []
 
 repair:
   local_variable_annotations: "frozen"
