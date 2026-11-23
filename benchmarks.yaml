@@ -8,8 +8,19 @@
 #   poor          - no Level 0 lattice flags it, or the fix it points to is wrong or
 #                   blocked by the repair guards (negative control)
 # Rationale per entry: docs/candidate_commits.md, "Expected fit".
+#
+# `expected_preflight` predicts the build-integration preflight outcome
+# (Dockerization plan, section 7.4) at the entry's parent commit: "pass" or the
+# expected reason code. Like `expected_fit`, it is recorded before preflight
+# first runs and never shown to an agent. `expected_preflight_basis` says how
+# blind the prediction is; see repos.yaml for the values. For every entry here
+# it is "phase0_probes": Phase 0's scripted probes already ran checks P3-P5 at
+# these parent commits (one per repository), so only P1, P2, P6 and the suite
+# check are genuine predictions.
 benchmarks:
   - id: "synthetic-id-swap"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/synthetic-id-swap"
     commit_hash: "4d49e20bb284ba1aabfd68bde775aa55bfb7c401"
     parent_hash: "56aa665aa4fc4a95ffe48e7e1972b4d4328c61c3"
@@ -27,6 +38,8 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "cmsx-assignment-extension"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/cmsx"
     commit_hash: "be6f19da0008342cf559b66175fdf1acd3a02b0e"
     parent_hash: "7ee122ff1fee70414fd1c717a2f089955ccbec5a"
@@ -46,6 +59,8 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "jsqlparser-index-kind"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/JSqlParser"
     commit_hash: "d1dbca1776b9f19849b456b40ad21b1c2e6690d5"
     parent_hash: "84f780cd1ae9c9256c4750e7b6a43d037b8d5d9a"
@@ -63,6 +78,8 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "roaringbitmap-reverse-iter-short"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/RoaringBitmap"
     commit_hash: "c7bd6849f58418b69b8f47ea5667a252b3758a01"
     parent_hash: "2863e96d6715113dd32b9f2582bf962fdb57bbe6"
@@ -81,6 +98,8 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "roaringbitmap-absent-values"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/RoaringBitmap"
     commit_hash: "2242bc0e92386fb5630d7edd22f350ac7be268b9"
     parent_hash: "eaa61caff211f10becbcb487b4e92284c68f1da2"
@@ -99,6 +118,8 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "roaringbitmap-runcontainer-foreach"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/RoaringBitmap"
     commit_hash: "0b422495a18f1c003d50bd9f2aff705436d137b8"
     parent_hash: "f66432403848d24bb14b527c99cf7b9f939e582c"
@@ -117,6 +138,8 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "agrona-bounds-check"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/agrona"
     commit_hash: "2af8867dd59a0313ccd810f176e583c0a925eb5d"
     parent_hash: "388e328c3f3bbe2b8dafa4c516d07aaf99b2b921"
@@ -135,6 +158,8 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "agrona-readline-unsigned"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/agrona"
     commit_hash: "6ea35db9479a30d6b36d4544d2ca7e51ccb00f45"
     parent_hash: "21abef9397e0eb981b319d1b60f373a7d9c10923"
@@ -153,6 +178,8 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "agrona-readutf-unsigned-length"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/agrona"
     commit_hash: "8758c757db5df5475f78975050d7dcf2e6c4a441"
     parent_hash: "ddbb495e1bb55b764798dac2b37acfce28aeeccd"
@@ -171,6 +198,9 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "caffeine-agetof-tagbit"
+    # the `test` task runs the full @CacheSpec-parameterized suite
+    expected_preflight: "suite_timeout"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/caffeine"
     commit_hash: "45fdb397dab51226fedbde9a916ac6bdeaa7df10"
     parent_hash: "07156f73db8d30736afbe803078faf565c9f0c56"
@@ -189,6 +219,9 @@ benchmarks:
       test_task: "test"
       checker_task: "checkerPass"
   - id: "caffeine-putifabsent-read-expiry"
+    # the `test` task runs the full @CacheSpec-parameterized suite
+    expected_preflight: "suite_timeout"
+    expected_preflight_basis: "phase0_probes"
     repo_url: "eval-repos/caffeine"
     commit_hash: "211dd547b743bcfc81cde2f9391441b6c22b806e"
     parent_hash: "3c5dfc952f299009b32d3b83c2eb7d8b85892e1c"

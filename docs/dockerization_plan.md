@@ -751,15 +751,27 @@ Checks, in order. The first failure ends preflight:
 
 | Check | What it does | Typical reason codes |
 |---|---|---|
-| P1 Environment | Static checks: wrapper present, Gradle version parsed, no Lombok/MapStruct, no `com.android.*`. Then a short Gradle probe (an init script that only reports, no compile) gives each subproject's source level, release, and toolchain; check that the runtime and toolchain JDKs are available and the source level is ≤ 21 | `build_tool_unsupported`, `gradle_too_old`, `jdk_unavailable`, `source_level_unsupported`, `processor_unsupported` |
+| P1 Environment | Static checks: wrapper present, Gradle version parsed, no Lombok/MapStruct, no `com.android.*`. Then a short Gradle probe (an init script that only reports, no compile) gives each subproject's source level, release, and toolchain; check that the runtime and toolchain JDKs are available and the source level is ≤ 21. The source level is the first of the compile task's `release`, a `--release` in its `compilerArgs`, and its `sourceCompatibility`; after P2 it is confirmed from the class-file version the compile produced | `build_tool_unsupported`, `gradle_too_old`, `gradle_runtime_unsupported`, `jdk_unavailable`, `source_level_unsupported`, `processor_unsupported` |
 | P2 Baseline compile | `compileJava` and `compileTestJava` at C-1 with no init script | `baseline_compile_failed` |
-| P3 Integration compile | The same tasks with the init script and a fixed probe lattice (`ProbeTop` / `ProbeBottom`, jar built with `--release 8`, as in production) | `qualifier_jar_version`, `module_mode`, `werror_interaction`, `foreign_compiler_plugin` |
-| P4 Probe annotation | In a scratch copy, add one `@ProbeTop` to a field or parameter in one main file and one test file; compile main and test | `qualifier_not_on_classpath` |
-| P5 Checker run | Run `checkerPass` twice: on the probe-annotated tree (must finish without a crash, with the checker invoked), then with one deliberately ill-typed assignment (must report exactly one error at the expected location) | `checker_crash`, `checker_silent`, `diagnostics_unparsed` |
+| P3 Integration compile | The same tasks with the init script and a fixed probe lattice (`ProbeTop` / `ProbeBottom`, jar built with `--release 8`, as in production) | `qualifier_jar_version`, `module_mode`, `werror_interaction`, `foreign_compiler_plugin`, `init_script_failure` |
+| P4 Probe annotation | In a scratch worktree, add a new probe-annotated file to an existing package of the main and of the test sources; compile main and test | `qualifier_not_on_classpath` |
+| P5 Checker run | Run `checkerPass` twice: on the probe-annotated tree (must finish without a crash, with the checker invoked), then with one deliberately ill-typed assignment (must report exactly one error at the expected location) | `checker_crash`, `checker_jdk_unsupported`, `checker_silent`, `checker_misreport`, `diagnostics_unparsed` |
 | P6 Test harness | Run one test class with the probe jar on the classpath; JUnit XML must appear | `test_xml_missing`, `test_requires_docker` |
+| P7 Full suite | Run the full test task at clean C-1 with the init script, under the pipeline's build timeout. Application and verification both run the full suite, so a repository whose suite cannot finish or already fails cannot reach a verdict. Added in Phase 0.5; `preflight.suite_check: false` skips it | `suite_timeout`, `suite_fails_at_baseline`, `test_xml_missing`, `test_requires_docker` |
 
 Any check can also end in `timeout`. A failure that matches no known pattern is
-`unknown`, and the raw log tail is kept.
+`unknown`, and the raw log tail is kept. Codes added in Phase 0.5:
+`gradle_runtime_unsupported` (Gradle cannot run on the JDK that launches it),
+`init_script_failure` (`checker.init.gradle` itself throws, as it did on
+RoaringBitmap's immutable `compilerArgs` before Phase 0), `checker_jdk_unsupported`
+(the checker's compiler fork cannot start on the toolchain JDK, for example
+JDK 8, which rejects `--add-exports`), and `checker_misreport` (the planted error
+is reported more than once or at the wrong place).
+
+Preflight runs every Gradle invocation with
+`-Porg.gradle.java.installations.auto-download=false`, so a missing toolchain
+JDK is `jdk_unavailable` on the host as it will be in Docker, instead of
+depending on what Gradle happened to download earlier.
 
 The source level comes from the build, never from configuration defaults.
 Entries without `source_compatibility` fall back to the global `"17"` in

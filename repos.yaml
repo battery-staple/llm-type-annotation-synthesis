@@ -1,3 +1,18 @@
+# Crawler targets. Entries below the "preflight-only" marker have no curated
+# benchmark yet; they exist so `pipeline preflight --manifest repos.yaml` can
+# check every eval repository (Dockerization plan, Phase 0.5).
+#
+# Preflight fields (ignored by the crawler):
+#   preflight_commit      commit to preflight; default: the default branch head
+#   preflight_test_class  existing test class run by check P6
+#   expected_preflight    prediction recorded before preflight first ran on the
+#                         repo: "pass" or the expected reason code
+#   expected_preflight_basis
+#     blind               predicted from reading the build files only, before
+#                         any harness build ran on the repository
+#     phase0_probes       informed: Phase 0's scripted probes already ran checks
+#                         P3-P5 on this repository; P1, P2, P6 and the suite
+#                         check are still predictions
 repos:
   - id: "synthetic-id-swap"
     repo_url: "eval-repos/synthetic-id-swap"
@@ -70,6 +85,108 @@ repos:
       tool: "gradle"
       wrapper_executable: "./gradlew"
       subproject: "caffeine"
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"
+
+  # --- preflight-only entries (no curated benchmark yet) -------------------
+  # Commits are the eval-repos submodule pins as of 2026-11-23.
+  - id: "picocli"
+    repo_url: "eval-repos/picocli"
+    default_branch: "main"
+    source_compatibility: "8"
+    target_compatibility: "8"
+    preflight_commit: "10509c0af89aa3254ca14ba90d9b3b7168e57994"
+    preflight_test_class: "picocli.ModelArgSpecTest"
+    expected_preflight: "pass"
+    expected_preflight_basis: "phase0_probes"
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: ""
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"
+  - id: "jobrunr"
+    repo_url: "eval-repos/jobrunr"
+    default_branch: "master"
+    source_compatibility: "8"
+    target_compatibility: "8"
+    preflight_commit: "bf1595eed646ca57f17ebe0010174697353c86e5"
+    preflight_test_class: "org.jobrunr.utils.StringUtilsTest"
+    # core's tests depend on Testcontainers (MariaDB and others).
+    expected_preflight: "test_requires_docker"
+    expected_preflight_basis: "blind"
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: "core"
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"
+  - id: "reactor-core"
+    repo_url: "eval-repos/reactor-core"
+    default_branch: "main"
+    source_compatibility: "8"
+    target_compatibility: "8"
+    preflight_commit: "c7558a44573277db75ea275c190cb4b310c8c5a0"
+    preflight_test_class: "reactor.core.publisher.FluxJustTest"
+    # Java 8 toolchain: the checker fork's --add-exports flags do not exist on JDK 8.
+    expected_preflight: "checker_jdk_unsupported"
+    expected_preflight_basis: "blind"
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: "reactor-core"
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"
+  - id: "wiremock"
+    repo_url: "eval-repos/wiremock"
+    default_branch: "master"
+    source_compatibility: "17"
+    target_compatibility: "17"
+    preflight_commit: "a40bfdca121919102bc78d395b7df552a18baf56"
+    preflight_test_class: "com.github.tomakehurst.wiremock.stubbing.JsonTest"
+    # The root project holds the 320 test classes (wiremock-core has none).
+    expected_preflight: "suite_timeout"
+    expected_preflight_basis: "blind"
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: ""
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"
+  - id: "resilience4j"
+    repo_url: "eval-repos/resilience4j"
+    default_branch: "master"
+    source_compatibility: "21"
+    target_compatibility: "21"
+    preflight_commit: "aa9aacb8cb5333f2dee2590ff07f05f2c942d602"
+    preflight_test_class: "io.github.resilience4j.circuitbreaker.CircuitBreakerConfigTest"
+    expected_preflight: "pass"
+    expected_preflight_basis: "blind"
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: "resilience4j-circuitbreaker"
+      compile_task: "compileJava"
+      test_task: "test"
+      checker_task: "checkerPass"
+  - id: "jsonpath"
+    repo_url: "eval-repos/JsonPath"
+    default_branch: "master"
+    source_compatibility: "17"
+    target_compatibility: "17"
+    preflight_commit: "62a4c9f0f65ba3f625aa0867d64c528ba72d09ec"
+    preflight_test_class: "com.jayway.jsonpath.JsonProviderTest"
+    expected_preflight: "pass"
+    expected_preflight_basis: "blind"
+    build:
+      tool: "gradle"
+      wrapper_executable: "./gradlew"
+      subproject: "json-path"
       compile_task: "compileJava"
       test_task: "test"
       checker_task: "checkerPass"
