@@ -40,7 +40,9 @@ data class PipelineRunOutcome(
      * incomplete/verification-missing summary.
      */
     val stoppedAfter: StageName? = null,
-    val limitSkipped: Boolean = false
+    val limitSkipped: Boolean = false,
+    /** Preflight reason code when the repository is outside the supported envelope. */
+    val unsupportedReason: String? = null
 )
 
 /**
@@ -66,7 +68,9 @@ class PipelineOrchestrator(
     private val stopAfter: StageName? = null,
     /** Where live (in-progress) agent transcripts are streamed for the run viewer. */
     private val transcriptStreamRoot: File = TranscriptStreams.defaultRoot(),
-    private val transcriptStreamMaxAge: Duration = Duration.ofDays(14)
+    private val transcriptStreamMaxAge: Duration = Duration.ofDays(14),
+    /** Build-integration preflight between ingestion and triage; skipped when null or disabled. */
+    private val preflight: PipelineStage<PreflightInput, PreflightReport>? = null
 ) {
     init {
         TranscriptStreams.sweep(transcriptStreamRoot, transcriptStreamMaxAge)
@@ -111,7 +115,8 @@ class PipelineOrchestrator(
                 sourceCompatibility = target.sourceCompatibility,
                 targetCompatibility = target.targetCompatibility,
                 productionRoots = target.productionRoots,
-                testRoots = target.testRoots
+                testRoots = target.testRoots,
+                preflightTestClass = target.preflightTestClass?.let { Fqcn(it) }
             ) to meta
         }
         val results = BatchScheduler(config.triage.jobs).run(entries) { (entry, meta) ->
@@ -133,8 +138,11 @@ class PipelineOrchestrator(
             val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash))
                 ?: return@withRunHandling finishDiscarded(runId, "triage preconditions failed during ingestion")
             stopIfDue(runId, StageName.INGESTION)?.let { return@withRunHandling it }
+            runPreflight(runId, baseCtx, entry, worktree, worktreeBase, listOf(entry.regressionTest.testClass))
+                ?.let { return@withRunHandling it }
+            stopIfDue(runId, StageName.PREFLIGHT)?.let { return@withRunHandling it }
             val sample = stageOrDiscard(
-                baseCtx, 2, triage,
+                baseCtx, 3, triage,
                 ManifestTriageInput(entry.benchmarkId, worktree, entry.regressionTest, entry.testPatchFile)
             ) ?: return@withRunHandling finishDiscarded(runId, "triage discarded the sample")
 
@@ -168,8 +176,11 @@ class PipelineOrchestrator(
             val worktree = stageOrDiscard(baseCtx, 1, ingestion, IngestionInput(entry.benchmarkId, entry.repoUrl, entry.commitHash, entry.parentHash, mirror))
                 ?: return@withRunHandling finishDiscarded(runId, "triage preconditions failed during ingestion")
             stopIfDue(runId, StageName.INGESTION)?.let { return@withRunHandling it }
+            runPreflight(runId, baseCtx, entry, worktree, worktreeBase, emptyList(), mirror)
+                ?.let { return@withRunHandling it }
+            stopIfDue(runId, StageName.PREFLIGHT)?.let { return@withRunHandling it }
             val sample = stageOrDiscard(
-                baseCtx, 2, autoTriage,
+                baseCtx, 3, autoTriage,
                 AutomatedTriageInput(entry.benchmarkId, worktree, meta)
             ) ?: return@withRunHandling finishDiscarded(runId, "automated triage discarded the sample")
 
@@ -187,14 +198,18 @@ class PipelineOrchestrator(
         resolvedMirror: File? = null
     ) {
         if (outcome.haltMessage != null || outcome.discarded || outcome.stoppedAfter != null) return
-        if (!outcome.limitSkipped && outcome.result.verdict == EvalVerdict.VERIFICATION_MISSING) return
+        // Unsupported runs are cleaned up too: their evidence is the preflight
+        // bundle in the CAS, and corpus runs would otherwise keep one worktree
+        // set per rejected repository.
+        if (!outcome.limitSkipped && outcome.unsupportedReason == null &&
+            outcome.result.verdict == EvalVerdict.VERIFICATION_MISSING) return
         runCatching {
             val mirror = resolvedMirror ?: run {
                 val name = File(entry.repoUrl).name.removeSuffix(".git")
                 Git.mirrorPath(config.paths.evalRepos(), name).takeIf { it.exists() }
             }
             var worktreesUnregistered = true
-            listOf("ingestion", "application", "repair", "verification").forEach { name ->
+            listOf("ingestion", "preflight", "application", "repair", "verification").forEach { name ->
                 val worktree = worktreeBase.resolve(name)
                 if (worktree.exists() && mirror == null) {
                     worktreesUnregistered = false
@@ -325,7 +340,7 @@ class PipelineOrchestrator(
 
         val productionDiff = productionDiff(entry)
         val lattice = requireStage(
-            baseCtx, 3, synthesis,
+            baseCtx, 4, synthesis,
             SynthesisInput(entry.toBugContext(commitDiff = productionDiff))
         )
         stopIfDue(runId, StageName.SYNTHESIS)?.let { return it }
@@ -333,7 +348,7 @@ class PipelineOrchestrator(
         val applicationWorktree = worktreeBase.resolve("application")
         materializeC1(entry, applicationWorktree, resolvedMirror)
         val annotated = requireStage(
-            baseCtx, 4, application,
+            baseCtx, 5, application,
             ApplicationInput(ApplicationTarget(sample.parentHash, applicationWorktree), lattice)
         )
         stopIfDue(runId, StageName.APPLICATION)?.let { return it }
@@ -349,7 +364,7 @@ class PipelineOrchestrator(
             throw StageHaltException("failed to apply annotations.patch to repair baseline: ${apply.output.take(2000)}")
         }
         val repaired = requireStage(
-            baseCtx, 5, repair,
+            baseCtx, 6, repair,
             RepairInput(
                 BlindRepairTarget(sample.parentHash, repairWorktree),
                 lattice.toCheckerConfig(),
@@ -362,7 +377,7 @@ class PipelineOrchestrator(
         val verificationWorktree = worktreeBase.resolve("verification")
         materializeC1(entry, verificationWorktree, resolvedMirror)
         val result = requireStage(
-            baseCtx, 6, verification,
+            baseCtx, 7, verification,
             VerificationInput(
                 sample,
                 repaired,
@@ -377,6 +392,52 @@ class PipelineOrchestrator(
         database.recordVerdict(runId, result.verdict)
         logger.info { "Run $runId completed with verdict ${result.verdict}" }
         return PipelineRunOutcome(runId, result)
+    }
+
+    /**
+     * Runs preflight on clean C-1 and records its outcome. Returns the run's
+     * final outcome when the repository is unsupported, and null to continue.
+     */
+    private suspend fun runPreflight(
+        runId: RunId,
+        baseCtx: RunContext,
+        entry: BenchmarkEntry,
+        worktree: IngestionWorktree,
+        worktreeBase: File,
+        testClassCandidates: List<Fqcn>,
+        resolvedMirror: File? = null
+    ): PipelineRunOutcome? {
+        val stage = preflight ?: return null
+        if (!config.preflight.enabled) return null
+        val input = PreflightInput(
+            benchmarkId = entry.benchmarkId,
+            ingestion = worktree,
+            mirror = resolveMirror(entry, resolvedMirror),
+            worktreeDir = worktreeBase.resolve("preflight"),
+            configuredSourceLevel = entry.sourceCompatibility,
+            testClasses = listOfNotNull(entry.preflightTestClass) + testClassCandidates
+        )
+        val key = stage.computeCacheKey(baseCtx.copy(stepNumber = 2, stageName = StageName.PREFLIGHT), input)
+        val cacheHit = config.cache.enabled && cas.lookup(StageName.PREFLIGHT, key) != null
+        val report = requireStage(baseCtx, 2, stage, input)
+        database.recordPreflight(
+            pipeline.db.PreflightResultRecord(
+                preflightId = UUID.randomUUID().toString(),
+                runId = runId,
+                benchmarkId = entry.benchmarkId.canonical,
+                commitHash = entry.commitHash.hash,
+                parentCommit = entry.parentHash.hash,
+                report = report,
+                cacheHit = cacheHit,
+                logPath = cas.stageDir(StageName.PREFLIGHT).resolve(report.cacheKey)
+                    .resolve(PreflightStage.LOGS_DIR).path
+            )
+        )
+        if (report.passed) return null
+        database.finishRun(runId, UNSUPPORTED_STATUS)
+        val message = "unsupported: ${report.failedCheck} ${report.reasonCode}: ${report.message.take(500)}"
+        logger.info { "Run $runId $message" }
+        return PipelineRunOutcome(runId, incompleteResult(runId, message), unsupportedReason = report.reasonCode)
     }
 
     private suspend fun finishDiscarded(runId: RunId, message: String): PipelineRunOutcome {
@@ -638,11 +699,13 @@ class PipelineOrchestrator(
     }
 
     private fun materializeC1(entry: BenchmarkEntry, destination: File, resolvedMirror: File? = null) {
-        val evalRepos = config.paths.evalRepos()
-        val repoName = File(entry.repoUrl).name.removeSuffix(".git")
-        val mirror = resolvedMirror ?: Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
-        Git.addWorktree(mirror, destination, entry.parentHash.hash)
+        Git.addWorktree(resolveMirror(entry, resolvedMirror), destination, entry.parentHash.hash)
     }
+
+    private fun resolveMirror(entry: BenchmarkEntry, resolvedMirror: File?): File =
+        resolvedMirror ?: Git.ensureMirror(
+            entry.repoUrl, config.paths.evalRepos(), File(entry.repoUrl).name.removeSuffix(".git")
+        )
 
     private fun productionDiff(entry: BenchmarkEntry): String {
         val repo = resolveMetadataRepo(entry)
@@ -710,7 +773,11 @@ class PipelineOrchestrator(
          * did pass triage.
          */
         internal fun countsAsVerified(outcome: PipelineRunOutcome): Boolean =
-            !outcome.discarded && outcome.stoppedAfter != StageName.INGESTION
+            !outcome.discarded && outcome.unsupportedReason == null &&
+                outcome.stoppedAfter != StageName.INGESTION && outcome.stoppedAfter != StageName.PREFLIGHT
+
+        /** `evaluation_runs.status` of a run whose repository failed preflight. */
+        const val UNSUPPORTED_STATUS = "unsupported"
 
         /**
          * Keeps only the diff blocks that touch at least one production path.

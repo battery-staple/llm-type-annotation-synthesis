@@ -27,6 +27,7 @@ import pipeline.stages.AutomatedTriageStage
 import pipeline.stages.BenchmarkEntry
 import pipeline.stages.IngestionStage
 import pipeline.stages.ManifestTriageStage
+import pipeline.stages.PreflightStage
 import pipeline.stages.RepairStage
 import pipeline.stages.StageName
 import pipeline.stages.SynthesisStage
@@ -72,13 +73,27 @@ private fun checkRepoClean(benchmarkRepo: File) {
     }
 }
 
+/**
+ * Preflight never lets Gradle download a toolchain, so a missing JDK is
+ * `jdk_unavailable` on the host as it will be in a container.
+ */
+internal const val NO_TOOLCHAIN_DOWNLOAD = "-Porg.gradle.java.installations.auto-download=false"
+
+/** Gradle runners for one build configuration, sharing one build semaphore. */
+internal class Runners(config: ProjectConfig, section: pipeline.config.BuildSection, source: String, target: String) {
+    private val builds = Semaphore(config.concurrency.builds)
+    val build = GradleBuildRunner(config, section, source, target, builds)
+    val preflight = GradleBuildRunner(config, section, source, target, builds, listOf(NO_TOOLCHAIN_DOWNLOAD))
+}
+
 private fun buildOrchestrator(
     config: ProjectConfig,
-    buildRunner: GradleBuildRunner,
+    runners: Runners,
     db: SQLiteDatabaseManager,
     cas: CasEngine,
     stopAfter: StageName? = null
 ): PipelineOrchestrator {
+    val buildRunner = runners.build
     val openCodeDb = OpenCodeDb.prepare()
     val agentRunner = CoroutineOpenCodeRunner(databasePath = openCodeDb?.absolutePath, concurrency = Semaphore(config.concurrency.agents))
     val javac = JavacRunner()
@@ -93,7 +108,8 @@ private fun buildOrchestrator(
         database = db,
         config = config,
         automatedTriage = AutomatedTriageStage(OpenCodeSingleShotLlmClient(agentRunner = agentRunner), buildRunner),
-        stopAfter = stopAfter
+        stopAfter = stopAfter,
+        preflight = PreflightStage(runners.preflight, javac)
     )
 }
 
@@ -214,8 +230,8 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                 val target = pipeline.config.CrawlerManifestLoader.resolve(targets, benchmark)
                     ?: error("Repo '$benchmark' not found in ${crawlerFile.path}; known ids: ${targets.joinToString { it.benchmarkId.canonical }}")
                 checkRepoClean(File(target.repoUrl))
-                val buildRunner = GradleBuildRunner(config, target.build, target.sourceCompatibility, target.targetCompatibility, Semaphore(config.concurrency.builds))
-                val orchestrator = buildOrchestrator(config, buildRunner, db, cas, stopAfterStage)
+                val runners = Runners(config, target.build, target.sourceCompatibility, target.targetCompatibility)
+                val orchestrator = buildOrchestrator(config, runners, db, cas, stopAfterStage)
                 val outcomes = orchestrator.crawlAndRun(target, seed)
                 outcomes.forEach { printOutcome(it) }
             } else {
@@ -224,8 +240,8 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                 val entry = BenchmarkManifestLoader.resolve(entries, benchmark)
                     ?: error("Benchmark '$benchmark' not found in ${manifestFile.path}; known ids: ${entries.joinToString { it.benchmarkId.canonical }}")
                 checkRepoClean(File(entry.repoUrl))
-                val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility, Semaphore(config.concurrency.builds))
-                val orchestrator = buildOrchestrator(config, buildRunner, db, cas, stopAfterStage)
+                val runners = Runners(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
+                val orchestrator = buildOrchestrator(config, runners, db, cas, stopAfterStage)
                 val outcome = orchestrator.runSingleSample(entry, seed)
                 printOutcome(outcome)
             }
@@ -246,6 +262,7 @@ class VerifyBenchmarkCommand : CliktCommand(name = "verify-benchmark", help = "V
 
 internal fun lifecycleStatus(outcome: PipelineRunOutcome): String = when {
     outcome.limitSkipped -> "triage_only"
+    outcome.unsupportedReason != null -> PipelineOrchestrator.UNSUPPORTED_STATUS
     outcome.stoppedAfter != null -> "stopped"
     outcome.discarded -> "discarded"
     outcome.haltMessage != null -> "failed"
@@ -263,6 +280,9 @@ private fun printOutcome(outcome: PipelineRunOutcome) {
     if (outcome.stoppedAfter != null) {
         println("stopped_after:             ${outcome.stoppedAfter.identifier}")
     }
+    if (outcome.unsupportedReason != null) {
+        println("unsupported_reason:        ${outcome.unsupportedReason}")
+    }
     if (!outcome.limitSkipped) println("evaluation_verdict:        ${r.verdict.name.lowercase()}")
     println("regression_test_passed:    ${r.regressionTestPassed ?: "unknown"}")
     println("original_tests_passed:     ${r.originalTestsPassed ?: "unknown"}")
@@ -275,13 +295,13 @@ private fun printOutcome(outcome: PipelineRunOutcome) {
 
 class PipelineCli : CliktCommand(name = "pipeline") {
     override fun run() {
-        println("Use one of: init, run, verify-benchmark")
+        println("Use one of: init, run, verify-benchmark, preflight")
     }
 }
 
 fun main(args: Array<String>) {
     RuntimeCleanup.startup()
     PipelineCli()
-        .subcommands(InitCommand(), RunCommand(), VerifyBenchmarkCommand())
+        .subcommands(InitCommand(), RunCommand(), VerifyBenchmarkCommand(), PreflightCommand())
         .main(args)
 }

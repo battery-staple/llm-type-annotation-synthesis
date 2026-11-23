@@ -1,0 +1,11 @@
+package @@PACKAGE@@;
+
+final class LltasProbe {
+    private LltasProbe() {}
+
+    static @lltas.probe.ProbeTop String id(@lltas.probe.ProbeTop String value) {
+        return value;
+    }
+
+    // LLTAS_PLANT
+}

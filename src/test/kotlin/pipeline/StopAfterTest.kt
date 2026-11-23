@@ -94,6 +94,8 @@ class StopAfterTest {
         assertTrue(PipelineOrchestrator.countsAsVerified(stoppedOutcome(StageName.TRIAGE)))
         assertTrue(PipelineOrchestrator.countsAsVerified(stoppedOutcome(StageName.SYNTHESIS)))
         assertFalse(PipelineOrchestrator.countsAsVerified(stoppedOutcome(StageName.INGESTION)))
+        assertFalse(PipelineOrchestrator.countsAsVerified(stoppedOutcome(StageName.PREFLIGHT)))
+        assertFalse(PipelineOrchestrator.countsAsVerified(outcome(unsupportedReason = "module_mode")))
         assertFalse(PipelineOrchestrator.countsAsVerified(outcome(discarded = true, haltMessage = "bad test patch")))
     }
 
@@ -123,6 +125,22 @@ class StopAfterTest {
     }
 
     @Test
+    fun `preflight runs between ingestion and triage`() {
+        val order = StageName.entries
+        assertEquals(order.indexOf(StageName.INGESTION) + 1, order.indexOf(StageName.PREFLIGHT))
+        assertEquals(order.indexOf(StageName.PREFLIGHT) + 1, order.indexOf(StageName.TRIAGE))
+        assertEquals(StageName.PREFLIGHT, parseStopAfter("preflight"))
+    }
+
+    @Test
+    fun `unsupported repository has its own lifecycle and no verdict`() {
+        val outcome = outcome(unsupportedReason = "suite_timeout")
+        assertEquals("unsupported", lifecycleStatus(outcome))
+        assertEquals(PipelineOrchestrator.UNSUPPORTED_STATUS, lifecycleStatus(outcome))
+        assertEquals(EvalVerdict.VERIFICATION_MISSING, outcome.result.verdict)
+    }
+
+    @Test
     fun `discarded and failed runs keep their lifecycle labels`() {
         assertEquals("discarded", lifecycleStatus(outcome(discarded = true, haltMessage = "bad test patch")))
         assertEquals("failed", lifecycleStatus(outcome(haltMessage = "stage halted")))
@@ -135,7 +153,8 @@ class StopAfterTest {
         discarded: Boolean = false,
         haltMessage: String? = null,
         stoppedAfter: StageName? = null,
-        limitSkipped: Boolean = false
+        limitSkipped: Boolean = false,
+        unsupportedReason: String? = null
     ) = PipelineRunOutcome(
         runId = RunId("run-stop-after-test"),
         result = VerificationResult(
@@ -150,6 +169,7 @@ class StopAfterTest {
         discarded = discarded,
         haltMessage = haltMessage,
         stoppedAfter = stoppedAfter,
-        limitSkipped = limitSkipped
+        limitSkipped = limitSkipped,
+        unsupportedReason = unsupportedReason
     )
 }

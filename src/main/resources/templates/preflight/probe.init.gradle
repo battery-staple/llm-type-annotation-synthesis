@@ -1,0 +1,95 @@
+// Preflight check P1: reports how the build is configured, without compiling.
+//
+// Writes a JSON report about the target project (LLTAS_PREFLIGHT_PROJECT, a
+// Gradle project path) to LLTAS_PREFLIGHT_REPORT once every project has been
+// evaluated. Every read is guarded: this script must never fail the build, so
+// a value it cannot read is reported as null with the error message.
+import groovy.json.JsonOutput
+
+def guarded = { Closure<Object> read ->
+    try {
+        return [value: read.call(), error: null]
+    } catch (Throwable t) {
+        def cause = t
+        while (cause.cause != null && cause.cause != cause) cause = cause.cause
+        return [value: null, error: "${t.class.name}: ${t.message}; cause: ${cause.class.name}: ${cause.message}".toString()]
+    }
+}
+
+// The level a compile task's sources are compiled at: `release`, then a
+// `--release` in compilerArgs (Agrona), then sourceCompatibility.
+def argsRelease = { List args ->
+    def strings = args.collect { it.toString() }
+    def i = strings.indexOf('--release')
+    if (i >= 0 && i + 1 < strings.size()) return strings[i + 1]
+    def joined = strings.find { it.startsWith('--release=') }
+    return joined?.substring('--release='.length())
+}
+
+def compileInfo = { task ->
+    if (task == null) return null
+    def release = guarded { task.options.release.getOrNull()?.toString() }
+    def args = guarded { argsRelease(task.options.compilerArgs) }
+    def toolchain = guarded { task.javaCompiler.getOrNull()?.metadata?.languageVersion?.asInt()?.toString() }
+    return [
+        name               : task.name,
+        release            : release.value,
+        args_release       : args.value,
+        source_compat      : guarded { task.sourceCompatibility?.toString() }.value,
+        target_compat      : guarded { task.targetCompatibility?.toString() }.value,
+        toolchain_version  : toolchain.value,
+        toolchain_error    : toolchain.error,
+        destination_dir    : guarded { task.destinationDirectory.get().asFile.absolutePath }.value,
+        source_files       : guarded { task.source.files.findAll { it.name.endsWith('.java') }.size() }.value,
+    ]
+}
+
+gradle.projectsEvaluated { g ->
+    def out = System.getenv('LLTAS_PREFLIGHT_REPORT')
+    if (out == null || out.trim().isEmpty()) return
+    def path = System.getenv('LLTAS_PREFLIGHT_PROJECT') ?: ':'
+    def report = [
+        gradle_version     : g.gradleVersion,
+        runtime_jdk        : System.getProperty('java.version'),
+        runtime_jdk_home   : System.getProperty('java.home'),
+        project_path       : path,
+        project_found      : false,
+    ]
+    def project = g.rootProject.findProject(path)
+    if (project != null) {
+        report.project_found = true
+        report.java_plugin = project.plugins.hasPlugin('java')
+        report.android = project.plugins.any { it.class.name.startsWith('com.android.') }
+        report.kotlin = project.plugins.any { it.class.name.startsWith('org.jetbrains.kotlin') }
+        report.error_prone = project.plugins.any { it.class.name.startsWith('net.ltgt.gradle.errorprone') }
+        report.processors = guarded {
+            project.configurations
+                .matching { it.name in ['annotationProcessor', 'compileOnly'] }
+                .collectMany { it.dependencies }
+                .collect { "${it.group}:${it.name}".toString() }
+                .unique()
+        }.value ?: []
+        if (report.java_plugin) {
+            def java = project.extensions.findByType(org.gradle.api.plugins.JavaPluginExtension)
+            report.java_source_compat = guarded { java?.sourceCompatibility?.toString() }.value
+            report.java_toolchain = guarded { java?.toolchain?.languageVersion?.getOrNull()?.asInt()?.toString() }.value
+            report.main_src_dirs = guarded {
+                project.sourceSets.main.java.srcDirs.collect { it.absolutePath }
+            }.value ?: []
+            report.test_src_dirs = guarded {
+                project.sourceSets.test.java.srcDirs.collect { it.absolutePath }
+            }.value ?: []
+            report.compile = compileInfo(project.tasks.findByName('compileJava'))
+            report.compile_test = compileInfo(project.tasks.findByName('compileTestJava'))
+            def test = project.tasks.findByName('test')
+            if (test != null) {
+                def launcher = guarded { test.javaLauncher.getOrNull()?.metadata?.languageVersion?.asInt()?.toString() }
+                report.test_toolchain_version = launcher.value
+                report.test_toolchain_error = launcher.error
+            }
+        }
+    }
+    def file = new File(out)
+    file.parentFile?.mkdirs()
+    file.text = JsonOutput.prettyPrint(JsonOutput.toJson(report))
+}

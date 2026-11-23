@@ -23,6 +23,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "viewer"
 
 STAGE_ORDER = [
     "ingestion",
+    "preflight",
     "triage",
     "synthesis",
     "application",
@@ -1037,6 +1038,7 @@ def extract_key_config(config: dict[str, Any], run_row: dict[str, Any]) -> dict[
 def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
     with connect_db(db_path) as conn:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(evaluation_runs)").fetchall()}
+        preflight_cols = preflight_columns(conn)
         batch_col = "r.batch_id" if "batch_id" in cols else "NULL AS batch_id"
         owner_col = "r.owner_pid" if "owner_pid" in cols else "NULL AS owner_pid"
         runs = rows_to_dicts(
@@ -1070,6 +1072,7 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
                     c.discard_reason,
                     c.regression_test_class,
                     c.regression_test_method,
+                    {preflight_cols},
                     repo.name AS repo_name
                 FROM evaluation_runs r
                 LEFT JOIN v_evaluation_verdicts v ON r.run_id = v.run_id
@@ -1159,10 +1162,26 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
         return result
 
 
+def preflight_columns(conn: sqlite3.Connection) -> str:
+    """Latest preflight reason code and failed check per run; NULL on databases from before preflight."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='preflight_results'"
+    ).fetchone()
+    if not exists:
+        return "NULL AS preflight_reason, NULL AS preflight_check, NULL AS preflight_message"
+    latest = "FROM preflight_results p WHERE p.run_id = r.run_id ORDER BY p.created_at DESC LIMIT 1"
+    return (
+        f"(SELECT p.reason_code {latest}) AS preflight_reason, "
+        f"(SELECT p.failed_check {latest}) AS preflight_check, "
+        f"(SELECT p.message {latest}) AS preflight_message"
+    )
+
+
 def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str) -> dict[str, Any] | None:
     with connect_db(db_path) as conn:
+        preflight_cols = preflight_columns(conn)
         run_row = conn.execute(
-            """
+            f"""
             SELECT
                 r.*,
                 v.verdict,
@@ -1190,7 +1209,8 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
                 c.compiler_error_log AS commit_compiler_error_log,
                 repo.name AS repo_name,
                 repo.git_url,
-                repo.default_branch
+                repo.default_branch,
+                {preflight_cols}
             FROM evaluation_runs r
             LEFT JOIN v_evaluation_verdicts v ON r.run_id = v.run_id
             LEFT JOIN commits c ON r.commit_hash = c.commit_hash

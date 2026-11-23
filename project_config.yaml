@@ -101,6 +101,14 @@ cache:
   stages_dir: ".cache/stages"
   enabled: true
 
+# Build-integration preflight between ingestion and triage (no LLM calls).
+# A repository outside the supported envelope ends with lifecycle status
+# `unsupported` and a reason code (docs/dockerization_plan.md, section 7.3).
+preflight:
+  enabled: true
+  # P7: run the full test task at clean C-1 under the build timeout.
+  suite_check: true
+
 verification:
   scope: "full_suite"
   baseline: "none"

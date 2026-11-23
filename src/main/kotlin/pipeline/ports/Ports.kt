@@ -175,6 +175,23 @@ interface BuildRunner {
     ): CheckerResult
 }
 
+/**
+ * Arbitrary Gradle invocations for preflight, which runs task lists and probe
+ * init scripts that the stage-specific [BuildRunner] calls do not cover.
+ * [tasks] are passed to Gradle verbatim (callers qualify project paths); a
+ * non-null [checker] adds the harness init script and environment exactly as
+ * [BuildRunner.compile] does, and [extraEnv] overrides that environment.
+ */
+interface GradleTaskRunner {
+    suspend fun runTasks(
+        worktreeDir: File,
+        tasks: List<String>,
+        checker: CheckerConfig? = null,
+        extraInitScripts: List<File> = emptyList(),
+        extraEnv: Map<String, String> = emptyMap()
+    ): BuildResult
+}
+
 // Port 4: In-Process Compiler & Packaging
 data class JavacDiagnostic(
     val kind: String,
@@ -222,4 +239,7 @@ interface DatabasePort {
         stageAttemptNumber: Int? = null,
         internalAttemptNumber: Int? = null
     ): List<DiscardedAttemptRecord>
+
+    /** Records one preflight outcome; a no-op for stores that do not keep them. */
+    suspend fun recordPreflight(result: pipeline.db.PreflightResultRecord) {}
 }

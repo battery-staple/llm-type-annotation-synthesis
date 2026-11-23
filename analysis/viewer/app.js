@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const STAGE_ORDER = ["ingestion", "triage", "synthesis", "application", "repair", "verification"];
+  const STAGE_ORDER = ["ingestion", "preflight", "triage", "synthesis", "application", "repair", "verification"];
   const RUN_TABS = ["stages", "config", "log"];
   const STAGE_TABS = ["overview", "patch", "transcript", "diagnostics", "tests", "guardrails"];
 
@@ -440,6 +440,18 @@
       return { key: "triage_only", kind: "triage_only", label: "not evaluated (downstream limit)", cls: "badge-muted", reasonLabel: "verified, downstream limit reached", tooltip: "Triage verified this run, but a configured downstream limit prevented evaluation. This is not a failed verification." };
     }
 
+    if (status === "unsupported" || run.outcome_kind === "unsupported") {
+      const reason = run.preflight_reason || "unknown";
+      return {
+        key: "unsupported",
+        kind: "unsupported",
+        label: "unsupported",
+        cls: "badge-muted",
+        reasonLabel: `preflight ${run.preflight_check || ""}: ${reason}`.replace("  ", " "),
+        tooltip: `Preflight found the repository outside the supported build envelope (${reason}${run.preflight_message ? ": " + run.preflight_message : ""}). It is excluded from evaluation metrics, and no LLM stage ran.`,
+      };
+    }
+
     if (status === "running") {
       return {
         key: "running",
@@ -524,6 +536,7 @@
     const status = run.status || "unknown";
 
     if (status === "triage_only") return { label: "verified · downstream limit", cls: "badge-muted", tooltip: "Triage verified the run; execution stopped at the configured downstream limit." };
+    if (status === "unsupported") return { label: "stopped at preflight", cls: "badge-muted", tooltip: "Preflight rejected the repository before triage; this is an envelope decision, not a pipeline failure." };
 
     if (status === "running") {
       return {
@@ -1516,7 +1529,7 @@
       const outcomes = runs.map((r) => deriveOutcome(r));
       const passCount = outcomes.filter((o) => o.key === "full_success" || o.key === "partial_success_regression_only").length;
       const failCount = outcomes.filter((o) => o.kind === "evaluated" && o.key !== "full_success" && o.key !== "partial_success_regression_only").length;
-      const skippedCount = outcomes.filter((o) => o.kind === "triage_skipped").length;
+      const skippedCount = outcomes.filter((o) => o.kind === "triage_skipped" || o.kind === "unsupported").length;
       const triageOnlyCount = outcomes.filter((o) => o.kind === "triage_only").length;
       const incompleteCount = outcomes.filter((o) => ["failed", "interrupted", "stopped", "unknown"].includes(o.kind)).length;
       const runningCount = outcomes.filter((o) => o.kind === "running").length;

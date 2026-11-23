@@ -36,6 +36,35 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
         }
     }
 
+    override suspend fun recordPreflight(result: PreflightResultRecord) {
+        val r = result.report
+        transaction("record_preflight") { c ->
+            c.prepareStatement(
+                """INSERT INTO preflight_results
+                   (preflight_id, run_id, benchmark_id, commit_hash, parent_commit, status, failed_check,
+                    reason_code, message, gradle_version, runtime_jdk, compile_toolchain_jdk,
+                    test_toolchain_jdk, source_level_declared, source_level_observed,
+                    source_level_configured, test_class, suite_duration_ms, suite_tests, suite_failures,
+                    backend, image_identity, duration_ms, cache_hit, cache_key, log_path, report)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+            ).use { s ->
+                var i = 0
+                fun str(v: String?) = s.setString(++i, v)
+                fun num(v: Number?) { i++; if (v == null) s.setNull(i, Types.INTEGER) else s.setLong(i, v.toLong()) }
+                str(result.preflightId); str(result.runId?.value); str(result.benchmarkId)
+                str(result.commitHash); str(result.parentCommit); str(r.status); str(r.failedCheck)
+                str(r.reasonCode); str(r.message.take(4000)); str(r.gradleVersion); str(r.runtimeJdk)
+                str(r.compileToolchainJdk); str(r.testToolchainJdk); str(r.sourceLevelDeclared)
+                str(r.sourceLevelObserved); str(r.sourceLevelConfigured); str(r.testClass)
+                num(r.suiteDurationMs); num(r.suiteTests); num(r.suiteFailures); str(r.backend)
+                str(r.imageIdentity); num(r.durationMs); num(if (result.cacheHit) 1 else 0)
+                str(r.cacheKey); str(result.logPath)
+                str(PipelineJson.compact.encodeToString(pipeline.stages.PreflightReport.serializer(), r))
+                s.executeUpdate()
+            }
+        }
+    }
+
     override suspend fun recordSubprocess(metric: SubprocessMetricRecord) {
         // The subprocess row is telemetry; don't double-commit to measure itself.
         transaction("record_subprocess", recordMetric = false) { c ->
@@ -351,7 +380,8 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
         c.prepareStatement("SELECT verdict FROM v_evaluation_verdicts WHERE run_id=?").use { s ->
             s.setString(1, runId.value)
             s.executeQuery().use { rs ->
-                if (!rs.next()) null else verdictFromString(rs.getString(1))
+                // triage_only and unsupported runs have a NULL verdict.
+                if (!rs.next()) null else rs.getString(1)?.let(::verdictFromString)
             }
         }
     }

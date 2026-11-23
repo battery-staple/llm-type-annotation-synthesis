@@ -26,7 +26,10 @@ data class BenchmarkManifestEntry(
     @SerialName("source_compatibility") val sourceCompatibility: String? = null,
     @SerialName("target_compatibility") val targetCompatibility: String? = null,
     @SerialName("production_roots") val productionRoots: List<String>? = null,
-    @SerialName("test_roots") val testRoots: List<String>? = null
+    @SerialName("test_roots") val testRoots: List<String>? = null,
+    @SerialName("preflight_test_class") val preflightTestClass: String? = null,
+    @SerialName("expected_preflight") val expectedPreflight: String? = null,
+    @SerialName("expected_preflight_basis") val expectedPreflightBasis: String? = null
 )
 
 @Serializable
@@ -34,6 +37,13 @@ data class BenchmarkManifest(val benchmarks: List<BenchmarkManifestEntry> = empt
 
 object BenchmarkManifestLoader {
     private val yaml = Yaml(configuration = YamlConfiguration(strictMode = false))
+
+    /** The raw rows, including fields only tools read (`expected_preflight`). */
+    fun rows(file: File): List<BenchmarkManifestEntry> {
+        val absolute = file.absoluteFile
+        require(absolute.isFile) { "Benchmark manifest not found: ${absolute.absolutePath}" }
+        return yaml.decodeFromString(BenchmarkManifest.serializer(), absolute.readText()).benchmarks
+    }
 
     fun load(file: File, config: ProjectConfig): List<BenchmarkEntry> {
         val absolute = file.absoluteFile
@@ -67,7 +77,8 @@ object BenchmarkManifestLoader {
                 ),
                 testRoots = pipeline.validators.SourceRoots.withDefaults(
                     row.testRoots, pipeline.validators.SourceRoots.DEFAULT_TEST_ROOTS
-                )
+                ),
+                preflightTestClass = row.preflightTestClass?.let { Fqcn(it) }
             )
         }
     }

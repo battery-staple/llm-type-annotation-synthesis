@@ -248,6 +248,18 @@ data class LlmInvocationRecord(
     val sessionIndex: Int = 1
 )
 
+/** One `preflight_results` row. [runId] is null for standalone `pipeline preflight`. */
+data class PreflightResultRecord(
+    val preflightId: String,
+    val runId: RunId?,
+    val benchmarkId: String,
+    val commitHash: String,
+    val parentCommit: String,
+    val report: pipeline.stages.PreflightReport,
+    val cacheHit: Boolean,
+    val logPath: String?,
+)
+
 data class SubprocessMetricRecord(
     val metricId: String, val runId: RunId, val stepId: String, val stage: String,
     val kind: String, val tool: String, val durationMs: Long, val exitCode: Int?,

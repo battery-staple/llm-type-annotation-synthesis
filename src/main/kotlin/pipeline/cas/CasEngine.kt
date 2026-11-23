@@ -195,7 +195,10 @@ class CasEngine(
     fun validateArtifacts(dir: File, manifest: ArtifactsManifest): Boolean {
         return manifest.artifacts.all { artifact ->
             val file = dir.resolve(artifact.path)
-            if (artifact.path == ArtifactNames.CUSTOM_QUALS_SRC_DIR) {
+            // Any registered directory (custom_quals_src, preflight_logs) is
+            // verified by its digest; only the synthesis directory was before,
+            // so a bundle with another directory never validated.
+            if (artifact.path == ArtifactNames.CUSTOM_QUALS_SRC_DIR || file.isDirectory) {
                 file.isDirectory && directoryDigest(file) == artifact.sha256.toString()
             } else {
                 file.isFile && file.length() == artifact.sizeBytes && Hashing.sha256(file) == artifact.sha256.toString()
@@ -272,6 +275,7 @@ object StageCodeFingerprint {
 
     private fun stageClassFragment(stage: StageName): String = when (stage) {
         StageName.INGESTION -> "Ingestion"
+        StageName.PREFLIGHT -> "Preflight"
         StageName.TRIAGE -> "Triage"
         StageName.SYNTHESIS -> "Synthesis"
         StageName.APPLICATION -> "Application"
@@ -294,7 +298,9 @@ object StageCodeFingerprint {
 private val CHECKER_INIT_SCRIPT_SHA: String by lazy { Hashing.sha256(pipeline.runners.CheckerInitScript.template()) }
 
 /** Stages whose Gradle invocations pass `checker.init.gradle`. */
-private val INIT_SCRIPT_STAGES = setOf(StageName.APPLICATION, StageName.REPAIR, StageName.VERIFICATION)
+private val INIT_SCRIPT_STAGES = setOf(
+    StageName.PREFLIGHT, StageName.APPLICATION, StageName.REPAIR, StageName.VERIFICATION
+)
 
 /** Deterministic cache-key construction shared by every stage. */
 object CacheKeys {

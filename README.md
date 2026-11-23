@@ -119,7 +119,36 @@ python3 analysis/inspect_cache.py
   --stop-after triage        # ingestion + triage only
 ```
 
-The run is finalized with the database lifecycle status `stopped_after_<stage>` (the CLI prints `lifecycle_status: stopped` plus the `stopped_after` line) and records no evaluation verdict. Completed stages are still published to the CAS, so re-running the same command without the flag reuses their bundles instead of repeating the work. Accepted values are `ingestion|triage|synthesis|application|repair|verification`; `verification` is the same as omitting the flag, and an unknown value is rejected with that list. A discard or halt in the named stage still ends the run as `discarded`/`failed`, regardless of the stop point.
+The run is finalized with the database lifecycle status `stopped_after_<stage>` (the CLI prints `lifecycle_status: stopped` plus the `stopped_after` line) and records no evaluation verdict. Completed stages are still published to the CAS, so re-running the same command without the flag reuses their bundles instead of repeating the work. Accepted values are `ingestion|preflight|triage|synthesis|application|repair|verification`; `verification` is the same as omitting the flag, and an unknown value is rejected with that list. A discard or halt in the named stage still ends the run as `discarded`/`failed`, regardless of the stop point.
+
+### Preflight
+
+Every run checks the build integration between ingestion and triage, before any
+LLM call (checks P1-P7 in `docs/dockerization_plan.md`, section 7.3): the
+environment and source level, a baseline compile, a compile with the harness
+init script and a fixed probe lattice, a probe-annotated compile, two checker
+runs (one must report exactly one planted error), one test class, and the full
+test suite under the build timeout. A repository outside the supported
+envelope ends with lifecycle status `unsupported` and a reason code, recorded in
+`preflight_results`, and is excluded from evaluation metrics. Results are
+cached on the build configuration, so commits that change only Java sources
+share one result. `preflight.enabled` and `preflight.suite_check` in
+`project_config.yaml` turn the stage and the full-suite check off.
+
+Preflight can also run on its own:
+
+```bash
+./build/install/pipeline/bin/pipeline preflight \
+  --config project_config.yaml \
+  --manifest benchmarks.yaml \     # or repos.yaml
+  --id jsqlparser-index-kind        # repeatable; omit for every entry
+```
+
+For a benchmark it checks the parent commit; for a `repos.yaml` entry,
+`preflight_commit` or the head of the default branch. `--skip-suite` skips the
+full suite and `--no-cache` ignores cached results. The summary compares each
+outcome with the entry's `expected_preflight` prediction. Preflight never lets
+Gradle download a toolchain, so a missing JDK is reported as `jdk_unavailable`.
 
 ### Crawler mode
 

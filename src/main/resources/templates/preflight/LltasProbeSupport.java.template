@@ -1,0 +1,9 @@
+package @@PACKAGE@@;
+
+final class LltasProbeSupport {
+    private LltasProbeSupport() {}
+
+    static @lltas.probe.ProbeTop String id(@lltas.probe.ProbeTop String value) {
+        return value;
+    }
+}

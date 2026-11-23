@@ -17,7 +17,11 @@ data class CrawlerRepoEntry(
     @SerialName("source_compatibility") val sourceCompatibility: String? = null,
     @SerialName("target_compatibility") val targetCompatibility: String? = null,
     @SerialName("production_roots") val productionRoots: List<String>? = null,
-    @SerialName("test_roots") val testRoots: List<String>? = null
+    @SerialName("test_roots") val testRoots: List<String>? = null,
+    @SerialName("preflight_commit") val preflightCommit: String? = null,
+    @SerialName("preflight_test_class") val preflightTestClass: String? = null,
+    @SerialName("expected_preflight") val expectedPreflight: String? = null,
+    @SerialName("expected_preflight_basis") val expectedPreflightBasis: String? = null
 )
 
 @Serializable
@@ -32,7 +36,11 @@ data class CrawlerRepoTarget(
     val sourceCompatibility: String,
     val targetCompatibility: String,
     val productionRoots: List<String>,
-    val testRoots: List<String>
+    val testRoots: List<String>,
+    val preflightCommit: String? = null,
+    val preflightTestClass: String? = null,
+    val expectedPreflight: String? = null,
+    val expectedPreflightBasis: String? = null
 )
 
 object CrawlerManifestLoader {
@@ -61,7 +69,11 @@ object CrawlerManifestLoader {
                 sourceCompatibility = source,
                 targetCompatibility = target,
                 productionRoots = SourceRoots.withDefaults(row.productionRoots, SourceRoots.DEFAULT_PRODUCTION_ROOTS),
-                testRoots = SourceRoots.withDefaults(row.testRoots, SourceRoots.DEFAULT_TEST_ROOTS)
+                testRoots = SourceRoots.withDefaults(row.testRoots, SourceRoots.DEFAULT_TEST_ROOTS),
+                preflightCommit = row.preflightCommit,
+                preflightTestClass = row.preflightTestClass,
+                expectedPreflight = row.expectedPreflight,
+                expectedPreflightBasis = row.expectedPreflightBasis
             )
         }
     }

@@ -15,22 +15,27 @@ import pipeline.stages.GuardrailsMode
 import pipeline.db.SubprocessMetricRecord
 
 /** Times Gradle calls and persists their outcome without affecting stage behavior. */
-class BuildMetrics(private val ctx: RunContext, private val runner: BuildRunner) {
+class BuildMetrics(private val ctx: RunContext, private val runner: BuildRunner? = null) {
     suspend fun compile(label: String, worktreeDir: File, checker: CheckerConfig? = null,
                         extraClasspath: List<File> = emptyList()): BuildResult = measured("compile", label,
-        { runner.compile(worktreeDir, checker, extraClasspath) },
+        { requireNotNull(runner).compile(worktreeDir, checker, extraClasspath) },
         { Triple(it.success, it.exitCode, it.timedOut) to if (it.success) null else it.output })
 
     suspend fun tests(label: String, worktreeDir: File, testFilter: TestCoordinate? = null,
                       checker: CheckerConfig? = null, extraClasspath: List<File> = emptyList()): TestRunResult = measured("test", label,
-        { runner.runTests(worktreeDir, testFilter, checker, extraClasspath) },
+        { requireNotNull(runner).runTests(worktreeDir, testFilter, checker, extraClasspath) },
         { Triple(it.success, it.exitCode, it.timedOut) to if (it.success) null else it.output })
 
     suspend fun checker(label: String, worktreeDir: File, checkerHome: File, customQualsJar: File,
                         processor: String, quals: List<Fqcn>, checkerCategory: CheckerCategory,
                         guardrailsMode: GuardrailsMode): CheckerResult = measured("checker", label,
-        { runner.runChecker(worktreeDir, checkerHome, customQualsJar, processor, quals, checkerCategory, guardrailsMode) },
+        { requireNotNull(runner).runChecker(worktreeDir, checkerHome, customQualsJar, processor, quals, checkerCategory, guardrailsMode) },
         { Triple(it.success, it.exitCode, it.timedOut) to if (it.success) null else "checker invocation failed" })
+
+    /** Times any other Gradle invocation, such as preflight's task lists. */
+    suspend fun task(kind: String, label: String, call: suspend () -> BuildResult): BuildResult = measured(kind, label,
+        call,
+        { Triple(it.success, it.exitCode, it.timedOut) to if (it.success) null else it.output })
 
     private suspend fun <T> measured(kind: String, label: String, call: suspend () -> T,
                                      describe: (T) -> Pair<Triple<Boolean, Int, Boolean>, String?>): T {

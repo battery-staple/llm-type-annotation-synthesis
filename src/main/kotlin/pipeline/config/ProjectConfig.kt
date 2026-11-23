@@ -186,6 +186,22 @@ data class VerificationSection(
     val baseline: String = "none"
 )
 
+/**
+ * Build-integration preflight (Dockerization plan, section 7.3). It runs between
+ * ingestion and triage; a repository outside the supported envelope ends with
+ * lifecycle status `unsupported` before any LLM call.
+ */
+@Serializable
+data class PreflightSection(
+    val enabled: Boolean = true,
+    /**
+     * Check P7: run the full test task at clean C-1 under the build timeout.
+     * Application and verification both run the full suite, so a suite that
+     * cannot finish or already fails means the run cannot reach a verdict.
+     */
+    @SerialName("suite_check") val suiteCheck: Boolean = true
+)
+
 @Serializable
 data class ProjectConfig(
     val triage: TriageSection = TriageSection(),
@@ -204,6 +220,7 @@ data class ProjectConfig(
     val prompt: PromptSection = PromptSection(),
     val cache: CacheSection = CacheSection(),
     val verification: VerificationSection = VerificationSection(),
+    val preflight: PreflightSection = PreflightSection(),
     @Transient val sourceFile: File = File("project_config.yaml")
 ) {
     companion object {

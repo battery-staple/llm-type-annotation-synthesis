@@ -33,8 +33,37 @@ class GradleBuildRunner(
     private val build: BuildSection,
     private val sourceCompatibility: String,
     private val targetCompatibility: String,
-    private val concurrency: Semaphore = Semaphore(2)
-) : BuildRunner {
+    private val concurrency: Semaphore = Semaphore(2),
+    /**
+     * Arguments added to every invocation. Preflight passes
+     * `-Porg.gradle.java.installations.auto-download=false` so a missing
+     * toolchain fails instead of being downloaded into the Gradle home.
+     */
+    private val extraGradleArgs: List<String> = emptyList()
+) : BuildRunner, pipeline.ports.GradleTaskRunner {
+
+    override suspend fun runTasks(
+        worktreeDir: File,
+        tasks: List<String>,
+        checker: CheckerConfig?,
+        extraInitScripts: List<File>,
+        extraEnv: Map<String, String>
+    ): BuildResult {
+        val env = baseEnv().toMutableMap()
+        val args = mutableListOf(build.wrapperExecutable)
+        args += tasks
+        args += listOf("--console=plain", "--stacktrace", "--no-watch-fs")
+        extraInitScripts.forEach { args += listOf("--init-script", it.absolutePath) }
+        if (checker != null) addCheckerInit(worktreeDir, checker, emptyList(), args, env)
+        env.putAll(extraEnv)
+        val result = runGradle(worktreeDir, args, env)
+        return BuildResult(
+            success = result.exitCode == 0 && !result.timedOut,
+            exitCode = result.exitCode,
+            output = result.output,
+            timedOut = result.timedOut
+        )
+    }
 
     override suspend fun compile(
         worktreeDir: File,
@@ -233,87 +262,8 @@ class GradleBuildRunner(
         env: Map<String, String>
     ): pipeline.util.ProcResult = concurrency.withPermit { withContext(Dispatchers.IO) {
         val timeoutSeconds = maxOf(60L, config.agent.timeoutMs / 1000L)
-        Processes.run(args, worktreeDir, environment = env, timeoutSeconds = timeoutSeconds)
+        Processes.run(args + extraGradleArgs, worktreeDir, environment = env, timeoutSeconds = timeoutSeconds)
     } }
-
-    private fun findTestXml(worktreeDir: File): List<File> =
-        worktreeDir.walkTopDown()
-            .filter { it.isFile && it.extension == "xml" && it.absolutePath.contains("test-results") }
-            .sortedBy { it.absolutePath }
-            .toList()
-
-    private fun parseTestXml(file: File): List<TestOutcome> {
-        val outcomes = mutableListOf<TestOutcome>()
-        val doc = runCatching {
-            val factory = DocumentBuilderFactory.newInstance()
-            factory.isNamespaceAware = false
-            factory.newDocumentBuilder().parse(file)
-        }.getOrNull() ?: return emptyList()
-        val cases = doc.getElementsByTagName("testcase")
-        for (i in 0 until cases.length) {
-            val node = cases.item(i) as? Element ?: continue
-            val suiteName = (node.parentNode as? Element)?.getAttribute("name").orEmpty()
-            val className = node.getAttribute("classname").ifEmpty { suiteName }
-            val method = node.getAttribute("name")
-            if (className.isBlank() || method.isBlank()) continue
-            val fqcn = runCatching { Fqcn(className) }.getOrNull() ?: continue
-            val timeMs = node.getAttribute("time").toDoubleOrNull()?.let { (it * 1000).toLong() } ?: 0L
-            var status = TestStatus.PASSED
-            var failureMessage: String? = null
-            val children = node.childNodes
-            for (j in 0 until children.length) {
-                val child = children.item(j) as? Element ?: continue
-                when (child.tagName) {
-                    "failure" -> {
-                        status = TestStatus.FAILED
-                        failureMessage = child.getAttribute("message").ifEmpty { child.textContent.trim() }
-                    }
-                    "error" -> {
-                        status = TestStatus.ERROR
-                        failureMessage = child.getAttribute("message").ifEmpty { child.textContent.trim() }
-                    }
-                    "skipped" -> status = TestStatus.SKIPPED
-                }
-            }
-            outcomes.add(
-                TestOutcome(
-                    testClass = fqcn,
-                    testMethod = method,
-                    status = status,
-                    durationMs = timeMs,
-                    failureMessage = failureMessage?.take(4000)
-                )
-            )
-        }
-        return outcomes
-    }
-
-    private val checkerLinePattern =
-        Regex("""^(.+\.java):(\d+):\s*(error|warning):\s*(?:\[([^\]]+)\]\s*)?(.*)$""")
-
-    private fun parseCheckerDiagnostics(output: String): List<CheckerDiagnostic> {
-        val diagnostics = mutableListOf<CheckerDiagnostic>()
-        output.lineSequence().forEach { rawLine ->
-            val line = rawLine.trim()
-            val match = checkerLinePattern.matchEntire(line) ?: return@forEach
-            val (path, row, severity, category, message) = match.destructured
-            diagnostics.add(
-                CheckerDiagnostic(
-                    filePath = path,
-                    lineNumber = row.toIntOrNull() ?: 0,
-                    columnNumber = null,
-                    severity = severity,
-                    errorCategory = category,
-                    message = message.trim()
-                )
-            )
-        }
-        // Gradle echoes failing diagnostics in the task summary and again in the
-        // build failure section; count each unique diagnostic once.
-        return diagnostics.distinctBy {
-            listOf(it.filePath, it.lineNumber, it.severity, it.errorCategory, it.message)
-        }
-    }
 }
 
 private val checkerCrashPattern =
@@ -340,4 +290,83 @@ internal fun isTestCompileFailure(exitCode: Int, noXml: Boolean, output: String)
     if (mentionsCompileFailure) return true
     if (output.contains("No tests found for given includes")) return false
     return noXml
+}
+
+internal fun findTestXml(worktreeDir: File): List<File> =
+    worktreeDir.walkTopDown()
+        .filter { it.isFile && it.extension == "xml" && it.absolutePath.contains("test-results") }
+        .sortedBy { it.absolutePath }
+        .toList()
+
+internal fun parseTestXml(file: File): List<TestOutcome> {
+    val outcomes = mutableListOf<TestOutcome>()
+    val doc = runCatching {
+        val factory = DocumentBuilderFactory.newInstance()
+        factory.isNamespaceAware = false
+        factory.newDocumentBuilder().parse(file)
+    }.getOrNull() ?: return emptyList()
+    val cases = doc.getElementsByTagName("testcase")
+    for (i in 0 until cases.length) {
+        val node = cases.item(i) as? Element ?: continue
+        val suiteName = (node.parentNode as? Element)?.getAttribute("name").orEmpty()
+        val className = node.getAttribute("classname").ifEmpty { suiteName }
+        val method = node.getAttribute("name")
+        if (className.isBlank() || method.isBlank()) continue
+        val fqcn = runCatching { Fqcn(className) }.getOrNull() ?: continue
+        val timeMs = node.getAttribute("time").toDoubleOrNull()?.let { (it * 1000).toLong() } ?: 0L
+        var status = TestStatus.PASSED
+        var failureMessage: String? = null
+        val children = node.childNodes
+        for (j in 0 until children.length) {
+            val child = children.item(j) as? Element ?: continue
+            when (child.tagName) {
+                "failure" -> {
+                    status = TestStatus.FAILED
+                    failureMessage = child.getAttribute("message").ifEmpty { child.textContent.trim() }
+                }
+                "error" -> {
+                    status = TestStatus.ERROR
+                    failureMessage = child.getAttribute("message").ifEmpty { child.textContent.trim() }
+                }
+                "skipped" -> status = TestStatus.SKIPPED
+            }
+        }
+        outcomes.add(
+            TestOutcome(
+                testClass = fqcn,
+                testMethod = method,
+                status = status,
+                durationMs = timeMs,
+                failureMessage = failureMessage?.take(4000)
+            )
+        )
+    }
+    return outcomes
+}
+
+private val checkerLinePattern =
+    Regex("""^(.+\.java):(\d+):\s*(error|warning):\s*(?:\[([^\]]+)\]\s*)?(.*)$""")
+
+internal fun parseCheckerDiagnostics(output: String): List<CheckerDiagnostic> {
+    val diagnostics = mutableListOf<CheckerDiagnostic>()
+    output.lineSequence().forEach { rawLine ->
+        val line = rawLine.trim()
+        val match = checkerLinePattern.matchEntire(line) ?: return@forEach
+        val (path, row, severity, category, message) = match.destructured
+        diagnostics.add(
+            CheckerDiagnostic(
+                filePath = path,
+                lineNumber = row.toIntOrNull() ?: 0,
+                columnNumber = null,
+                severity = severity,
+                errorCategory = category,
+                message = message.trim()
+            )
+        )
+    }
+    // Gradle echoes failing diagnostics in the task summary and again in the
+    // build failure section; count each unique diagnostic once.
+    return diagnostics.distinctBy {
+        listOf(it.filePath, it.lineNumber, it.severity, it.errorCategory, it.message)
+    }
 }

@@ -100,6 +100,7 @@ data class TestCoordinate(
 @Serializable
 enum class StageName {
     @SerialName("ingestion") INGESTION,
+    @SerialName("preflight") PREFLIGHT,
     @SerialName("triage") TRIAGE,
     @SerialName("synthesis") SYNTHESIS,
     @SerialName("application") APPLICATION,
@@ -350,6 +351,111 @@ data class IngestionWorktree(
     val repoDir: File = worktreeDir
 )
 
+/**
+ * Input of the build-integration preflight (Dockerization plan, section 7.3).
+ * [ingestion] is the clean C-1 worktree; preflight never edits it and runs in
+ * its own worktree, [worktreeDir], created from [mirror] at the parent commit.
+ */
+data class PreflightInput(
+    val benchmarkId: BenchmarkId,
+    val ingestion: IngestionWorktree,
+    val mirror: File,
+    val worktreeDir: File,
+    /** Configured Java level, compared with the level the build reports. */
+    val configuredSourceLevel: String,
+    /** Test classes P6 may run, in preference order; chosen from the test sources when none exists at C-1. */
+    val testClasses: List<Fqcn> = emptyList(),
+)
+
+/** Reason codes, the closed vocabulary of preflight failures (plan, section 7.3). */
+object PreflightReason {
+    const val BUILD_TOOL_UNSUPPORTED = "build_tool_unsupported"
+    const val GRADLE_TOO_OLD = "gradle_too_old"
+    const val GRADLE_RUNTIME_UNSUPPORTED = "gradle_runtime_unsupported"
+    const val JDK_UNAVAILABLE = "jdk_unavailable"
+    const val SOURCE_LEVEL_UNSUPPORTED = "source_level_unsupported"
+    const val PROCESSOR_UNSUPPORTED = "processor_unsupported"
+    const val BASELINE_COMPILE_FAILED = "baseline_compile_failed"
+    const val QUALIFIER_JAR_VERSION = "qualifier_jar_version"
+    const val MODULE_MODE = "module_mode"
+    const val WERROR_INTERACTION = "werror_interaction"
+    const val FOREIGN_COMPILER_PLUGIN = "foreign_compiler_plugin"
+    const val INIT_SCRIPT_FAILURE = "init_script_failure"
+    const val QUALIFIER_NOT_ON_CLASSPATH = "qualifier_not_on_classpath"
+    const val CHECKER_CRASH = "checker_crash"
+    const val CHECKER_JDK_UNSUPPORTED = "checker_jdk_unsupported"
+    const val CHECKER_SILENT = "checker_silent"
+    const val CHECKER_MISREPORT = "checker_misreport"
+    const val DIAGNOSTICS_UNPARSED = "diagnostics_unparsed"
+    const val TEST_XML_MISSING = "test_xml_missing"
+    const val TEST_REQUIRES_DOCKER = "test_requires_docker"
+    const val SUITE_TIMEOUT = "suite_timeout"
+    const val SUITE_FAILS_AT_BASELINE = "suite_fails_at_baseline"
+    const val TIMEOUT = "timeout"
+    const val UNKNOWN = "unknown"
+
+    val ALL: Set<String> = setOf(
+        BUILD_TOOL_UNSUPPORTED, GRADLE_TOO_OLD, GRADLE_RUNTIME_UNSUPPORTED, JDK_UNAVAILABLE,
+        SOURCE_LEVEL_UNSUPPORTED, PROCESSOR_UNSUPPORTED, BASELINE_COMPILE_FAILED,
+        QUALIFIER_JAR_VERSION, MODULE_MODE, WERROR_INTERACTION, FOREIGN_COMPILER_PLUGIN,
+        INIT_SCRIPT_FAILURE, QUALIFIER_NOT_ON_CLASSPATH, CHECKER_CRASH, CHECKER_JDK_UNSUPPORTED,
+        CHECKER_SILENT, CHECKER_MISREPORT, DIAGNOSTICS_UNPARSED, TEST_XML_MISSING,
+        TEST_REQUIRES_DOCKER, SUITE_TIMEOUT, SUITE_FAILS_AT_BASELINE, TIMEOUT, UNKNOWN,
+    )
+}
+
+@Serializable
+data class PreflightCheck(
+    /** P1 ... P7. */
+    val id: String,
+    /** "pass", "fail", or "skipped". */
+    val status: String,
+    @SerialName("duration_ms") val durationMs: Long = 0,
+    val detail: String = "",
+)
+
+/**
+ * Outcome of preflight. An unsupported repository is a successful preflight
+ * whose [status] is "unsupported": the result is deterministic, cached like a
+ * pass, and ends the run with lifecycle status `unsupported`.
+ */
+@Serializable
+data class PreflightReport(
+    /** "pass" or "unsupported". */
+    val status: String,
+    @SerialName("failed_check") val failedCheck: String? = null,
+    @SerialName("reason_code") val reasonCode: String? = null,
+    val message: String = "",
+    @SerialName("gradle_version") val gradleVersion: String? = null,
+    @SerialName("runtime_jdk") val runtimeJdk: String? = null,
+    @SerialName("compile_toolchain_jdk") val compileToolchainJdk: String? = null,
+    @SerialName("test_toolchain_jdk") val testToolchainJdk: String? = null,
+    @SerialName("source_level_declared") val sourceLevelDeclared: String? = null,
+    @SerialName("source_level_observed") val sourceLevelObserved: String? = null,
+    @SerialName("source_level_configured") val sourceLevelConfigured: String? = null,
+    @SerialName("test_class") val testClass: String? = null,
+    @SerialName("suite_duration_ms") val suiteDurationMs: Long? = null,
+    @SerialName("suite_tests") val suiteTests: Int? = null,
+    @SerialName("suite_failures") val suiteFailures: Int? = null,
+    @SerialName("suite_failing_tests") val suiteFailingTests: List<String> = emptyList(),
+    val backend: String = "local",
+    @SerialName("image_identity") val imageIdentity: String? = null,
+    @SerialName("duration_ms") val durationMs: Long = 0,
+    @SerialName("cache_key") val cacheKey: String = "",
+    val checks: List<PreflightCheck> = emptyList(),
+    @SerialName("log_tail") val logTail: String = "",
+) {
+    val passed: Boolean get() = status == STATUS_PASS
+
+    /** The level preflight's own checker runs use: what the build produced, else what it declares. */
+    val effectiveSourceLevel: String? get() = sourceLevelObserved ?: sourceLevelDeclared
+
+    companion object {
+        const val STATUS_PASS = "pass"
+        const val STATUS_UNSUPPORTED = "unsupported"
+    }
+}
+
 data class BenchmarkEntry(
     val benchmarkId: BenchmarkId,
     val repoUrl: String,
@@ -367,7 +473,9 @@ data class BenchmarkEntry(
     // Benchmark-specific source roots. Defaults preserve the legacy
     // src/main (production) + src/test (tests) layout.
     val productionRoots: List<String> = SourceRoots.DEFAULT_PRODUCTION_ROOTS,
-    val testRoots: List<String> = SourceRoots.DEFAULT_TEST_ROOTS
+    val testRoots: List<String> = SourceRoots.DEFAULT_TEST_ROOTS,
+    /** Existing test class preflight check P6 runs; chosen automatically when null. */
+    val preflightTestClass: Fqcn? = null
 ) {
     // `commitDiff` must already be filtered to production paths; test-file hunks,
     // the test patch, and test coordinates are intentionally not part of BugContext.

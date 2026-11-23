@@ -353,6 +353,44 @@ SELECT stage, error_class, COUNT(*) AS attempts,
        SUM(CASE WHEN will_retry=1 THEN 1 ELSE 0 END) AS retries
 FROM retry_events GROUP BY stage, error_class;
 
+-- Build-integration preflight outcomes (Dockerization plan, section 7.3).
+-- run_id is NULL for standalone `pipeline preflight`.
+CREATE TABLE IF NOT EXISTS preflight_results (
+    preflight_id TEXT PRIMARY KEY,
+    run_id TEXT,
+    benchmark_id TEXT NOT NULL,
+    commit_hash TEXT NOT NULL,
+    parent_commit TEXT NOT NULL,
+    status TEXT NOT NULL,
+    failed_check TEXT,
+    reason_code TEXT,
+    message TEXT,
+    gradle_version TEXT,
+    runtime_jdk TEXT,
+    compile_toolchain_jdk TEXT,
+    test_toolchain_jdk TEXT,
+    source_level_declared TEXT,
+    source_level_observed TEXT,
+    source_level_configured TEXT,
+    test_class TEXT,
+    suite_duration_ms INTEGER,
+    suite_tests INTEGER,
+    suite_failures INTEGER,
+    backend TEXT NOT NULL,
+    image_identity TEXT,
+    duration_ms INTEGER NOT NULL,
+    cache_hit BOOLEAN NOT NULL DEFAULT 0,
+    cache_key TEXT,
+    log_path TEXT,
+    report JSON NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_preflight_results_run ON preflight_results(run_id);
+CREATE INDEX IF NOT EXISTS idx_preflight_results_benchmark ON preflight_results(benchmark_id);
+CREATE VIEW IF NOT EXISTS v_preflight_reason_summary AS
+SELECT COALESCE(reason_code, 'pass') AS outcome, failed_check, COUNT(*) AS results
+FROM preflight_results GROUP BY COALESCE(reason_code, 'pass'), failed_check;
+
 DROP VIEW IF EXISTS v_evaluation_verdicts;
 CREATE VIEW v_evaluation_verdicts AS
 WITH latest_final_checker AS (
@@ -441,6 +479,7 @@ SELECT
     r.sample_index,
     r.status,
     CASE WHEN r.status = 'triage_only' THEN 'triage_only'
+         WHEN r.status = 'unsupported' THEN 'unsupported'
          WHEN r.status IN ('success') AND r.completed_at IS NOT NULL THEN 'evaluated'
          WHEN r.status LIKE 'stopped_after_%' THEN 'not_evaluated'
          ELSE 'not_evaluated' END AS outcome_kind,
@@ -455,6 +494,8 @@ SELECT
     COALESCE(u.skipped, 0) AS skipped_tests,
     CASE
         WHEN r.status = 'triage_only' THEN NULL
+        -- Outside the supported envelope: excluded from evaluation metrics.
+        WHEN r.status = 'unsupported' THEN NULL
         WHEN r.status <> 'success' OR r.completed_at IS NULL THEN 'verification_missing'
         WHEN fc.checker_run_id IS NULL
              OR fc.checker_invoked = 0
