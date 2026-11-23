@@ -2090,7 +2090,7 @@
     if (step.placement_guide) {
       stageSpecific += `
         <div class="card">
-          <h4>Placement Guide (<code>placement_guide.md</code>)</h4>
+          <h4><span>Placement Guide (<code>placement_guide.md</code>)</span></h4>
           <div class="md-body">${renderMarkdown(step.placement_guide)}</div>
         </div>
       `;
