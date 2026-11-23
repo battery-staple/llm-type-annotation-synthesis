@@ -745,7 +745,10 @@ it as unsupported with a reason, and it is excluded from evaluation metrics.
 
 Preflight automates the probe files used to diagnose bugs 1–4. It runs after
 ingestion and before triage, so an unsupported repository costs a few build
-minutes and no LLM tokens. It runs on either execution backend.
+minutes and no LLM tokens. It runs on either execution backend. As
+implemented, the stage is opt-in: `pipeline run --preflight` (or
+`preflight.enabled: true`) adds it, and a run without it keeps the original
+six stages and step numbers. `pipeline preflight` always runs it.
 
 Checks, in order. The first failure ends preflight:
 

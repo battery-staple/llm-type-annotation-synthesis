@@ -102,10 +102,12 @@ cache:
   enabled: true
 
 # Build-integration preflight between ingestion and triage (no LLM calls).
-# A repository outside the supported envelope ends with lifecycle status
+# Off by default; `pipeline run --preflight` turns it on for one run. A
+# repository outside the supported envelope then ends with lifecycle status
 # `unsupported` and a reason code (docs/dockerization_plan.md, section 7.3).
+# `pipeline preflight` runs it on its own regardless of this setting.
 preflight:
-  enabled: true
+  enabled: false
   # P7: run the full test task at clean C-1 under the build timeout.
   suite_check: true
 

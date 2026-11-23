@@ -76,6 +76,11 @@ class PipelineOrchestrator(
         TranscriptStreams.sweep(transcriptStreamRoot, transcriptStreamMaxAge)
     }
 
+    /** Preflight is opt-in (`pipeline run --preflight` or `preflight.enabled`). */
+    private val preflightEnabled: Boolean get() = preflight != null && config.preflight.enabled
+
+    private fun step(stage: StageName): Int = stepNumber(stage, preflightEnabled)
+
     suspend fun crawlAndRun(target: pipeline.config.CrawlerRepoTarget, sampleSeed: Int): List<PipelineRunOutcome> {
         val autoTriage = automatedTriage
             ?: throw IllegalStateException("AutomatedTriageStage is required for crawler mode")
@@ -140,9 +145,9 @@ class PipelineOrchestrator(
             stopIfDue(runId, StageName.INGESTION)?.let { return@withRunHandling it }
             runPreflight(runId, baseCtx, entry, worktree, worktreeBase, listOf(entry.regressionTest.testClass))
                 ?.let { return@withRunHandling it }
-            stopIfDue(runId, StageName.PREFLIGHT)?.let { return@withRunHandling it }
+            if (preflightEnabled) stopIfDue(runId, StageName.PREFLIGHT)?.let { return@withRunHandling it }
             val sample = stageOrDiscard(
-                baseCtx, 3, triage,
+                baseCtx, step(StageName.TRIAGE), triage,
                 ManifestTriageInput(entry.benchmarkId, worktree, entry.regressionTest, entry.testPatchFile)
             ) ?: return@withRunHandling finishDiscarded(runId, "triage discarded the sample")
 
@@ -178,9 +183,9 @@ class PipelineOrchestrator(
             stopIfDue(runId, StageName.INGESTION)?.let { return@withRunHandling it }
             runPreflight(runId, baseCtx, entry, worktree, worktreeBase, emptyList(), mirror)
                 ?.let { return@withRunHandling it }
-            stopIfDue(runId, StageName.PREFLIGHT)?.let { return@withRunHandling it }
+            if (preflightEnabled) stopIfDue(runId, StageName.PREFLIGHT)?.let { return@withRunHandling it }
             val sample = stageOrDiscard(
-                baseCtx, 3, autoTriage,
+                baseCtx, step(StageName.TRIAGE), autoTriage,
                 AutomatedTriageInput(entry.benchmarkId, worktree, meta)
             ) ?: return@withRunHandling finishDiscarded(runId, "automated triage discarded the sample")
 
@@ -340,7 +345,7 @@ class PipelineOrchestrator(
 
         val productionDiff = productionDiff(entry)
         val lattice = requireStage(
-            baseCtx, 4, synthesis,
+            baseCtx, step(StageName.SYNTHESIS), synthesis,
             SynthesisInput(entry.toBugContext(commitDiff = productionDiff))
         )
         stopIfDue(runId, StageName.SYNTHESIS)?.let { return it }
@@ -348,7 +353,7 @@ class PipelineOrchestrator(
         val applicationWorktree = worktreeBase.resolve("application")
         materializeC1(entry, applicationWorktree, resolvedMirror)
         val annotated = requireStage(
-            baseCtx, 5, application,
+            baseCtx, step(StageName.APPLICATION), application,
             ApplicationInput(ApplicationTarget(sample.parentHash, applicationWorktree), lattice)
         )
         stopIfDue(runId, StageName.APPLICATION)?.let { return it }
@@ -364,7 +369,7 @@ class PipelineOrchestrator(
             throw StageHaltException("failed to apply annotations.patch to repair baseline: ${apply.output.take(2000)}")
         }
         val repaired = requireStage(
-            baseCtx, 6, repair,
+            baseCtx, step(StageName.REPAIR), repair,
             RepairInput(
                 BlindRepairTarget(sample.parentHash, repairWorktree),
                 lattice.toCheckerConfig(),
@@ -377,7 +382,7 @@ class PipelineOrchestrator(
         val verificationWorktree = worktreeBase.resolve("verification")
         materializeC1(entry, verificationWorktree, resolvedMirror)
         val result = requireStage(
-            baseCtx, 7, verification,
+            baseCtx, step(StageName.VERIFICATION), verification,
             VerificationInput(
                 sample,
                 repaired,
@@ -407,8 +412,7 @@ class PipelineOrchestrator(
         testClassCandidates: List<Fqcn>,
         resolvedMirror: File? = null
     ): PipelineRunOutcome? {
-        val stage = preflight ?: return null
-        if (!config.preflight.enabled) return null
+        val stage = preflight?.takeIf { preflightEnabled } ?: return null
         val input = PreflightInput(
             benchmarkId = entry.benchmarkId,
             ingestion = worktree,
@@ -417,9 +421,9 @@ class PipelineOrchestrator(
             configuredSourceLevel = entry.sourceCompatibility,
             testClasses = listOfNotNull(entry.preflightTestClass) + testClassCandidates
         )
-        val key = stage.computeCacheKey(baseCtx.copy(stepNumber = 2, stageName = StageName.PREFLIGHT), input)
+        val key = stage.computeCacheKey(baseCtx.copy(stepNumber = step(StageName.PREFLIGHT), stageName = StageName.PREFLIGHT), input)
         val cacheHit = config.cache.enabled && cas.lookup(StageName.PREFLIGHT, key) != null
-        val report = requireStage(baseCtx, 2, stage, input)
+        val report = requireStage(baseCtx, step(StageName.PREFLIGHT), stage, input)
         database.recordPreflight(
             pipeline.db.PreflightResultRecord(
                 preflightId = UUID.randomUUID().toString(),
@@ -775,6 +779,16 @@ class PipelineOrchestrator(
         internal fun countsAsVerified(outcome: PipelineRunOutcome): Boolean =
             !outcome.discarded && outcome.unsupportedReason == null &&
                 outcome.stoppedAfter != StageName.INGESTION && outcome.stoppedAfter != StageName.PREFLIGHT
+
+        /**
+         * Step number of [stage]. Without preflight the numbers are the original
+         * six (ingestion 1 ... verification 6); with it, preflight is step 2 and
+         * every later stage moves up by one.
+         */
+        internal fun stepNumber(stage: StageName, preflightEnabled: Boolean): Int {
+            val position = stage.ordinal + 1
+            return if (preflightEnabled || stage.ordinal < StageName.PREFLIGHT.ordinal) position else position - 1
+        }
 
         /** `evaluation_runs.status` of a run whose repository failed preflight. */
         const val UNSUPPORTED_STATUS = "unsupported"

@@ -187,13 +187,15 @@ data class VerificationSection(
 )
 
 /**
- * Build-integration preflight (Dockerization plan, section 7.3). It runs between
- * ingestion and triage; a repository outside the supported envelope ends with
- * lifecycle status `unsupported` before any LLM call.
+ * Build-integration preflight (Dockerization plan, section 7.3). When enabled
+ * it runs between ingestion and triage; a repository outside the supported
+ * envelope ends with lifecycle status `unsupported` before any LLM call. Off by
+ * default: `pipeline run --preflight` (or `enabled: true`) turns it on, and
+ * `pipeline preflight` always runs it.
  */
 @Serializable
 data class PreflightSection(
-    val enabled: Boolean = true,
+    val enabled: Boolean = false,
     /**
      * Check P7: run the full test task at clean C-1 under the build timeout.
      * Application and verification both run the full suite, so a suite that

@@ -119,29 +119,47 @@ python3 analysis/inspect_cache.py
   --stop-after triage        # ingestion + triage only
 ```
 
-The run is finalized with the database lifecycle status `stopped_after_<stage>` (the CLI prints `lifecycle_status: stopped` plus the `stopped_after` line) and records no evaluation verdict. Completed stages are still published to the CAS, so re-running the same command without the flag reuses their bundles instead of repeating the work. Accepted values are `ingestion|preflight|triage|synthesis|application|repair|verification`; `verification` is the same as omitting the flag, and an unknown value is rejected with that list. A discard or halt in the named stage still ends the run as `discarded`/`failed`, regardless of the stop point.
+The run is finalized with the database lifecycle status `stopped_after_<stage>` (the CLI prints `lifecycle_status: stopped` plus the `stopped_after` line) and records no evaluation verdict. Completed stages are still published to the CAS, so re-running the same command without the flag reuses their bundles instead of repeating the work. Accepted values are `ingestion|preflight|triage|synthesis|application|repair|verification` (`preflight` only with `--preflight`); `verification` is the same as omitting the flag, and an unknown value is rejected with that list. A discard or halt in the named stage still ends the run as `discarded`/`failed`, regardless of the stop point.
 
-### Preflight
+### Preflight (optional stage)
 
-Every run checks the build integration between ingestion and triage, before any
-LLM call (checks P1-P7 in `docs/dockerization_plan.md`, section 7.3): the
-environment and source level, a baseline compile, a compile with the harness
-init script and a fixed probe lattice, a probe-annotated compile, two checker
-runs (one must report exactly one planted error), one test class, and the full
-test suite under the build timeout. A repository outside the supported
-envelope ends with lifecycle status `unsupported` and a reason code, recorded in
-`preflight_results`, and is excluded from evaluation metrics. Results are
-cached on the build configuration, so commits that change only Java sources
-share one result. `preflight.enabled` and `preflight.suite_check` in
-`project_config.yaml` turn the stage and the full-suite check off.
-
-Preflight can also run on its own:
+By default a run has the six stages above. `--preflight` adds a seventh,
+between ingestion and triage, that checks the build integration before any LLM
+call (checks P1-P7 in `docs/dockerization_plan.md`, section 7.3):
 
 ```bash
+./build/install/pipeline/bin/pipeline run \
+  --config project_config.yaml \
+  --benchmark synthetic-id-swap \
+  --preflight
+```
+
+Preflight checks the environment and source level, a baseline compile, a
+compile with the harness init script and a fixed probe lattice, a
+probe-annotated compile, two checker runs (one must report exactly one planted
+error), one test class, and the full test suite under the build timeout. A
+repository outside the supported envelope ends with lifecycle status
+`unsupported` and a reason code, recorded in `preflight_results`, and is
+excluded from evaluation metrics; the run then makes no LLM call. Results are
+cached on the build configuration, so commits that change only Java sources
+share one result.
+
+- `preflight.enabled: true` in `project_config.yaml` turns the stage on for
+  every run, as `--preflight` does for one run.
+- `preflight.suite_check: false` skips P7, the full-suite check.
+- `--stop-after preflight` stops after the stage and requires `--preflight`.
+- With preflight, every later stage's step number moves up by one (triage is
+  step 3 instead of 2). Without it, step numbers are unchanged.
+
+Preflight can also run on its own, without the rest of the pipeline. This
+command always runs it, whatever `preflight.enabled` says:
+
+```bash
+# --manifest takes benchmarks.yaml or repos.yaml; --id is repeatable (omit it for every entry)
 ./build/install/pipeline/bin/pipeline preflight \
   --config project_config.yaml \
-  --manifest benchmarks.yaml \     # or repos.yaml
-  --id jsqlparser-index-kind        # repeatable; omit for every entry
+  --manifest benchmarks.yaml \
+  --id jsqlparser-index-kind
 ```
 
 For a benchmark it checks the parent commit; for a `repos.yaml` entry,

@@ -133,6 +133,30 @@ class StopAfterTest {
     }
 
     @Test
+    fun `without preflight the six stages keep their original step numbers`() {
+        val stages = StageName.entries.filter { it != StageName.PREFLIGHT }
+        assertEquals((1..6).toList(), stages.map { PipelineOrchestrator.stepNumber(it, preflightEnabled = false) })
+        assertEquals((1..7).toList(), StageName.entries.map { PipelineOrchestrator.stepNumber(it, preflightEnabled = true) })
+        assertEquals(2, PipelineOrchestrator.stepNumber(StageName.PREFLIGHT, preflightEnabled = true))
+        assertEquals(2, PipelineOrchestrator.stepNumber(StageName.TRIAGE, preflightEnabled = false))
+    }
+
+    @Test
+    fun `stopping after preflight requires preflight to run`() {
+        assertFailsWith<com.github.ajalt.clikt.core.UsageError> {
+            requirePreflightForStop(StageName.PREFLIGHT, preflightEnabled = false)
+        }
+        requirePreflightForStop(StageName.PREFLIGHT, preflightEnabled = true)
+        requirePreflightForStop(StageName.TRIAGE, preflightEnabled = false)
+        requirePreflightForStop(null, preflightEnabled = false)
+    }
+
+    @Test
+    fun `preflight is off unless enabled`() {
+        assertFalse(pipeline.config.ProjectConfig().preflight.enabled)
+    }
+
+    @Test
     fun `unsupported repository has its own lifecycle and no verdict`() {
         val outcome = outcome(unsupportedReason = "suite_timeout")
         assertEquals("unsupported", lifecycleStatus(outcome))

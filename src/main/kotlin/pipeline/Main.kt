@@ -158,6 +158,11 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
     private val jobs by option("--jobs", help = "Override triage.jobs (concurrent crawler commits; must be >= 1)").int()
     private val agentJobs by option("--agent-jobs", help = "Maximum concurrent agent/LLM calls (must be >= 1)").int()
     private val buildJobs by option("--build-jobs", help = "Maximum concurrent Gradle invocations (must be >= 1)").int()
+    private val preflight by option(
+        "--preflight",
+        help = "Also run the build-integration preflight between ingestion and triage " +
+            "(off by default; same as preflight.enabled: true)"
+    ).flag()
     private val stopAfter by option(
         "--stop-after",
         help = "Stop once this stage succeeds and skip every later stage. " +
@@ -212,8 +217,10 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
             if (agentJobs != null || buildJobs != null) updated = updated.copy(concurrency = updated.concurrency.copy(
                 agents = agentJobs ?: updated.concurrency.agents, builds = buildJobs ?: updated.concurrency.builds
             ))
+            if (preflight) updated = updated.copy(preflight = updated.preflight.copy(enabled = true))
             updated
         }
+        requirePreflightForStop(stopAfterStage, config.preflight.enabled)
         val cas = CasEngine(File(config.cache.stagesDir), config.cache.enabled)
         database(config).use { db ->
             // Sequential MVP: a run still marked running is stale.
@@ -257,6 +264,13 @@ class VerifyBenchmarkCommand : CliktCommand(name = "verify-benchmark", help = "V
     override fun run() {
         // Same execution path; the command exists for CLI parity with the plan.
         RunCommand().main(listOf("--config", configPath, "--benchmark", benchmark, "--seed", seed.toString()))
+    }
+}
+
+/** `--stop-after preflight` names a stage that only runs when preflight is enabled. */
+internal fun requirePreflightForStop(stopAfter: StageName?, preflightEnabled: Boolean) {
+    if (stopAfter == StageName.PREFLIGHT && !preflightEnabled) {
+        throw UsageError("--stop-after preflight requires --preflight (or preflight.enabled: true)")
     }
 }
 
