@@ -142,6 +142,69 @@ class GradleBuildRunnerTest {
             FileOps.deleteRecursively(dir)
         }
     }
+
+    /**
+     * A `--tests` filter that matches nothing (here: a coordinate naming an
+     * abstract test class) fails the build without writing JUnit XML. That is
+     * a no-tests-found outcome, not a compile failure; mislabelling it made
+     * triage discard agrona-readline-unsigned as TEST_COMPILATION_FAILURE.
+     */
+    @Test
+    fun `no tests found for the filter is not a compile failure`() = runBlocking {
+        val dir = tempDir("gradle-runner-no-tests")
+        try {
+            File(dir, "gradlew").writeText(
+                """
+                #!/usr/bin/env bash
+                echo "> Task :agrona:compileTestJava"
+                echo "> Task :agrona:test FAILED"
+                echo "* What went wrong:"
+                echo "Execution failed for task ':agrona:test'."
+                echo "> No tests found for given includes: [org.agrona.io.DirectBufferDataInputTest.m](--tests filter)"
+                exit 1
+                """.trimIndent() + "\n"
+            )
+            val result = runner().runTests(
+                dir,
+                testFilter = TestCoordinate(Fqcn("org.agrona.io.DirectBufferDataInputTest"), "m")
+            )
+            assertFalse(result.success)
+            assertFalse(result.compileFailed, "no-tests-found must not be reported as a compile failure")
+            assertEquals(0, result.testsFound)
+        } finally {
+            FileOps.deleteRecursively(dir)
+        }
+    }
+
+    @Test
+    fun `a real test compile failure is still reported as one`() = runBlocking {
+        val dir = tempDir("gradle-runner-compile-failure")
+        try {
+            File(dir, "gradlew").writeText(
+                """
+                #!/usr/bin/env bash
+                echo "Foo.java:3: error: cannot find symbol"
+                echo "> Task :compileTestJava FAILED"
+                echo "Compilation failed; see the compiler error output for details."
+                exit 1
+                """.trimIndent() + "\n"
+            )
+            val result = runner().runTests(dir, testFilter = TestCoordinate(Fqcn("example.Sample"), "works"))
+            assertTrue(result.compileFailed, "a compile failure must be reported: ${result.output}")
+            assertEquals(0, result.testsFound)
+        } finally {
+            FileOps.deleteRecursively(dir)
+        }
+    }
+
+    @Test
+    fun `compile markers take precedence over the no-tests message`() {
+        val both = "Compilation failed\nNo tests found for given includes: [x.Y.z]"
+        assertTrue(isTestCompileFailure(exitCode = 1, noXml = true, output = both))
+        assertFalse(isTestCompileFailure(exitCode = 1, noXml = true, output = "No tests found for given includes: [x.Y.z]"))
+        assertTrue(isTestCompileFailure(exitCode = 1, noXml = true, output = "BUILD FAILED"), "no XML and no explanation stays a compile failure")
+        assertFalse(isTestCompileFailure(exitCode = 0, noXml = true, output = "Compilation failed"), "a zero exit is never a failure")
+    }
 }
 
 /** Installs a fake `./gradlew` that records args and writes one JUnit XML. */

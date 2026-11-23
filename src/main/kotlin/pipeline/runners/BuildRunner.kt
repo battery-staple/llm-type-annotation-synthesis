@@ -81,11 +81,7 @@ class GradleBuildRunner(
         val xmlFiles = findTestXml(worktreeDir)
         val outcomes = xmlFiles.flatMap { parseTestXml(it) }
         val testsFound = outcomes.size
-        val noXml = xmlFiles.isEmpty()
-        val mentionsCompileFailure = output.contains("compileTestJava FAILED") ||
-            output.contains("Compilation failed") ||
-            output.contains("cannot find symbol")
-        val compileFailed = result.exitCode != 0 && (noXml || mentionsCompileFailure)
+        val compileFailed = isTestCompileFailure(result.exitCode, xmlFiles.isEmpty(), output)
         return TestRunResult(
             success = result.exitCode == 0 && !result.timedOut && xmlFiles.isNotEmpty(),
             exitCode = result.exitCode,
@@ -325,3 +321,23 @@ private val checkerCrashPattern =
 
 /** True when the Checker Framework itself failed, as opposed to reporting type errors. */
 internal fun outputShowsCheckerCrash(output: String): Boolean = checkerCrashPattern.containsMatchIn(output)
+
+/**
+ * True when a failed test invocation failed because the sources did not compile.
+ *
+ * Explicit compile-failure markers always win: a failed compile stops the test
+ * task before it can run. Without them, missing JUnit XML usually means the
+ * build broke before any test ran, except when Gradle reports that the
+ * `--tests` filter matched nothing (for example a coordinate naming an
+ * abstract class). That is a no-tests-found outcome, which callers detect from
+ * `testsFound == 0`; calling it a compile failure would mislabel the discard.
+ */
+internal fun isTestCompileFailure(exitCode: Int, noXml: Boolean, output: String): Boolean {
+    if (exitCode == 0) return false
+    val mentionsCompileFailure = output.contains("compileTestJava FAILED") ||
+        output.contains("Compilation failed") ||
+        output.contains("cannot find symbol")
+    if (mentionsCompileFailure) return true
+    if (output.contains("No tests found for given includes")) return false
+    return noXml
+}
