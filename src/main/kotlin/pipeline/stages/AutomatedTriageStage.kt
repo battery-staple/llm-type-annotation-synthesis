@@ -42,6 +42,7 @@ class AutomatedTriageStage(
             "bugfix_threshold" to ctx.config.triage.bugfixThreshold.toString(),
             "verification_test_task" to ctx.build.testTask,
             "verification_scope" to ctx.config.verification.scope.name.lowercase(),
+            "triage_classifier_profile" to "no-tools-v1",
             "production_roots" to ctx.productionRoots.sorted(),
             "test_roots" to ctx.testRoots.sorted()
         ) + buildTimeoutConfig(ctx)
@@ -120,8 +121,13 @@ class AutomatedTriageStage(
             )
         } catch (e: SingleShotLlmException) {
             return StageResult.TransientFailure(
-                error = RuntimeException("LLM triage classification failed for ${commitHash.abbreviated}: ${e.message}", e),
-                stageTurnsTaken = 1,
+                error = SingleShotLlmException(
+                    "LLM triage classification failed for ${commitHash.abbreviated}: ${e.message}",
+                    e.cause,
+                    e.transcript,
+                    e.reason
+                ),
+                stageTurnsTaken = e.transcript.count { it.eventType == AgentEventType.STEP_START },
                 transcript = e.transcript
             )
         } catch (t: Throwable) {

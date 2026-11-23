@@ -20,6 +20,7 @@ import pipeline.ports.BuildResult
 import pipeline.ports.BuildRunner
 import pipeline.ports.CheckerResult
 import pipeline.ports.DatabasePort
+import pipeline.ports.SingleShotFailure
 import pipeline.ports.SingleShotLlmClient
 import pipeline.ports.SingleShotLlmException
 import pipeline.ports.SingleShotLlmResponse
@@ -372,7 +373,7 @@ class AutomatedTriageStageTest {
             val stage = AutomatedTriageStage(
                 llmClient = object : SingleShotLlmClient {
                     override suspend fun classifyCommit(prompt: String, model: String, temperature: Double): SingleShotLlmResponse<TriageClassification> =
-                        throw SingleShotLlmException("no JSON", transcript = events)
+                        throw SingleShotLlmException("no JSON", transcript = events, reason = SingleShotFailure.NO_JSON)
                 },
                 buildRunner = unusedBuildRunner
             )
@@ -384,6 +385,8 @@ class AutomatedTriageStageTest {
             val res = stage.execute(makeContext(tmp, repo, db), input)
             assertTrue(res is StageResult.TransientFailure)
             assertEquals(events, res.transcript)
+            assertTrue(res.error is SingleShotLlmException)
+            assertEquals(SingleShotFailure.NO_JSON, res.error.reason)
         } finally {
             tmp.deleteRecursively()
         }

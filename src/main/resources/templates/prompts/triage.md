@@ -6,6 +6,8 @@ consumed by the automated crawler.
 
 ## Instructions
 
+- Do not call any tools. The commit message and diff below are the complete
+  input; answer directly from them.
 - Examine the commit message and the commit diff provided by the harness.
 - Decide whether the commit is a genuine bug fix (`bugfix`) or anything else
   (`non_bugfix`: feature, refactor, documentation, test-only, revert, merge).

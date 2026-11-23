@@ -37,11 +37,20 @@ data class SingleShotLlmResponse<T>(
     val transcript: List<AgentTranscriptEvent> = emptyList()
 )
 
+/** Why a single-shot classification could not be decoded. */
+enum class SingleShotFailure {
+    NO_MESSAGE,
+    STEP_CAP,
+    TIMEOUT,
+    NO_JSON
+}
+
 /** Classification failure that still carries the model interaction for auditing. */
 class SingleShotLlmException(
     message: String,
     cause: Throwable? = null,
-    val transcript: List<AgentTranscriptEvent> = emptyList()
+    val transcript: List<AgentTranscriptEvent> = emptyList(),
+    val reason: SingleShotFailure? = null
 ) : RuntimeException(message, cause)
 
 interface SingleShotLlmClient {

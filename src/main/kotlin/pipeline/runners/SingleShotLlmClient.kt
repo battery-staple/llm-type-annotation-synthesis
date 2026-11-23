@@ -5,7 +5,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import pipeline.ports.AgentRunResult
 import pipeline.ports.AgentRunner
+import pipeline.ports.SingleShotFailure
 import pipeline.ports.SingleShotLlmClient
 import pipeline.ports.SingleShotLlmException
 import pipeline.ports.SingleShotLlmResponse
@@ -25,6 +27,17 @@ class OpenCodeSingleShotLlmClient(
 
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
+    /**
+     * Triage is a classifier, not a coding agent: it must answer from the prompt
+     * alone. The config is injected via the environment so no files are written
+     * into the agent workspace and project-level opencode configs cannot
+     * re-enable tools. `steps = 1` makes the first (final) step tool-free; the
+     * deny-all permission rule is a second layer.
+     */
+    private val noToolsConfig = """
+        {"default_agent":"pipeline-triage-json","agents":{"pipeline-triage-json":{"mode":"primary","steps":1,"permissions":[{"action":"*","resource":"*","effect":"deny"}]}}}
+    """.trimIndent()
+
     override suspend fun classifyCommit(
         prompt: String,
         model: String,
@@ -40,15 +53,17 @@ class OpenCodeSingleShotLlmClient(
             append("\"regressionTest\": {\"testClass\": string, \"testMethod\": string} | null}")
         }
         val started = System.currentTimeMillis()
+        val maxSteps = 5
         val result = runner.runAgent(
             prompt = fullPrompt,
             cwd = scratch,
             agentRole = "triage",
             model = model,
-            maxSteps = 5,
+            maxSteps = maxSteps,
             timeoutSeconds = 300,
             seed = 0L,
-            temperature = temperature
+            temperature = temperature,
+            environment = mapOf("OPENCODE_CONFIG_CONTENT" to noToolsConfig)
         )
         val latencyMs = System.currentTimeMillis() - started
         runCatching { scratch.deleteRecursively() }
@@ -67,12 +82,22 @@ class OpenCodeSingleShotLlmClient(
         val messageContents = result.transcript
             .filter { it.eventType == AgentEventType.MESSAGE }
             .mapNotNull { it.content }
-        val value = decodeLastClassification(messageContents)
-            ?: throw SingleShotLlmException(
-                "Single-shot LLM produced no parseable TriageClassification JSON " +
-                    "(exit=${result.exitCode}, messages=${messageContents.size}, totalEvents=${result.transcript.size})",
-                transcript = result.transcript
+        val steps = result.transcript.count { it.eventType == AgentEventType.STEP_START }
+        val reason = when {
+            result.timedOut -> SingleShotFailure.TIMEOUT
+            result.exitCode == 130 && steps >= maxSteps && messageContents.isEmpty() -> SingleShotFailure.STEP_CAP
+            messageContents.isEmpty() -> SingleShotFailure.NO_MESSAGE
+            else -> SingleShotFailure.NO_JSON
+        }
+        val decoded = decodeLastClassification(messageContents)
+        if (decoded.value == null) {
+            throw SingleShotLlmException(
+                buildFailureMessage(reason, result, maxSteps, messageContents, decoded),
+                transcript = result.transcript,
+                reason = reason
             )
+        }
+        val value = decoded.value
         return SingleShotLlmResponse(
             value = value,
             usage = usage,
@@ -81,21 +106,62 @@ class OpenCodeSingleShotLlmClient(
         )
     }
 
-    private fun decodeLastClassification(contents: List<String>): TriageClassification? {
+    private data class DecodeResult(
+        val value: TriageClassification?,
+        val candidateCount: Int,
+        val lastError: String?
+    )
+
+    private fun decodeLastClassification(contents: List<String>): DecodeResult {
         val candidates = mutableListOf<String>()
         for (content in contents) {
             candidates.addAll(extractJsonObjects(content))
         }
+        var lastError: String? = null
         for (candidate in candidates.asReversed()) {
             runCatching {
                 val element = json.parseToJsonElement(candidate)
                 if (element is JsonObject) {
                     val normalized = normalizeRegressionTest(element)
-                    return json.decodeFromJsonElement(TriageClassification.serializer(), normalized)
+                    return DecodeResult(
+                        json.decodeFromJsonElement(TriageClassification.serializer(), normalized),
+                        candidates.size,
+                        null
+                    )
                 }
-            }
+            }.onFailure { lastError = it.message ?: it.javaClass.simpleName }
         }
-        return null
+        return DecodeResult(null, candidates.size, lastError)
+    }
+
+    private fun buildFailureMessage(
+        reason: SingleShotFailure,
+        result: AgentRunResult,
+        maxSteps: Int,
+        messages: List<String>,
+        decoded: DecodeResult
+    ): String {
+        val steps = result.transcript.count { it.eventType == AgentEventType.STEP_START }
+        val toolCalls = result.transcript.filter { it.eventType == AgentEventType.TOOL_CALL }
+        val tools = toolCalls.groupingBy { it.toolName ?: "unknown" }.eachCount()
+            .toList().sortedByDescending { it.second }.take(5)
+            .joinToString(", ") { "${it.first}=${it.second}" }
+            .ifEmpty { "none" }
+        val tail = "exit=${result.exitCode}, timedOut=${result.timedOut}, steps=$steps, " +
+            "toolCalls=${toolCalls.size} [$tools], messages=${messages.size}"
+        val headline = when (reason) {
+            SingleShotFailure.TIMEOUT -> "Triage classifier timed out before emitting a final text message"
+            SingleShotFailure.STEP_CAP -> "Triage classifier hit the $maxSteps-step cap and was terminated before emitting a final text message"
+            SingleShotFailure.NO_MESSAGE -> "Triage classifier emitted no final text message"
+            SingleShotFailure.NO_JSON -> "Triage classifier emitted ${messages.size} message(s) but no parseable TriageClassification JSON"
+        }
+        val detail = if (reason == SingleShotFailure.NO_JSON) {
+            val preview = messages.lastOrNull()?.replace(Regex("\\s+"), " ")?.take(240).orEmpty()
+            "; jsonCandidates=${decoded.candidateCount}, lastDecodeError=${decoded.lastError?.take(160)}, lastMessage=$preview"
+        } else {
+            "; triage runs with tools disabled via OPENCODE_CONFIG_CONTENT — verify that config and the model response"
+        }
+        return "$headline ($tail)$detail"
     }
 
     /**
