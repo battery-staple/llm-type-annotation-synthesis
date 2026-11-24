@@ -57,7 +57,6 @@ class PipelineOrchestrator(
     private val cas: CasEngine,
     private val database: DatabasePort,
     private val config: ProjectConfig,
-    private val maxTransientAttempts: Int = 3,
     private val automatedTriage: PipelineStage<AutomatedTriageInput, VerifiedSample>? = null,
     /**
      * When set, the run stops once this stage succeeds and every later stage
@@ -481,6 +480,8 @@ class PipelineOrchestrator(
             }
         }
 
+        val maxTransientAttempts = config.stage.attempts
+        val backoffBaseMs = config.stage.backoffMs
         var attempt = 1
         while (true) {
             val stepId = UUID.randomUUID().toString()
@@ -580,7 +581,7 @@ class PipelineOrchestrator(
                         "Transient failure in ${stage.stageName.identifier} (attempt $attempt/$maxTransientAttempts)"
                     }
                     val willRetry = attempt < maxTransientAttempts
-                    val delayMs = if (willRetry) (1L shl attempt) * 1000L else 0L
+                    val delayMs = if (willRetry) (backoffBaseMs shl attempt) else 0L
                     database.recordRetry(pipeline.db.RetryEvent(
                         retryId = UUID.randomUUID().toString(), runId = ctx.runId.value, stepId = stepId,
                         stage = stage.stageName.identifier, attemptNumber = attempt, maxAttempts = maxTransientAttempts,

@@ -45,7 +45,7 @@ class IngestionStage(private val buildRunner: BuildRunner) : PipelineStage<Inges
             "commit" to input.commitHash.hash,
             "parent" to input.parentHash.hash
         )
-        val configSlice = buildConfigSlice(ctx.build) + buildTimeoutConfig(ctx) + mapOf(
+        val configSlice = buildConfigSlice(ctx.build) + buildTimeoutConfig(ctx) + buildStageRetryConfig(ctx) + mapOf(
             "source_compatibility" to ctx.sourceCompatibility,
             "target_compatibility" to ctx.targetCompatibility,
             "benchmark_id" to input.benchmarkId.canonical

@@ -670,7 +670,7 @@ The orchestrator executes the pipeline stages as an isolated, content-addressabl
 3. **Iterative Compilation**: The agent outputs qualifier source files (e.g., `@SourceId.java`, `@TargetId.java`, `@IdBottom.java`) into `custom_quals_src/`. `JavacRunner` compiles them in-process against `checker-qual.jar`. Any syntax errors or circular subtyping issues are fed back to the agent until compilation succeeds or the turn budget is exhausted.
 4. **Zero-Helpers Enforcement**: The validator verifies that `custom_quals_src/` contains **strictly annotation declarations**. Any class, interface with default methods, record, or static utility is rejected.
 5. **Declarative Placement Guide Emission & Rule Extraction**: The agent produces `placement_guide.md`, detailing high-level semantic typing criteria structured across four standardized categories (Defaulting Invariants, Source Rules / Introducers, Sink Rules / Consumers, Sanitizers & Coercions) without naming concrete repository symbols. A parser extracts the rules, verifies structural adherence, and computes `policy_rule_count` (total and per-category breakdown).
-6. **Decision Validation**: The agent must write `synthesis_decision.json` at the workspace root with `checker_category` (`custom_qualifier_hierarchy` or `builtin_checker`), `processor` (FQCN), and a non-empty `rationale`. `custom_only` requires the custom category and `checker.processor`; `builtin_only` requires the built-in category and `synthesis.builtin_checker`; `all` allows either explicit selection. Missing/malformed decisions, missing `TYPE_USE` qualifiers, multiple roots or bottoms, disconnected qualifiers, and custom sources for a built-in decision are retryable validation failures. After three attempts the stage fails; it never switches strategies silently.
+6. **Decision Validation**: The agent must write `synthesis_decision.json` at the workspace root with `checker_category` (`custom_qualifier_hierarchy` or `builtin_checker`), `processor` (FQCN), and a non-empty `rationale`. `custom_only` requires the custom category and `checker.processor`; `builtin_only` requires the built-in category and `synthesis.builtin_checker`; `all` allows either explicit selection. Missing/malformed decisions, missing `TYPE_USE` qualifiers, multiple roots or bottoms, disconnected qualifiers, and custom sources for a built-in decision are retryable validation failures. After `synthesis.retry_sessions` attempts the stage fails; it never switches strategies silently.
 7. **Packaging & Qualifier Discovery**: `JavacRunner` packages custom classes into `custom-quals.jar`; an explicitly selected built-in-only sample emits an empty marker jar and receives no `-Aquals` flag. The scanner records all `@Target(TYPE_USE)` custom qualifier annotations, including root/default qualifiers. Built-in selection uses `synthesis.builtin_checker` (default `org.checkerframework.checker.nullness.NullnessChecker`; supported catalog: Nullness, Signedness, Index, Regex, FormatString), and unsupported values fail config loading. The accepted choice is recorded in `synthesis_metadata.json` as `decision` with `checker_category`, `processor`, `rationale`, `source: "agent"`, plus `allowed_checkers` and `fallback_occurred: false`.
 8. **Output Generation**: Emits `SynthesizedLattice` packaging `custom-quals.jar`, `placement_guide.md`, discovered `qualifierClassNames`, `policyRuleCount`, `ruleCountsByCategory`, `processor`, and `checkerCategory`, plus `synthesis_decision.json`, `synthesis_metadata.json`, `synthesis_transcript.json`, and `synthesis_metrics.json`.
 
@@ -2093,6 +2093,10 @@ agent:
   timeout_ms: 1800000 # 30 minutes, per stage
   max_checker_invocations: 20
 
+stage:
+  attempts: 3 # whole-stage attempts on transient failure; 1 disables retries
+  backoff_ms: 1000 # exponential base: base << attempt (2s, 4s, 8s...)
+
 sample:
   seed: 0
   temperature: 0.0
@@ -2101,6 +2105,10 @@ synthesis:
   freedom_level: "level0" # MVP active: "level0"; future: "level1" | "level2"
   allowed_checkers: "all" # "all" | "custom_only" | "builtin_only"; constrains the agent's explicit decision
   builtin_checker: "org.checkerframework.checker.nullness.NullnessChecker" # supported catalog: Nullness, Signedness, Index, Regex, FormatString
+  retry_sessions: 3 # agent feedback sessions per stage execution
+
+application:
+  retry_sessions: 3 # agent feedback sessions per stage execution
 
 checker:
   processor: "org.checkerframework.common.subtyping.SubtypingChecker" # explicit; never "auto"
@@ -2111,6 +2119,7 @@ checker:
 repair:
   local_variable_annotations: "frozen" # "frozen" | "allowed"; enforced by DiffAwareAstGuard
   internet_access: false # wired to agent sandbox/network policy
+  retry_turns: 4 # bounded at runtime by agent.max_checker_invocations
 
 prompt:
   tell_non_triviality_error: false # injected into application prompt
@@ -2251,7 +2260,7 @@ class PipelineOrchestrator(
     private val verification: VerificationStage,
     private val cas: CasEngine,
     private val database: DatabasePort,
-    private val maxTransientAttempts: Int = 3
+    private val config: ProjectConfig // stage.attempts / stage.backoff_ms bound transient retries
 ) {
     suspend fun runSingleSample(
         entry: BenchmarkEntry, // Typed benchmarks.yaml row (§10); supplies benchmark ID, hashes/test patch, description
@@ -2338,8 +2347,8 @@ class PipelineOrchestrator(
                 is StageResult.TransientFailure -> {
                     database.recordStep(ctx.toStepRecord(stepNumber, stage, cacheKey,
                         attemptNumber = attempt, cacheHit = false, success = false))
-                    if (attempt >= maxTransientAttempts) throw outcome.error
-                    delay((1L shl attempt) * 1_000L) // 2s, 4s, ...
+                    if (attempt >= config.stage.attempts) throw outcome.error
+                    delay(config.stage.backoffMs shl attempt) // 2s, 4s, ... at the default base
                     attempt++
                 }
             }

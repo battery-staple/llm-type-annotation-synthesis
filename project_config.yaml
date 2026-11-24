@@ -23,6 +23,13 @@ concurrency:
   agents: 8
   builds: 2
 
+# Whole-stage transient retries, applied to every stage by the orchestrator.
+# `backoff_ms` is the exponential base: base << attempt gives 2s, 4s, 8s...
+# `attempts: 1` disables retries (one execution per stage).
+stage:
+  attempts: 3
+  backoff_ms: 1000
+
 paths:
   eval_repos_dir: "eval-repos"
   database: "data/pipeline.db"
@@ -67,6 +74,14 @@ synthesis:
   # The single built-in processor an agent may choose when allowed_checkers is
   # "all" or "builtin_only". Never used as a silent fallback.
   builtin_checker: "org.checkerframework.checker.nullness.NullnessChecker"
+  # Agent sessions (feedback rounds) per stage execution. Each failed session
+  # gets the validation problems appended to the next session's prompt.
+  retry_sessions: 3
+
+# Agent sessions (feedback rounds) per application stage execution. Rejected
+# edits are reset and the next session re-applies annotations from clean C-1.
+application:
+  retry_sessions: 3
 
 checker:
   processor: "org.checkerframework.common.subtyping.SubtypingChecker"
@@ -75,6 +90,9 @@ checker:
 repair:
   local_variable_annotations: "frozen"
   internet_access: false
+  # Feedback turns per repair execution. The effective bound is
+  # min(retry_turns, agent.max_checker_invocations).
+  retry_turns: 4
 
 prompt:
   tell_non_triviality_error: false

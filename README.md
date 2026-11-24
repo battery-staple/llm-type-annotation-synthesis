@@ -136,6 +136,19 @@ limit is reached. Use these independent controls (and their config keys):
 - `concurrency.builds` / `--build-jobs` (default `2`): concurrent Gradle
   compile, test, and Checker invocations.
 
+Retry limits are configured in `project_config.yaml` (no CLI flags):
+
+- `stage.attempts` (default `3`): whole-stage attempts for transient failures;
+  set `1` to disable retries. `stage.backoff_ms` (default `1000`) is the
+  exponential delay base (2s, 4s, 8s, ...).
+- `synthesis.retry_sessions` and `application.retry_sessions` (default `3`
+  each): agent feedback sessions within one stage execution.
+- `repair.retry_turns` (default `4`): repair feedback turns, still bounded by
+  `agent.max_checker_invocations`.
+
+Retry limits participate in stage cache keys, so changing one invalidates the
+affected cached artifacts on the next run.
+
 `jobs` still bounds whole per-commit pipelines. Agent and build semaphores are
 nested within those pipelines and independently cap those resource types; they
 do not increase the number of commit runners. For example, on an M2 Max:

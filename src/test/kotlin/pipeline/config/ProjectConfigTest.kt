@@ -15,6 +15,51 @@ class ProjectConfigTest {
         assertFailsWith<IllegalArgumentException> { ConcurrencySection(builds = 0) }
     }
     @Test
+    fun `retry defaults match the previous hard-coded limits and validate positives`() {
+        assertEquals(3, StageRetrySection().attempts)
+        assertEquals(1_000L, StageRetrySection().backoffMs)
+        assertEquals(3, SynthesisSection().retrySessions)
+        assertEquals(3, ApplicationSection().retrySessions)
+        assertEquals(4, RepairSection().retryTurns)
+        assertFailsWith<IllegalArgumentException> { StageRetrySection(attempts = 0) }
+        assertFailsWith<IllegalArgumentException> { StageRetrySection(backoffMs = -1) }
+        assertFailsWith<IllegalArgumentException> { SynthesisSection(retrySessions = 0) }
+        assertFailsWith<IllegalArgumentException> { ApplicationSection(retrySessions = 0) }
+        assertFailsWith<IllegalArgumentException> { RepairSection(retryTurns = 0) }
+    }
+
+    @Test
+    fun `loads retry overrides from YAML`() {
+        val dir = Files.createTempDirectory("project-config-retry").toFile()
+        try {
+            val file = dir.resolve("project.yaml")
+            file.writeText(
+                """
+                stage:
+                  attempts: 5
+                  backoff_ms: 250
+                synthesis:
+                  retry_sessions: 2
+                application:
+                  retry_sessions: 6
+                repair:
+                  retry_turns: 7
+                """.trimIndent()
+            )
+
+            val config = ProjectConfig.load(file)
+
+            assertEquals(5, config.stage.attempts)
+            assertEquals(250L, config.stage.backoffMs)
+            assertEquals(2, config.synthesis.retrySessions)
+            assertEquals(6, config.application.retrySessions)
+            assertEquals(7, config.repair.retryTurns)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `resolves relative paths against config directory`() {
         val dir = Files.createTempDirectory("project-config").toFile()
         try {

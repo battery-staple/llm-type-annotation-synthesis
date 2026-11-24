@@ -45,7 +45,7 @@ class AutomatedTriageStage(
             "triage_classifier_profile" to "no-tools-v1",
             "production_roots" to ctx.productionRoots.sorted(),
             "test_roots" to ctx.testRoots.sorted()
-        ) + buildTimeoutConfig(ctx)
+        ) + buildTimeoutConfig(ctx) + buildStageRetryConfig(ctx)
         return CacheKeys.compute(
             ctx = ctx,
             stage = stageName,

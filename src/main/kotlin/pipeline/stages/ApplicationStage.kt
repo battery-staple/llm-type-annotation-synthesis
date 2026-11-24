@@ -62,7 +62,7 @@ class ApplicationStage(
             "processor" to lattice.processor,
             "checker_category" to checkerCategoryName(lattice.checkerCategory),
         )
-        val configSlice = mapOf(
+        val configSlice = buildStageRetryConfig(ctx) + mapOf(
             "model_application" to ctx.config.model.applicationModel,
             "agent_steps_application" to ctx.config.agent.steps.application,
             "agent_timeout_ms" to ctx.config.agent.timeoutMs,
@@ -74,6 +74,7 @@ class ApplicationStage(
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),
             "production_roots" to ctx.productionRoots.sorted(),
             "test_roots" to ctx.testRoots.sorted(),
+            "retry_sessions_application" to ctx.config.application.retrySessions,
         )
         return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template, includeSampleIdentity = !isDeterministic)
     }
@@ -146,7 +147,7 @@ class ApplicationStage(
         var accepted = false
         var successChanged: List<ChangedPath> = emptyList()
         val timeoutSeconds = ctx.config.agent.timeoutMs / 1000
-        while (attempt < MAX_ATTEMPTS && !accepted) {
+        while (attempt < ctx.config.application.retrySessions && !accepted) {
             attempt++
             val attemptStartedMs = System.currentTimeMillis()
             val effectivePrompt = if (feedback.isEmpty()) {
@@ -510,7 +511,6 @@ class ApplicationStage(
     }
 
     companion object {
-        const val MAX_ATTEMPTS = 3
         val MIRROR_EXCLUDES = setOf(".agent-libs", "run-compile.sh")
     }
 }

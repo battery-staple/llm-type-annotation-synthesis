@@ -61,7 +61,7 @@ class VerificationStage(private val buildRunner: BuildRunner) : PipelineStage<Ve
             "test_patch" to contentHashOrMissing(input.sample.testPatchFile),
             "verification_scope" to input.verificationScope.name.lowercase()
         )
-        val configSlice = buildConfigSlice(ctx.build) + buildTimeoutConfig(ctx) + mapOf(
+        val configSlice = buildConfigSlice(ctx.build) + buildTimeoutConfig(ctx) + buildStageRetryConfig(ctx) + mapOf(
             "verification_scope" to ctx.config.verification.scope.name.lowercase(),
             "verification_baseline" to ctx.config.verification.baseline,
             "guardrails_mode" to ctx.config.guardrails.mode.name.lowercase(),

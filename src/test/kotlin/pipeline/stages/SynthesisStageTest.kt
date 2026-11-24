@@ -76,8 +76,26 @@ class SynthesisStageTest {
             val result = fixture.stage.execute(fixture.context, SynthesisInput(bug))
             val failure = assertIs<StageResult.TransientFailure>(result)
             assertContains(failure.error.message.orEmpty(), "directSuperMap")
-            assertEquals(3, fixture.agent.calls)
+            assertEquals(fixture.context.config.synthesis.retrySessions, fixture.agent.calls)
             assertTrue(fixture.database.projections.isEmpty(), "a broken hierarchy must not be published")
+        }
+    }
+
+    @Test
+    fun `configured retry sessions bound the feedback loop`() = runBlocking {
+        val crashScript = """
+            echo 'error: Root is not a key in the directSuperMap.  Does it have a @SubtypeOf annotation?'
+            echo 'org.checkerframework.javacutil.TypeSystemError: Root is not a key in the directSuperMap.'
+            exit 1
+        """.trimIndent()
+        withFixture(
+            AllowedCheckers.CUSTOM_ONLY,
+            canaryScript = crashScript,
+            retrySessions = 5,
+        ) { fixture ->
+            val result = fixture.stage.execute(fixture.context, SynthesisInput(bug))
+            assertIs<StageResult.TransientFailure>(result)
+            assertEquals(5, fixture.agent.calls)
         }
     }
 
@@ -126,7 +144,7 @@ class SynthesisStageTest {
         withFixture(AllowedCheckers.ALL, decision = false, sources = false) { fixture ->
             val result = fixture.stage.execute(fixture.context, SynthesisInput(bug))
             val failure = assertIs<StageResult.TransientFailure>(result)
-            assertEquals(3, fixture.agent.calls)
+            assertEquals(fixture.context.config.synthesis.retrySessions, fixture.agent.calls)
             assertContains(failure.error.message.orEmpty(), "synthesis_decision.json")
         }
     }
@@ -136,7 +154,7 @@ class SynthesisStageTest {
         withFixture(AllowedCheckers.ALL, malformed = true) { fixture ->
             val result = fixture.stage.execute(fixture.context, SynthesisInput(bug))
             val failure = assertIs<StageResult.TransientFailure>(result)
-            assertEquals(3, fixture.agent.calls)
+            assertEquals(fixture.context.config.synthesis.retrySessions, fixture.agent.calls)
             assertContains(failure.error.message.orEmpty(), "TYPE_USE")
             assertTrue("NullnessChecker" !in failure.error.message.orEmpty())
         }
@@ -177,6 +195,22 @@ class SynthesisStageTest {
         }
     }
 
+    @Test
+    fun `retry settings fork the synthesis cache key`() = runBlocking {
+        withFixture(AllowedCheckers.ALL) { fixture ->
+            val baseline = fixture.stage.computeCacheKey(fixture.context, SynthesisInput(bug))
+            val alternateConfig = fixture.context.config.copy(
+                stage = fixture.context.config.stage.copy(attempts = 5),
+                synthesis = fixture.context.config.synthesis.copy(retrySessions = 4),
+            )
+            val alternate = fixture.stage.computeCacheKey(
+                fixture.context.copy(config = alternateConfig),
+                SynthesisInput(bug),
+            )
+            assertNotEquals(baseline, alternate)
+        }
+    }
+
     private data class Fixture(
         val context: RunContext,
         val stage: SynthesisStage,
@@ -193,6 +227,7 @@ class SynthesisStageTest {
         malformed: Boolean = false,
         processor: String? = null,
         canaryScript: String? = null,
+        retrySessions: Int? = null,
         block: suspend (Fixture) -> Unit,
     ) {
         val root = Files.createTempDirectory("synthesis-stage-test").toFile()
@@ -232,7 +267,10 @@ class SynthesisStageTest {
                     checkerFrameworkHome = checkerHome.absolutePath,
                     javaHome = fakeJdkHome.absolutePath,
                 ),
-                synthesis = base.synthesis.copy(allowedCheckers = allowed),
+                synthesis = base.synthesis.copy(
+                    allowedCheckers = allowed,
+                    retrySessions = retrySessions ?: base.synthesis.retrySessions,
+                ),
             )
             val context = RunContext(
                 config = config,

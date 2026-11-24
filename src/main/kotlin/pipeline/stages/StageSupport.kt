@@ -53,6 +53,10 @@ internal val RETIRED_CHECKER_QUALS_KEY: List<String> = emptyList()
 internal fun buildTimeoutConfig(ctx: RunContext): Map<String, Any?> =
     mapOf("build_timeout_ms" to ctx.config.agent.timeoutMs)
 
+/** A different whole-stage retry budget can change whether a stage succeeds. */
+internal fun buildStageRetryConfig(ctx: RunContext): Map<String, Any?> =
+    mapOf("stage_attempts" to ctx.config.stage.attempts)
+
 object PromptTemplates {
     fun load(name: String): String {
         val resource = PromptTemplates::class.java.getResourceAsStream("/templates/prompts/$name")
@@ -94,7 +98,7 @@ fun agentFailureMessage(result: AgentRunResult): String? {
 /**
  * A nonzero exit with no completed agent step means the CLI never started the
  * model loop (bad model name, auth failure, missing executable). Retrying the
- * same input cannot help, so stages halt instead of burning three attempts.
+ * same input cannot help, so stages halt instead of burning retry attempts.
  */
 fun agentStartupFailure(result: AgentRunResult): String? =
     agentFailureMessage(result)?.takeIf { !result.timedOut && result.stepsCounted == 0 }

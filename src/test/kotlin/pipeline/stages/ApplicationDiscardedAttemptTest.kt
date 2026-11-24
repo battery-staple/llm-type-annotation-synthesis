@@ -201,11 +201,14 @@ class ApplicationDiscardedAttemptTest {
                 )
 
                 assertTrue(outcome is StageResult.TransientFailure)
-                assertEquals(ApplicationStage.MAX_ATTEMPTS, agent.prompts.size)
+                assertEquals(ctx.config.application.retrySessions, agent.prompts.size)
 
                 val records = database.readDiscardedAttempts(runId)
-                assertEquals(ApplicationStage.MAX_ATTEMPTS, records.size)
-                assertEquals(listOf(1, 2, 3), records.map { it.internalAttemptNumber })
+                assertEquals(ctx.config.application.retrySessions, records.size)
+                assertEquals(
+                    (1..ctx.config.application.retrySessions).toList(),
+                    records.map { it.internalAttemptNumber }
+                )
                 assertTrue(records.all { it.stage == "application" })
                 assertTrue(records.all { it.stepId == ctx.stepId })
                 // Whole-stage attempt 2, internal attempts 1..3: distinguishable
@@ -300,7 +303,7 @@ class ApplicationDiscardedAttemptTest {
 
                 assertTrue(outcome is StageResult.TransientFailure)
                 val records = database.readDiscardedAttempts(runId)
-                assertEquals(ApplicationStage.MAX_ATTEMPTS, records.size)
+                assertEquals(ctx.config.application.retrySessions, records.size)
                 assertTrue(
                     records.all { it.discardCheck == DiscardCheck.COMPILE },
                     "checks=${records.map { it.discardCheck }}, feedback=${records.map { it.feedback }}",

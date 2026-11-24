@@ -40,6 +40,22 @@ data class ConcurrencySection(val agents: Int = 8, val builds: Int = 2) {
     }
 }
 
+/**
+ * Whole-stage transient retry budget used by the orchestrator for every stage.
+ * Attempts are 1-indexed, so `attempts = 1` disables retries. `backoffMs` is the
+ * base for exponential delay: base << attempt (1000 -> 2s, 4s, 8s, ...).
+ */
+@Serializable
+data class StageRetrySection(
+    val attempts: Int = 3,
+    @SerialName("backoff_ms") val backoffMs: Long = 1_000
+) {
+    init {
+        require(attempts >= 1) { "stage.attempts must be at least 1" }
+        require(backoffMs >= 0) { "stage.backoff_ms must be non-negative" }
+    }
+}
+
 @Serializable
 data class EnvironmentSection(
     @SerialName("java_home") val javaHome: String = "",
@@ -103,8 +119,25 @@ data class SynthesisSection(
      * a built-in strategy is allowed. The choice is explicit per run, not a
      * fallback inferred from missing qualifier sources.
      */
-    @SerialName("builtin_checker") val builtinChecker: String = "org.checkerframework.checker.nullness.NullnessChecker"
-)
+    @SerialName("builtin_checker") val builtinChecker: String = "org.checkerframework.checker.nullness.NullnessChecker",
+    /** Number of agent sessions (feedback rounds) inside one stage execution. */
+    @SerialName("retry_sessions") val retrySessions: Int = 3
+) {
+    init {
+        require(retrySessions >= 1) { "synthesis.retry_sessions must be at least 1" }
+    }
+}
+
+/** Application-stage settings. It has no other build-independent policy today. */
+@Serializable
+data class ApplicationSection(
+    /** Number of agent sessions (feedback rounds) inside one stage execution. */
+    @SerialName("retry_sessions") val retrySessions: Int = 3
+) {
+    init {
+        require(retrySessions >= 1) { "application.retry_sessions must be at least 1" }
+    }
+}
 
 @Serializable
 data class CheckerSection(
@@ -117,8 +150,14 @@ data class CheckerSection(
 @Serializable
 data class RepairSection(
     @SerialName("local_variable_annotations") val localVariableAnnotations: LocalAnnotationPolicy = LocalAnnotationPolicy.FROZEN,
-    @SerialName("internet_access") val internetAccess: Boolean = false
-)
+    @SerialName("internet_access") val internetAccess: Boolean = false,
+    /** Turn budget; still bounded by agent.max_checker_invocations at runtime. */
+    @SerialName("retry_turns") val retryTurns: Int = 4
+) {
+    init {
+        require(retryTurns >= 1) { "repair.retry_turns must be at least 1" }
+    }
+}
 
 @Serializable
 data class PromptSection(
@@ -151,6 +190,7 @@ data class VerificationSection(
 data class ProjectConfig(
     val triage: TriageSection = TriageSection(),
     val concurrency: ConcurrencySection = ConcurrencySection(),
+    val stage: StageRetrySection = StageRetrySection(),
     val paths: PathsSection = PathsSection(),
     val environment: EnvironmentSection = EnvironmentSection(),
     val guardrails: GuardrailsSection = GuardrailsSection(),
@@ -158,6 +198,7 @@ data class ProjectConfig(
     val agent: AgentSection = AgentSection(),
     val sample: SampleSection = SampleSection(),
     val synthesis: SynthesisSection = SynthesisSection(),
+    val application: ApplicationSection = ApplicationSection(),
     val checker: CheckerSection = CheckerSection(),
     val repair: RepairSection = RepairSection(),
     val prompt: PromptSection = PromptSection(),

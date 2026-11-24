@@ -54,7 +54,7 @@ class SynthesisStage(
             "commit_diff_sha" to Hashing.sha256(bug.commitDiff),
             "description_sha" to Hashing.sha256(bug.bugDescription),
         )
-        val configSlice = mapOf(
+        val configSlice = buildStageRetryConfig(ctx) + mapOf(
             "freedom_level" to freedomLevelName(ctx.config.synthesis.freedomLevel),
             "allowed_checkers" to allowedCheckersName(ctx.config.synthesis.allowedCheckers),
             "builtin_checker" to ctx.config.synthesis.builtinChecker,
@@ -65,6 +65,7 @@ class SynthesisStage(
             "agent_steps_synthesis" to ctx.config.agent.steps.synthesis,
             "agent_timeout_ms" to ctx.config.agent.timeoutMs,
             "internet_access" to ctx.config.repair.internetAccess,
+            "retry_sessions_synthesis" to ctx.config.synthesis.retrySessions,
         )
         return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template, includeSampleIdentity = !isDeterministic)
     }
@@ -142,7 +143,7 @@ class SynthesisStage(
             builtinProcessor = builtinChecker.processor,
         )
         val timeoutSeconds = ctx.config.agent.timeoutMs / 1000
-        while (attempt < MAX_ATTEMPTS && !accepted) {
+        while (attempt < ctx.config.synthesis.retrySessions && !accepted) {
             attempt++
             val attemptStartedMs = System.currentTimeMillis()
             val runResult = agentRunner.runAgent(
@@ -595,7 +596,6 @@ class SynthesisStage(
     }
 
     companion object {
-        const val MAX_ATTEMPTS = 3
         const val SYNTHESIS_METADATA = "synthesis_metadata.json"
     }
 }

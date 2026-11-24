@@ -63,7 +63,7 @@ class RepairStage(
             "checker_category" to checkerCategoryName(checker.checkerCategory),
             "quals" to checker.qualifierClassNames.map { it.value }.sorted(),
         )
-        val configSlice = mapOf(
+        val configSlice = buildStageRetryConfig(ctx) + mapOf(
             "model_repair" to ctx.config.model.repairModel,
             "agent_steps_repair" to ctx.config.agent.steps.repair,
             "agent_timeout_ms" to ctx.config.agent.timeoutMs,
@@ -74,6 +74,7 @@ class RepairStage(
             "production_roots" to ctx.productionRoots.sorted(),
             "test_roots" to ctx.testRoots.sorted(),
             "checker" to checkerSlice,
+            "retry_turns_repair" to ctx.config.repair.retryTurns,
         )
         return CacheKeys.compute(ctx, stageName, stageInput, emptyList(), configSlice, template, includeSampleIdentity = !isDeterministic)
     }
@@ -141,7 +142,7 @@ class RepairStage(
         var treeChangedSinceChecker = true
         var converged = false
         val timeoutSeconds = ctx.config.agent.timeoutMs / 1000
-        val maxTurns = minOf(MAX_AGENT_TURNS, ctx.config.agent.maxCheckerInvocations)
+        val maxTurns = minOf(ctx.config.repair.retryTurns, ctx.config.agent.maxCheckerInvocations)
         while (turn < maxTurns && !converged) {
             turn++
             val attemptStartedMs = System.currentTimeMillis()
@@ -490,7 +491,6 @@ class RepairStage(
     }
 
     companion object {
-        const val MAX_AGENT_TURNS = 4
         const val MAX_PROMPT_ERRORS = 60_000
         const val MAX_FEEDBACK_CHARS = 30_000
         val MIRROR_EXCLUDES = setOf(".agent-libs", "run-checker.sh")

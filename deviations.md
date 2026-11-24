@@ -192,9 +192,11 @@ the crawler) are not listed unless the code had to interpret the plan.
 
 ## Known gaps not yet fixed
 
-34. **Repair is capped at four agent turns** (`MAX_AGENT_TURNS`), independent of
-    `agent.steps.repair` (a per-invocation step budget) and the checker-call
-    budget. This is an undocumented MVP choice.
+34. **RESOLVED — Repair's four-turn cap is now configurable.** The former
+    hard-coded `MAX_AGENT_TURNS` MVP choice is now `repair.retry_turns` (default
+    `4`), independent of `agent.steps.repair` (a per-invocation step budget).
+    The effective bound remains
+    `min(repair.retry_turns, agent.max_checker_invocations)`.
 35. **`guardrails.mode: "disabled"` is accepted but inert.** Every stage runs
     the AST/filesystem guards regardless, so a disabled-vs-enabled ablation
     currently measures nothing.
@@ -366,8 +368,9 @@ the crawler) are not listed unless the code had to interpret the plan.
 57. **Checker selection is an explicit synthesis decision, not a silent
     Nullness fallback.** The agent must write `synthesis_decision.json`; the
     decision is validated against `synthesis.allowed_checkers`, and invalid
-    decisions or qualifier hierarchies are retried up to three attempts before
-    the stage fails. `synthesis.builtin_checker` configures the selected built-in
+    decisions or qualifier hierarchies are retried up to
+    `synthesis.retry_sessions` attempts before the stage fails.
+    `synthesis.builtin_checker` configures the selected built-in
     processor and is included in the synthesis cache key. Synthesis metadata
     records the accepted decision and confirms `fallback_occurred: false`.
     `synthesis_runs` adds nullable `decision_source`, `decision_rationale`, and
