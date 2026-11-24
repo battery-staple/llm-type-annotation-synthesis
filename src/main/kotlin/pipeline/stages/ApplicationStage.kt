@@ -26,6 +26,7 @@ import pipeline.db.TestExecutionRecord
 import pipeline.db.TestRunRecord
 import pipeline.ports.AgentRunner
 import pipeline.ports.BuildRunner
+import pipeline.ports.DatabasePort
 import pipeline.runners.BuildMetrics
 import pipeline.ports.TestStatus
 import pipeline.util.FileOps
@@ -236,6 +237,12 @@ class ApplicationStage(
                 )
             }
             if (tests.success && tests.outcomes.any { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }) {
+                recordApplicationFailureTelemetry(
+                    ctx.database, ctx, fullTranscript, System.currentTimeMillis() - startedMs,
+                    guardrailEvents = guardrailEvents,
+                    testRun = testRun,
+                    testExecutions = testExecutions,
+                )
                 throw StageHaltException("existing tests fail on annotated tree")
             }
             if (!tests.success) {
@@ -305,6 +312,14 @@ class ApplicationStage(
             accepted = true
         }
         if (!accepted) {
+            recordApplicationFailureTelemetry(
+                ctx.database, ctx, fullTranscript, System.currentTimeMillis() - startedMs,
+                guardrailEvents = guardrailEvents,
+                checkerRuns = checkerRuns,
+                checkerDiagnostics = checkerDiagnostics,
+                testRun = testRun,
+                testExecutions = testExecutions,
+            )
             return StageResult.TransientFailure(
                 RuntimeException("application failed after $attempt attempts: ${feedback.take(2000)}"),
                 stepsTaken,
@@ -497,3 +512,39 @@ internal fun appendViolationEvents(
 }
 
 internal fun violationTexts(violations: List<*>): List<String> = violations.map { it.toString() }
+
+/**
+ * Persists the telemetry accumulated by an application attempt that did not reach
+ * the success path (which records its own, fuller projection). Without this, long
+ * agent runs that only failed application attempts leave no agent turns or LLM
+ * invocation rows behind. Any checker/test telemetry gathered so far is included.
+ */
+internal suspend fun recordApplicationFailureTelemetry(
+    database: DatabasePort,
+    ctx: RunContext,
+    fullTranscript: List<AgentTranscriptEvent>,
+    durationMs: Long,
+    guardrailEvents: List<GuardrailEventRecord> = emptyList(),
+    checkerRuns: List<CheckerRunRecord> = emptyList(),
+    checkerDiagnostics: List<CheckerDiagnosticRecord> = emptyList(),
+    testRun: TestRunRecord? = null,
+    testExecutions: List<TestExecutionRecord> = emptyList(),
+) {
+    database.recordStageTelemetry(
+        TelemetryProjection(
+            agentTurns = AgentTelemetry.turns(ctx, StageName.APPLICATION, fullTranscript),
+            llmInvocations = AgentTelemetry.llmInvocations(
+                ctx,
+                StageName.APPLICATION,
+                fullTranscript,
+                ctx.config.model.applicationModel,
+                durationMs,
+            ),
+            guardrailEvents = guardrailEvents,
+            checkerRuns = checkerRuns,
+            checkerDiagnostics = checkerDiagnostics,
+            testRuns = listOfNotNull(testRun),
+            testExecutions = testExecutions,
+        )
+    )
+}
