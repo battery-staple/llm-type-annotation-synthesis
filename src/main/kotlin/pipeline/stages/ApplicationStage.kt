@@ -402,7 +402,7 @@ class ApplicationStage(
                 testExecutions = testExecutions,
             )
             return StageResult.TransientFailure(
-                RuntimeException("application failed after $attempt attempts: ${feedback.take(2000)}"),
+                RuntimeException("application failed after $attempt agent sessions: ${feedback.take(2000)}"),
                 stepsTaken,
                 fullTranscript.toList(),
             )

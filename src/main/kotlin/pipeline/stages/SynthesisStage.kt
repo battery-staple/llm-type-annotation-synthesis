@@ -230,7 +230,7 @@ class SynthesisStage(
         }
         if (!accepted) {
             return StageResult.TransientFailure(
-                RuntimeException("synthesis failed after $attempt attempts: ${lastProblems.joinToString("; ")}"),
+                RuntimeException("synthesis failed after $attempt agent sessions: ${lastProblems.joinToString("; ")}"),
                 stepsTaken,
                 fullTranscript.toList(),
             )

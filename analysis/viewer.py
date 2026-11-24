@@ -1119,17 +1119,20 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
         # Stage-level retries are run-wide; keep them separate from the
         # per-attempt/session information attached to each step.
         retry_by_run: dict[str, dict[str, int]] = {}
-        for row in rows_to_dicts(
-            conn.execute(
-                """
-                SELECT run_id,
-                       SUM(CASE WHEN will_retry=1 THEN 1 ELSE 0 END) AS stage_retries,
-                       SUM(CASE WHEN will_retry=0 THEN 1 ELSE 0 END) AS final_stage_failures
-                FROM retry_events GROUP BY run_id
-                """
-            ).fetchall()
-        ):
-            retry_by_run[row["run_id"]] = row
+        try:
+            for row in rows_to_dicts(
+                conn.execute(
+                    """
+                    SELECT run_id,
+                           SUM(CASE WHEN will_retry=1 THEN 1 ELSE 0 END) AS stage_retries,
+                           SUM(CASE WHEN will_retry=0 THEN 1 ELSE 0 END) AS final_stage_failures
+                    FROM retry_events GROUP BY run_id
+                    """
+                ).fetchall()
+            ):
+                retry_by_run[row["run_id"]] = row
+        except sqlite3.Error:
+            pass
 
         result = []
         for r in runs:
