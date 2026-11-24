@@ -1633,6 +1633,17 @@ code, pre {
   padding: 18px 22px;
 }
 
+/* The generic .card overflow-x turns it into a scroll container, which traps
+   the sticky table header inside a box that never scrolls vertically. Let the
+   matrix view be the scroller instead; it still scrolls wide tables sideways. */
+.matrix-table-card {
+  overflow: visible;
+}
+
+.matrix-table th {
+  z-index: 2;
+}
+
 .matrix-toolbar {
   display: flex;
   flex-wrap: wrap;

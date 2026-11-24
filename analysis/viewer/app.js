@@ -4061,7 +4061,7 @@
           ${stagePills}
         </div>
       </div>
-      <div class="card" style="overflow-x:auto;">${tableHtml}</div>
+      <div class="card matrix-table-card">${tableHtml}</div>
       ${telemetryHtml}
     `;
 
