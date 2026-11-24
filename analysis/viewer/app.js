@@ -16,6 +16,9 @@
     configDiffOnly: false,
     logText: null,
     lastDbMtime: null,
+    // The checkbox's DOM state used to be the only source of truth, so any full
+    // page load silently dropped Live mode. Keep it in state and persist it.
+    autoRefreshEnabled: false,
     autoRefreshTimer: null,
     viewMode: "inspector",
     matrixStage: null,
@@ -3311,28 +3314,65 @@
   }
 
   // ---- Auto-refresh ----
+  const AUTO_REFRESH_KEY = "viewer.autoRefresh";
+
+  function readAutoRefreshPreference() {
+    try {
+      return localStorage.getItem(AUTO_REFRESH_KEY) === "1";
+    } catch {
+      return false; // storage disabled (private mode, file://, etc.)
+    }
+  }
+
+  function persistAutoRefreshPreference(enabled) {
+    try {
+      localStorage.setItem(AUTO_REFRESH_KEY, enabled ? "1" : "0");
+    } catch {
+      // Non-fatal: the toggle still works for this page's lifetime.
+    }
+  }
+
+  function startAutoRefresh() {
+    if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+    state.autoRefreshTimer = setInterval(async () => {
+      try {
+        const health = await apiGet("/api/health");
+        // live_runs changes when a pipeline process dies without writing
+        // to the DB (e.g. kill -9), which db_mtime alone would miss.
+        const fingerprint = `${health.db_mtime}|${(health.live_runs || []).join(",")}`;
+        if (health.db_mtime && fingerprint !== state.lastDbMtime) {
+          state.lastDbMtime = fingerprint;
+          await loadRuns(true);
+        }
+      } catch {
+        // Ignore transient poll errors
+      }
+    }, 5000);
+  }
+
+  function stopAutoRefresh() {
+    if (state.autoRefreshTimer) {
+      clearInterval(state.autoRefreshTimer);
+      state.autoRefreshTimer = null;
+    }
+  }
+
   function setupAutoRefresh() {
     const toggle = $("autoRefreshToggle");
+
+    // Restore the preference before wiring the listener: the checkbox starts
+    // unchecked in the markup, so a plain reload used to clear Live mode.
+    state.autoRefreshEnabled = readAutoRefreshPreference();
+    toggle.checked = state.autoRefreshEnabled;
+    toggle.classList.toggle("active", state.autoRefreshEnabled);
+    if (state.autoRefreshEnabled) startAutoRefresh();
+
     toggle.addEventListener("change", () => {
-      if (toggle.checked) {
-        state.autoRefreshTimer = setInterval(async () => {
-          try {
-            const health = await apiGet("/api/health");
-            // live_runs changes when a pipeline process dies without writing
-            // to the DB (e.g. kill -9), which db_mtime alone would miss.
-            const fingerprint = `${health.db_mtime}|${(health.live_runs || []).join(",")}`;
-            if (health.db_mtime && fingerprint !== state.lastDbMtime) {
-              state.lastDbMtime = fingerprint;
-              await loadRuns(true);
-            }
-          } catch {
-            // Ignore transient poll errors
-          }
-        }, 5000);
-      } else if (state.autoRefreshTimer) {
-        clearInterval(state.autoRefreshTimer);
-        state.autoRefreshTimer = null;
-      }
+      state.autoRefreshEnabled = toggle.checked;
+      toggle.classList.toggle("active", state.autoRefreshEnabled);
+      persistAutoRefreshPreference(state.autoRefreshEnabled);
+      if (state.autoRefreshEnabled) startAutoRefresh();
+      else stopAutoRefresh();
     });
   }
 

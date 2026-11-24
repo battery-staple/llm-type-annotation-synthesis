@@ -85,6 +85,7 @@ code, pre {
   display: flex;
   align-items: center;
   gap: 8px;
+  white-space: nowrap;
 }
 
 .brand-dot {
@@ -105,7 +106,8 @@ code, pre {
 .sidebar-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 
 .auto-refresh-toggle {
@@ -115,6 +117,25 @@ code, pre {
   font-size: 11px;
   color: var(--text-muted);
   cursor: pointer;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  user-select: none;
+}
+
+.auto-refresh-toggle:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+/* Live mode is a persistent state, not a momentary click: show it clearly so a
+   second click on the label is deliberate rather than an attempt to "turn it on". */
+.auto-refresh-toggle.active,
+.auto-refresh-toggle.active:hover {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: var(--green);
+  font-weight: 600;
 }
 
 .sidebar-filters {
