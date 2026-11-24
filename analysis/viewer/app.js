@@ -2,6 +2,8 @@
   "use strict";
 
   const STAGE_ORDER = ["ingestion", "triage", "synthesis", "application", "repair", "verification"];
+  const RUN_TABS = ["stages", "config", "log"];
+  const STAGE_TABS = ["overview", "patch", "transcript", "diagnostics", "tests", "guardrails"];
 
   const state = {
     runs: [],
@@ -1032,19 +1034,57 @@
     timeout: "Per-stage agent timeout",
   };
 
-  function saveUrlState() {
+  function buildUrlHash() {
     const params = new URLSearchParams();
     if (state.selectedRunId) params.set("run", state.selectedRunId);
     if (state.activeRunTab) params.set("tab", state.activeRunTab);
     if (state.selectedStepName) params.set("stage", state.selectedStepName);
     if (state.activeStageTab) params.set("stageTab", state.activeStageTab);
+    if (state.viewMode === "matrix") params.set("view", "matrix");
+    if (state.matrixStage) params.set("matrixStage", state.matrixStage);
+    if (state.matrixSort.key) {
+      // Sort keys can themselves contain ':' (e.g. "stage:ingestion"), so the
+      // direction is the part after the final colon.
+      params.set("matrixSort", `${state.matrixSort.key}:${state.matrixSort.dir}`);
+    }
     const facets = serializeFacets();
     if (Object.keys(facets).length > 0) params.set("f", JSON.stringify(facets));
     if (state.filters.sort && state.filters.sort !== "newest") params.set("sort", state.filters.sort);
-    const hash = `#${params.toString()}`;
+    return `#${params.toString()}`;
+  }
+
+  // Non-navigation updates (filters, live refresh, restoring history) replace
+  // the current entry. User-driven navigation goes through navigate() below.
+  function saveUrlState() {
+    const hash = buildUrlHash();
     if (window.location.hash !== hash) {
       history.replaceState(null, "", hash);
     }
+  }
+
+  /**
+   * Treat one user action as a single "page" in browser history. State
+   * mutations made by the action keep replacing the current entry; once the
+   * final state is known, put the previous URL back on that entry and push the
+   * new URL. Back then lands on the exact state that was shown before the click.
+   */
+  async function navigate(mutate) {
+    const before = buildUrlHash();
+    await mutate();
+    const after = buildUrlHash();
+    if (after === before) return;
+    history.replaceState(null, "", before);
+    history.pushState(null, "", after);
+  }
+
+  function parseMatrixSort(value) {
+    if (!value) return { key: null, dir: "asc" };
+    const splitAt = value.lastIndexOf(":");
+    if (splitAt <= 0) return { key: null, dir: "asc" };
+    const key = value.slice(0, splitAt);
+    const dir = value.slice(splitAt + 1);
+    if (dir !== "asc" && dir !== "desc") return { key: null, dir: "asc" };
+    return { key, dir };
   }
 
   function readUrlState() {
@@ -1062,9 +1102,100 @@
       tab: params.get("tab") || null,
       stage: params.get("stage") || null,
       stageTab: params.get("stageTab") || null,
+      view: params.get("view") || null,
+      matrixStage: params.get("matrixStage") || null,
+      matrixSort: parseMatrixSort(params.get("matrixSort")),
       filters,
       sort: params.get("sort") || null,
     };
+  }
+
+  /** Apply the hash's navigation fields to state. Run detail loads separately. */
+  function restoreNavFromUrl(saved) {
+    state.viewMode = saved.view === "matrix" ? "matrix" : "inspector";
+    state.matrixStage = STAGE_ORDER.includes(saved.matrixStage) ? saved.matrixStage : null;
+    const available = new Set(matrixColumns(state.matrixStage).map((c) => c.key));
+    const parsedSort = saved.matrixSort || { key: null, dir: "asc" };
+    state.matrixSort = parsedSort.key && available.has(parsedSort.key)
+      ? { key: parsedSort.key, dir: parsedSort.dir }
+      : { key: null, dir: "asc" };
+    state.activeRunTab = RUN_TABS.includes(saved.tab) ? saved.tab : "stages";
+    state.activeStageTab = STAGE_TABS.includes(saved.stageTab) ? saved.stageTab : "overview";
+    state.selectedStepName = saved.stage || null;
+  }
+
+  /** A value-object comparison so popstate + hashchange (both fire for hash
+   * history traversal) cannot trigger the same restore twice. */
+  function navSignature(saved) {
+    const sort = saved.matrixSort || {};
+    return [
+      saved.run || "",
+      RUN_TABS.includes(saved.tab) ? saved.tab : "stages",
+      saved.stage || "",
+      STAGE_TABS.includes(saved.stageTab) ? saved.stageTab : "overview",
+      saved.view === "matrix" ? "matrix" : "inspector",
+      STAGE_ORDER.includes(saved.matrixStage) ? saved.matrixStage : "",
+      sort.key || "",
+      sort.key ? (sort.dir || "asc") : "asc",
+      normalizeFacetState(saved.filters),
+      saved.sort || "newest",
+    ].join("\u0000");
+  }
+
+  function currentNavSignature() {
+    return navSignature({
+      run: state.selectedRunId,
+      tab: state.activeRunTab,
+      stage: state.selectedStepName,
+      stageTab: state.activeStageTab,
+      view: state.viewMode,
+      matrixStage: state.matrixStage,
+      matrixSort: state.matrixSort,
+      filters: serializeFacets(),
+      sort: state.filters.sort,
+    });
+  }
+
+  let historyRestoreRunning = false;
+  let historyRestoreQueued = false;
+
+  async function restoreNavFromUrlNow() {
+    const saved = readUrlState();
+    if (navSignature(saved) === currentNavSignature()) return;
+    restoreNavFromUrl(saved);
+    restoreFiltersFromUrl(saved);
+    applyFilters();
+    syncViewVisibility();
+    if (state.viewMode === "matrix") renderMatrixView();
+
+    const target = saved.run && state.runs.some((r) => r.run_id === saved.run)
+      ? saved.run
+      : state.selectedRunId;
+    if (target) {
+      // Preserving the stage/tab keeps the values just restored from the hash;
+      // selectRun recomputes selectedStepId and re-renders every pane.
+      await selectRun(target, Boolean(saved.run && saved.run === target));
+    } else {
+      renderRunsList();
+    }
+    saveUrlState();
+  }
+
+  async function handleHistoryNavigation() {
+    if (historyRestoreRunning) {
+      historyRestoreQueued = true;
+      return;
+    }
+    historyRestoreRunning = true;
+    try {
+      do {
+        historyRestoreQueued = false;
+        await restoreNavFromUrlNow();
+      } while (historyRestoreQueued);
+    } finally {
+      historyRestoreRunning = false;
+      if (historyRestoreQueued) handleHistoryNavigation();
+    }
   }
 
   async function apiGet(url) {
@@ -1476,14 +1607,14 @@
     });
 
     listEl.querySelectorAll(".run-card").forEach((el) => {
-      el.addEventListener("click", () => {
+      el.addEventListener("click", () => navigate(async () => {
         if (state.viewMode !== "inspector") setViewMode("inspector");
         const runId = el.dataset.runId;
-        selectRun(runId, false);
+        await selectRun(runId, false);
         [...listEl.querySelectorAll(".run-card")]
           .find((card) => card.dataset.runId === runId)
           ?.focus();
-      });
+      }));
     });
   }
 
@@ -1678,6 +1809,7 @@
     const latest = matching[matching.length - 1];
     state.selectedStepName = name;
     state.selectedStepId = latest ? latest.step_id : null;
+    saveUrlState();
     renderStageStepper();
     renderStageInspector();
     if (focusCard) focusSelectedStepCard();
@@ -1740,7 +1872,7 @@
     }).join("");
 
     $("stageStepper").querySelectorAll(".step-card:not(.not-run)").forEach((el) => {
-      el.addEventListener("click", () => selectStepByName(el.dataset.stepName, true));
+      el.addEventListener("click", () => navigate(() => selectStepByName(el.dataset.stepName, true)));
     });
   }
 
@@ -3510,7 +3642,7 @@
         const nextIdx = goesBackward
           ? Math.max(0, idx === -1 ? 0 : idx - 1)
           : Math.min(names.length - 1, idx + 1);
-        selectStepByName(names[nextIdx], true);
+        navigate(() => selectStepByName(names[nextIdx], true));
       }
       return;
     }
@@ -3526,7 +3658,7 @@
         const nextIdx = e.key === "ArrowLeft"
           ? Math.max(0, idx === -1 ? 0 : idx - 1)
           : Math.min(names.length - 1, idx + 1);
-        selectStepByName(names[nextIdx], inStepper);
+        navigate(() => selectStepByName(names[nextIdx], inStepper));
       }
       return;
     }
@@ -3577,7 +3709,7 @@
         const runId = nextCard.dataset.runId;
         const needsRender = Boolean(state.highlightedBatchId);
         if (runId !== state.selectedRunId) {
-          selectRun(runId, false).then(() => {
+          navigate(() => selectRun(runId, false)).then(() => {
             [...$("runsList").querySelectorAll(".run-card")]
               .find((card) => card.dataset.runId === runId)
               ?.scrollIntoView({ block: "nearest" });
@@ -3609,6 +3741,7 @@
 
   function setViewMode(mode) {
     state.viewMode = mode;
+    saveUrlState();
     syncViewVisibility();
     updateCompactChrome();
     if (mode === "matrix") renderMatrixView();
@@ -3634,6 +3767,7 @@
         renderStageInspector();
       }
     }
+    saveUrlState();
   }
 
   function renderMatrixCell(run, stageName) {
@@ -3898,6 +4032,7 @@
     if (state.matrixSort.key && !available.has(state.matrixSort.key)) {
       state.matrixSort = { key: null, dir: "asc" };
     }
+    saveUrlState();
     renderMatrixView();
   }
 
@@ -3907,6 +4042,7 @@
       state.matrixSort.key === key
         ? { key, dir: state.matrixSort.dir === "asc" ? "desc" : "asc" }
         : { key, dir: btn.dataset.matrixSortDir === "asc" ? "asc" : "desc" };
+    saveUrlState();
     renderMatrixView();
     // renderMatrixView() replaces the header button that was just activated;
     // put focus back on its replacement so keyboard users can sort again.
@@ -4075,16 +4211,16 @@
     }
 
     el.querySelectorAll("[data-matrix-stage]").forEach((btn) => {
-      btn.addEventListener("click", () => setMatrixStage(btn.dataset.matrixStage || null));
+      btn.addEventListener("click", () => navigate(() => setMatrixStage(btn.dataset.matrixStage || null)));
     });
     el.querySelectorAll("[data-matrix-sort]").forEach((btn) => {
-      btn.addEventListener("click", () => handleMatrixSortClick(btn));
+      btn.addEventListener("click", () => navigate(() => handleMatrixSortClick(btn)));
     });
     el.querySelectorAll(".matrix-cell-btn, .matrix-focus-row").forEach((btn) => {
-      btn.addEventListener("click", () => jumpToRunStage(btn.dataset.runId, btn.dataset.stage));
+      btn.addEventListener("click", () => navigate(() => jumpToRunStage(btn.dataset.runId, btn.dataset.stage)));
     });
     el.querySelectorAll(".matrix-row-btn").forEach((btn) => {
-      btn.addEventListener("click", () => jumpToRunStage(btn.dataset.runId, null));
+      btn.addEventListener("click", () => navigate(() => jumpToRunStage(btn.dataset.runId, null)));
     });
   }
 
@@ -4094,7 +4230,10 @@
     $("refreshBtn").addEventListener("click", () => loadRuns(true));
 
     initFilterControls();
-    restoreFiltersFromUrl(readUrlState());
+    const savedNav = readUrlState();
+    restoreFiltersFromUrl(savedNav);
+    restoreNavFromUrl(savedNav);
+    syncViewVisibility();
     $("runSearch").addEventListener("input", () => applyFilters());
     $("filterFacets").addEventListener("change", handleFacetSelectChange);
     $("activeFilters").addEventListener("click", handleActiveFilterClick);
@@ -4106,17 +4245,11 @@
       saveUrlState();
     });
 
-    window.addEventListener("hashchange", () => {
-      const saved = readUrlState();
-      if (
-        normalizeFacetState(saved.filters) === normalizeFacetState(serializeFacets()) &&
-        (saved.sort || "newest") === state.filters.sort
-      ) {
-        return;
-      }
-      restoreFiltersFromUrl(saved);
-      applyFilters();
-    });
+    // History traversal over hash URLs fires popstate and hashchange. Both
+    // route to one guarded restore so runs, views, tabs and filters all follow
+    // the Back/Forward buttons (and pasted hash URLs trigger it too).
+    window.addEventListener("popstate", handleHistoryNavigation);
+    window.addEventListener("hashchange", handleHistoryNavigation);
 
     // Any badge/control carrying a facet value toggles that filter. Capture
     // phase stops the click from also navigating (e.g. selecting a run card).
@@ -4136,15 +4269,15 @@
       true
     );
 
-    $("viewModeInspector").addEventListener("click", () => setViewMode("inspector"));
-    $("viewModeMatrix").addEventListener("click", () => setViewMode("matrix"));
+    $("viewModeInspector").addEventListener("click", () => navigate(() => setViewMode("inspector")));
+    $("viewModeMatrix").addEventListener("click", () => navigate(() => setViewMode("matrix")));
 
     document.querySelectorAll(".run-tab").forEach((btn) => {
-      btn.addEventListener("click", () => switchRunTab(btn.dataset.runTab));
+      btn.addEventListener("click", () => navigate(() => switchRunTab(btn.dataset.runTab)));
     });
 
     document.querySelectorAll(".stage-tab").forEach((btn) => {
-      btn.addEventListener("click", () => switchStageTab(btn.dataset.stageTab));
+      btn.addEventListener("click", () => navigate(() => switchStageTab(btn.dataset.stageTab)));
     });
 
     // Bound to the persistent scroll container rather than its innerHTML: tab
