@@ -1182,6 +1182,10 @@ code, pre {
 .diff-line.del { background: rgba(248, 81, 73, 0.14); color: #ffdcd7; }
 .diff-line.hunk { background: rgba(88, 166, 255, 0.10); color: var(--accent); }
 
+.edit-tool-diff .diff-line {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 /* Transcript Timeline */
 .transcript-toolbar {
   display: flex;

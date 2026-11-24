@@ -3075,6 +3075,55 @@
     `;
   }
 
+  function renderToolEditDiff(oldValue, newValue) {
+    const getLines = (value) => {
+      const text = stringifyToolValue(value);
+      if (!text) return [];
+      const lines = text.split(/\r?\n/);
+      if (lines[lines.length - 1] === "") lines.pop();
+      return lines;
+    };
+    const oldLines = getLines(oldValue);
+    const newLines = getLines(newValue);
+    let prefixLength = 0;
+    while (
+      prefixLength < oldLines.length &&
+      prefixLength < newLines.length &&
+      oldLines[prefixLength] === newLines[prefixLength]
+    ) {
+      prefixLength++;
+    }
+
+    let suffixLength = 0;
+    while (
+      suffixLength < oldLines.length - prefixLength &&
+      suffixLength < newLines.length - prefixLength &&
+      oldLines[oldLines.length - 1 - suffixLength] === newLines[newLines.length - 1 - suffixLength]
+    ) {
+      suffixLength++;
+    }
+
+    const rows = [
+      ...oldLines.slice(0, prefixLength).map((line) => ({ type: "ctx", text: `  ${line}` })),
+      ...oldLines.slice(prefixLength, oldLines.length - suffixLength).map((line) => ({ type: "del", text: `- ${line}` })),
+      ...newLines.slice(prefixLength, newLines.length - suffixLength).map((line) => ({ type: "add", text: `+ ${line}` })),
+      ...oldLines.slice(oldLines.length - suffixLength).map((line) => ({ type: "ctx", text: `  ${line}` })),
+    ];
+    const additions = rows.filter((row) => row.type === "add").length;
+    const deletions = rows.filter((row) => row.type === "del").length;
+
+    return `
+      <div class="tool-arg-block">
+        <details class="code-collapse" open>
+          <summary>Diff <span class="muted">(+${additions} / -${deletions})</span></summary>
+          <div class="diff-lines edit-tool-diff">
+            ${rows.map((row) => `<div class="diff-line ${row.type}"><span>${esc(row.text)}</span></div>`).join("")}
+          </div>
+        </details>
+      </div>
+    `;
+  }
+
   function renderToolArguments(toolName, value) {
     const args = parseToolArguments(value);
     if (!args) {
@@ -3096,7 +3145,19 @@
       ...preferredKeys.filter((key) => Object.prototype.hasOwnProperty.call(args, key)),
       ...Object.keys(args).filter((key) => !preferredKeys.includes(key)),
     ];
-    const fields = keys.map((key) => renderToolArgumentField(key, args[key], toolType)).join("");
+    const oldKey = ["oldString", "old_string"].find((key) => Object.prototype.hasOwnProperty.call(args, key));
+    const newKey = ["newString", "new_string"].find((key) => Object.prototype.hasOwnProperty.call(args, key));
+    const hasEditDiff = toolType === "edit" && oldKey && newKey;
+    let editDiffRendered = false;
+    const editTextKeys = new Set(["oldString", "old_string", "newString", "new_string"]);
+    const fields = keys.map((key) => {
+      if (hasEditDiff && editTextKeys.has(key)) {
+        if (editDiffRendered) return "";
+        editDiffRendered = true;
+        return renderToolEditDiff(args[oldKey], args[newKey]);
+      }
+      return renderToolArgumentField(key, args[key], toolType);
+    }).join("");
     return `
       <div class="tool-call-arguments">
         <div class="tool-args-title">Arguments</div>
