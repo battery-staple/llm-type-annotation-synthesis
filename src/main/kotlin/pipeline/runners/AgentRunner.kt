@@ -73,7 +73,10 @@ class CoroutineOpenCodeRunner(
         environment: Map<String, String>,
         onEvent: (suspend (AgentTranscriptEvent) -> Unit)?
     ): AgentRunResult = concurrency.withPermit { withContext(Dispatchers.IO) {
-        val command = listOf(executable, "run", "--standalone", "--auto", "--format", "json", "-m", model, prompt)
+        // --thinking is required for OpenCode 2.x to emit reasoning parts in the
+        // JSON event stream; without it the viewer's live transcript has nothing
+        // to render as Thinking until end-of-run DB reconciliation.
+        val command = listOf(executable, "run", "--standalone", "--auto", "--format", "json", "--thinking", "-m", model, prompt)
         val builder = ProcessBuilder(command).directory(cwd)
         val env = builder.environment()
         env.remove("GIT_DIR")
