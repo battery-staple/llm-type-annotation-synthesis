@@ -777,9 +777,10 @@ the host, 332 s in Docker.
   `:core:npmInstall`, and the image has no npm. Until this fix the failure was
   misreported as `checker_silent`. Left unsupported, because its tests are
   also predicted to need Docker (Testcontainers), which build containers do
-  not provide. Two ways to widen the envelope, neither adopted: give
+  not provide. Three ways to widen the envelope, none adopted: give
   `checkerPass` only `main.output.classesDirs` (applies to every repository),
-  or add Node.js to the image.
+  add Node.js to the image, or build from jobrunr's own `Dockerfile-build`
+  (§7.5, "build from the repository's own environment").
 
 ### Containment canary test
 
@@ -1026,6 +1027,46 @@ argument.
   synthesis retry feedback. JDK 21 and JDK 27 javac both still accept
   `--release 8` but warn that it will be removed, so the pipeline's JDK stays
   pinned.
+- **Future work, not adopted: build from the repository's own environment.**
+  Every repository now builds in the shared runtime image. A repository that
+  needs tools beyond Java, such as Node.js or a Docker CLI, therefore ends
+  `unsupported`. The proposal: when a repository ships its own environment
+  description, build its containers from that description, and otherwise
+  fall back to the shared image. Candidates are a `.devcontainer/` or
+  `devcontainer.json`, or a build Dockerfile.
+  - Why it fits the generality requirement: the description is a fact found
+    in the repository, not a workaround the harness writes. No code checks
+    benchmark IDs, and the same rule applies to every repository.
+  - Eval repositories (2026-11-24): none ships a devcontainer.
+    - jobrunr has `Dockerfile-build` at its preflight commit. That image adds
+      Node.js and the Docker CLI, the two things its P5 and P7 checks lack
+      (Phase 1 known gaps).
+    - resilience4j has a Gitpod `Dockerfile`.
+    - Coverage is unknown, so the corpus tool (§7.4) should count
+      repositories that ship either kind of file before any of this is built.
+  - The harness's own requirements still apply. These are the JDKs at known
+    paths with the `lltas.*` labels, the Checker Framework and other
+    same-path mounts, the Gradle home volume, and the environment allowlist.
+    The likely shape is a derived image: the repository's image with a fixed
+    harness layer on top. A base image that lacks a usable shell or package
+    manager would fall back to the shared image or end `unsupported`.
+  - Comparability: each repository would build in a different environment.
+    Results would record where the environment came from (repository or
+    shared image) along with the image ID, and the corpus report would show
+    pass rates for each source.
+  - Reproducibility and provenance:
+    - These files often use floating tags (`FROM node:26`) and devcontainer
+      "features" downloaded at build time. They would need resolving to
+      digests and recording.
+    - The description can change between C-1 and C, so it is read at one
+      fixed commit, the preflight or target commit.
+    - The derived image ID goes into the build-stage cache keys.
+  - Containment (Phase 2): devcontainer `runArgs`, `privileged`, mounts, the
+    Docker socket, and lifecycle commands (`postCreateCommand`) are ignored.
+    Only the image or Dockerfile is used, so nothing the repository specifies
+    reaches the host. A repository whose tests need a Docker daemon
+    (Testcontainers) stays `test_requires_docker` even when its image
+    includes the Docker CLI.
 
 ### 7.6 Module Projects (Bug 2)
 
