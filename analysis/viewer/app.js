@@ -1511,8 +1511,9 @@
       state.selectedStepId = exact ? exact.step_id : null;
     }
 
-    $("emptyState").classList.add("hidden");
-    $("runView").classList.remove("hidden");
+    // Do not unhide the inspector unconditionally: Live refreshes re-select the
+    // current run while the Matrix tab is active, which used to reveal both panes.
+    syncViewVisibility();
 
     renderRunHeader();
     populateCompareDropdown();
@@ -3526,26 +3527,21 @@
   }
 
   // ---- Matrix View (Compare Across Commits) ----
+  /** Show exactly one main pane for the current mode and selection. */
+  function syncViewVisibility() {
+    const matrix = state.viewMode === "matrix";
+    const inspector = !matrix && Boolean(state.runDetail);
+    $("matrixView").classList.toggle("hidden", !matrix);
+    $("runView").classList.toggle("hidden", !inspector);
+    $("emptyState").classList.toggle("hidden", matrix || inspector);
+    $("viewModeInspector").classList.toggle("active", !matrix);
+    $("viewModeMatrix").classList.toggle("active", matrix);
+  }
+
   function setViewMode(mode) {
     state.viewMode = mode;
-    $("viewModeInspector").classList.toggle("active", mode === "inspector");
-    $("viewModeMatrix").classList.toggle("active", mode === "matrix");
-
-    if (mode === "matrix") {
-      $("matrixView").classList.remove("hidden");
-      $("emptyState").classList.add("hidden");
-      $("runView").classList.add("hidden");
-      renderMatrixView();
-    } else {
-      $("matrixView").classList.add("hidden");
-      if (state.runDetail) {
-        $("runView").classList.remove("hidden");
-        $("emptyState").classList.add("hidden");
-      } else {
-        $("emptyState").classList.remove("hidden");
-        $("runView").classList.add("hidden");
-      }
-    }
+    syncViewVisibility();
+    if (mode === "matrix") renderMatrixView();
   }
 
   function latestStep(run, stageName) {
