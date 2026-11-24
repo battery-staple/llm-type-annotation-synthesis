@@ -22,6 +22,9 @@
     autoRefreshTimer: null,
     viewMode: "inspector",
     matrixStage: null,
+    // Column-level sort for the matrix tables. `key` is one of the keys from
+    // matrixColumns(); no key means "keep the sidebar's run order".
+    matrixSort: { key: null, dir: "asc" },
     highlightedBatchId: null,
     expandedBatches: new Set(),
     collapsedBatches: new Set(),
@@ -3670,6 +3673,247 @@
     }
   }
 
+  // ---- Matrix column sorting ----
+  // A higher rank means the stage needs more attention, so descending order
+  // puts failures/incomplete stages ahead of healthy or never-run stages.
+  const MATRIX_STAGE_RANK = { skip: 1, ok: 2, running: 3, warn: 4, fail: 5 };
+
+  function matrixStageRank(run, stageName) {
+    const st = latestStep(run, stageName);
+    return st ? (MATRIX_STAGE_RANK[stageState(run, st)] ?? 0) : 0;
+  }
+
+  function matrixStepValue(run, stageName, field) {
+    const st = latestStep(run, stageName);
+    return st ? st[field] : null;
+  }
+
+  function matrixRegressionTest(run) {
+    return run.regression_test_class
+      ? `${run.regression_test_class.split(".").pop()}.${run.regression_test_method || ""}`
+      : "";
+  }
+
+  /**
+   * Column metadata for the active matrix table. The same spec renders the
+   * header (label, sort affordance, focus control) and extracts the value used
+   * to order rows, so a column always sorts by what it displays.
+   */
+  function matrixColumns(stage) {
+    const commitColumn = {
+      key: "benchmark",
+      label: "Commit / Benchmark",
+      kind: "text",
+      defaultDir: "asc",
+      value: (r) => String(r.benchmark_id || ""),
+    };
+    const triageModeColumn = (label) => ({
+      key: "triageMode",
+      label,
+      kind: "text",
+      defaultDir: "asc",
+      value: (r) => String(r.key_config?.triage_mode || "manifest"),
+    });
+    // Keys are namespaced when the same label means different things in
+    // different views (run-level vs. stage-level tokens, outcome, cache), so
+    // switching views cannot silently keep an "active" sort on new data.
+    const cacheColumn = (key, stageName) => ({
+      key,
+      label: "Cache",
+      kind: "number",
+      defaultDir: "desc",
+      value: (r) => {
+        const hit = matrixStepValue(r, stageName, "cache_hit");
+        return hit === null || hit === undefined ? null : (hit ? 1 : 0);
+      },
+    });
+
+    if (stage === null) {
+      return [
+        commitColumn,
+        triageModeColumn("Triage"),
+        ...STAGE_ORDER.map((s) => ({
+          key: `stage:${s}`,
+          label: s,
+          kind: "number",
+          defaultDir: "desc",
+          // The focus control stays next to the sort control: sorting by a
+          // stage and drilling into that stage are different actions.
+          focusStage: s,
+          value: (r) => matrixStageRank(r, s),
+        })),
+        {
+          key: "run:outcome",
+          label: "Outcome",
+          kind: "number",
+          defaultDir: "asc", // OUTCOME_SORT_RANK already ranks success first.
+          value: (r) => OUTCOME_SORT_RANK[deriveOutcome(r).key] ?? 99,
+        },
+        {
+          key: "retries",
+          label: "Stage retries",
+          title: "Orchestrator retries of a whole stage, not agent-session retries",
+          kind: "number",
+          defaultDir: "desc",
+          value: (r) => Number(r.stage_retries || 0),
+        },
+        {
+          key: "run:tokens",
+          label: "Tokens",
+          kind: "number",
+          defaultDir: "desc",
+          value: (r) => Number(r.llm_stats?.total_tokens || 0),
+        },
+      ];
+    }
+
+    if (stage === "triage") {
+      return [
+        commitColumn,
+        triageModeColumn("Mode"),
+        {
+          key: "triageStatus",
+          label: "Triage Status",
+          kind: "text",
+          defaultDir: "asc",
+          value: (r) => String(effectiveTriageStatus(r)),
+        },
+        {
+          key: "classification",
+          label: "Classification",
+          kind: "text",
+          defaultDir: "asc",
+          value: (r) => String(r.classification || ""),
+        },
+        {
+          key: "score",
+          label: "Score",
+          kind: "number",
+          defaultDir: "desc",
+          value: (r) => r.bugfix_score,
+        },
+        {
+          key: "discardReason",
+          label: "Discard Reason",
+          kind: "text",
+          defaultDir: "asc",
+          value: (r) => String(r.discard_reason || ""),
+        },
+        {
+          key: "regressionTest",
+          label: "Regression Test",
+          kind: "text",
+          defaultDir: "asc",
+          value: (r) => matrixRegressionTest(r),
+        },
+        cacheColumn("triage:cache", "triage"),
+      ];
+    }
+
+    return [
+      commitColumn,
+      {
+        key: "status",
+        label: "Status",
+        kind: "number",
+        defaultDir: "desc",
+        value: (r) => matrixStageRank(r, stage),
+      },
+      cacheColumn("stage:cache", stage),
+      ...[
+        ["stage:turns", "Turns", "turns_taken"],
+        ["stage:tokens", "Tokens", "total_tokens"],
+        ["stage:checkerRuns", "Checker Runs", "checker_invocations"],
+        ["stage:diagnostics", "Diagnostics", "checker_diagnostic_count"],
+        ["stage:testRuns", "Test Runs", "test_invocations"],
+      ].map(([key, label, field]) => ({
+        key,
+        label,
+        kind: "number",
+        defaultDir: "desc",
+        value: (r) => matrixStepValue(r, stage, field),
+      })),
+      {
+        key: "stage:outcome",
+        label: "Outcome / Notes",
+        kind: "text",
+        defaultDir: "asc",
+        value: (r) => {
+          const st = latestStep(r, stage);
+          if (st?.compiler_diagnostics) return String(st.compiler_diagnostics).slice(0, 80);
+          const outcome = deriveOutcome(r);
+          return [outcome.label, outcome.reasonLabel].filter(Boolean).join(" · ");
+        },
+      },
+    ];
+  }
+
+  function sortMatrixRuns(runs, columns) {
+    const sort = state.matrixSort;
+    if (!sort.key) return runs;
+    const column = columns.find((c) => c.key === sort.key);
+    if (!column) return runs;
+    const dir = sort.dir === "desc" ? -1 : 1;
+    return [...runs].sort((a, b) => {
+      const av = column.value(a);
+      const bv = column.value(b);
+      const aMissing = av === null || av === undefined || (typeof av === "number" && Number.isNaN(av));
+      const bMissing = bv === null || bv === undefined || (typeof bv === "number" && Number.isNaN(bv));
+      // Rows with no value (e.g. a stage that never ran) stay at the end in
+      // both directions; ties keep the sidebar's newest-first ordering.
+      if (aMissing !== bMissing) return aMissing ? 1 : -1;
+      if (aMissing) return compareNewest(a, b);
+      const cmp =
+        typeof av === "number" && typeof bv === "number"
+          ? av - bv
+          : String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: "base" });
+      return cmp * dir || compareNewest(a, b);
+    });
+  }
+
+  function matrixHeaderHtml(column) {
+    const active = state.matrixSort.key === column.key;
+    const dir = active ? state.matrixSort.dir : column.defaultDir;
+    const indicator = active ? (dir === "asc" ? "↑" : "↓") : "↕";
+    const ariaSort = active ? (dir === "asc" ? "ascending" : "descending") : "none";
+    const orderHint =
+      column.kind === "text"
+        ? (column.defaultDir === "asc" ? " (A–Z)" : " (Z–A)")
+        : (column.defaultDir === "desc" ? " (highest first)" : " (lowest first)");
+    const hint = active
+      ? `Sorted ${dir === "asc" ? "ascending" : "descending"} by ${column.label}. Click to reverse.`
+      : `Sort by ${column.label}${orderHint}`;
+    const title = column.title ? `${column.title}. ${hint}` : hint;
+    const sortBtn = `<button type="button" class="matrix-sort-btn${active ? " active" : ""}" data-matrix-sort="${esc(column.key)}" data-matrix-sort-dir="${esc(column.defaultDir)}" aria-label="${esc(hint)}" title="${esc(title)}"><span>${esc(column.label)}</span><span class="matrix-sort-indicator" aria-hidden="true">${indicator}</span></button>`;
+    const focusBtn = column.focusStage
+      ? `<button type="button" class="matrix-focus-btn" data-matrix-stage="${esc(column.focusStage)}" title="Focus on ${esc(column.focusStage)} across all commits" aria-label="Focus on ${esc(column.focusStage)} across all commits">&#x2197;</button>`
+      : "";
+    const thTitle = column.title ? ` title="${esc(column.title)}"` : "";
+    return `<th scope="col" aria-sort="${ariaSort}"${thTitle}>${sortBtn}${focusBtn}</th>`;
+  }
+
+  function setMatrixStage(stage) {
+    state.matrixStage = stage;
+    const available = new Set(matrixColumns(stage).map((c) => c.key));
+    if (state.matrixSort.key && !available.has(state.matrixSort.key)) {
+      state.matrixSort = { key: null, dir: "asc" };
+    }
+    renderMatrixView();
+  }
+
+  function handleMatrixSortClick(btn) {
+    const key = btn.dataset.matrixSort;
+    state.matrixSort =
+      state.matrixSort.key === key
+        ? { key, dir: state.matrixSort.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: btn.dataset.matrixSortDir === "asc" ? "asc" : "desc" };
+    renderMatrixView();
+    // renderMatrixView() replaces the header button that was just activated;
+    // put focus back on its replacement so keyboard users can sort again.
+    const next = document.querySelector(`#matrixView [data-matrix-sort="${CSS.escape(key)}"]`);
+    if (next) next.focus();
+  }
+
   function renderMatrixView() {
     const el = $("matrixView");
     let runs = getFilteredRuns();
@@ -3683,6 +3927,8 @@
       runs = runs.filter((r) => !isTriageSkipped(r));
     }
     const stage = state.matrixStage;
+    const columns = matrixColumns(stage);
+    const sortedRuns = sortMatrixRuns(runs, columns);
 
     const stagePills = [
       `<button class="stage-pill ${stage === null ? "active" : ""}" data-matrix-stage="">All Stages</button>`,
@@ -3696,17 +3942,10 @@
       tableHtml = `
         <table class="data-table matrix-table">
           <thead>
-            <tr>
-              <th>Commit / Benchmark</th>
-              <th>Triage</th>
-              ${STAGE_ORDER.map((s) => `<th><button class="matrix-col-btn" data-matrix-stage="${esc(s)}" title="Focus on ${esc(s)} across all commits">${esc(s)}</button></th>`).join("")}
-              <th>Outcome</th>
-              <th title="Orchestrator retries of a whole stage, not agent-session retries">Stage retries</th>
-              <th>Tokens</th>
-            </tr>
+            <tr>${columns.map(matrixHeaderHtml).join("")}</tr>
           </thead>
           <tbody>
-            ${runs.map((r) => {
+            ${sortedRuns.map((r) => {
               const mode = r.key_config?.triage_mode || "manifest";
               const outcome = deriveOutcome(r);
               const tokens = r.llm_stats?.total_tokens ? fmtNum(r.llm_stats.total_tokens) : "0";
@@ -3736,19 +3975,10 @@
       tableHtml = `
         <table class="data-table matrix-table">
           <thead>
-            <tr>
-              <th>Commit / Benchmark</th>
-              <th>Mode</th>
-              <th>Triage Status</th>
-              <th>Classification</th>
-              <th>Score</th>
-              <th>Discard Reason</th>
-              <th>Regression Test</th>
-              <th>Cache</th>
-            </tr>
+            <tr>${columns.map(matrixHeaderHtml).join("")}</tr>
           </thead>
           <tbody>
-            ${runs.map((r) => {
+            ${sortedRuns.map((r) => {
               const st = latestStep(r, "triage");
               const mode = r.key_config?.triage_mode || "manifest";
               const triageStatus = effectiveTriageStatus(r);
@@ -3777,20 +4007,10 @@
       tableHtml = `
         <table class="data-table matrix-table">
           <thead>
-            <tr>
-              <th>Commit / Benchmark</th>
-              <th>Status</th>
-              <th>Cache</th>
-              <th>Turns</th>
-              <th>Tokens</th>
-              <th>Checker Runs</th>
-              <th>Diagnostics</th>
-              <th>Test Runs</th>
-              <th>Outcome / Notes</th>
-            </tr>
+            <tr>${columns.map(matrixHeaderHtml).join("")}</tr>
           </thead>
           <tbody>
-            ${runs.map((r) => {
+            ${sortedRuns.map((r) => {
               const st = latestStep(r, stage);
               const outcome = deriveOutcome(r);
               const statusBadge = !st
@@ -3831,7 +4051,7 @@
       <div class="matrix-toolbar">
         <div>
           <h2 style="margin:0 0 4px 0;">Stage Matrix <span class="muted" style="font-size:13px;font-weight:400;">(${runs.length} commit${runs.length === 1 ? "" : "s"})</span>${batchId ? `<span class="badge badge-muted" style="margin-left:8px;">Batch: <code>${esc(batchId.slice(0, 8))}</code></span>` : ""}</h2>
-          <div class="muted" style="font-size:12px;">Click a stage column or pill to compare one stage across all commits; click any row or cell to inspect that commit. “Stage retries” are whole-stage orchestrator retries; agent session retries are shown per stage in the Transcript tab.</div>
+          <div class="muted" style="font-size:12px;">Click a column header to sort rows; click it again to reverse the order. Click a stage pill (or ↗ on a stage column) to compare one stage across all commits; click any row or cell to inspect that commit. “Stage retries” are whole-stage orchestrator retries; agent session retries are shown per stage in the Transcript tab.</div>
         </div>
         <div class="matrix-stage-pills">
           <label class="checkbox-inline" style="margin-right:8px;font-size:12px;">
@@ -3855,10 +4075,10 @@
     }
 
     el.querySelectorAll("[data-matrix-stage]").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.matrixStage = btn.dataset.matrixStage || null;
-        renderMatrixView();
-      });
+      btn.addEventListener("click", () => setMatrixStage(btn.dataset.matrixStage || null));
+    });
+    el.querySelectorAll("[data-matrix-sort]").forEach((btn) => {
+      btn.addEventListener("click", () => handleMatrixSortClick(btn));
     });
     el.querySelectorAll(".matrix-cell-btn, .matrix-focus-row").forEach((btn) => {
       btn.addEventListener("click", () => jumpToRunStage(btn.dataset.runId, btn.dataset.stage));

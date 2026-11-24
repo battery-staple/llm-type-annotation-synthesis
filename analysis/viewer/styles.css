@@ -1670,7 +1670,6 @@ code, pre {
   font-weight: 600;
 }
 
-.matrix-col-btn,
 .matrix-row-btn,
 .matrix-cell-btn {
   background: none;
@@ -1682,14 +1681,65 @@ code, pre {
   text-align: left;
 }
 
-.matrix-col-btn {
-  text-decoration: underline dotted;
-  text-underline-offset: 3px;
-}
-
-.matrix-col-btn:hover,
 .matrix-row-btn:hover {
   color: var(--accent);
+}
+
+/* Sortable matrix headers. The indicator is always visible so the control is
+   discoverable, and the active column is highlighted by color + arrow. */
+.matrix-sort-btn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.matrix-sort-btn:hover,
+.matrix-sort-btn.active {
+  color: var(--accent);
+}
+
+.matrix-sort-indicator {
+  color: var(--text-muted);
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.matrix-sort-btn:hover .matrix-sort-indicator,
+.matrix-sort-btn.active .matrix-sort-indicator {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.matrix-focus-btn {
+  min-width: 22px;
+  min-height: 22px;
+  margin-left: 6px;
+  padding: 1px 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.matrix-focus-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.matrix-sort-btn:focus-visible,
+.matrix-focus-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .matrix-focus-row {
