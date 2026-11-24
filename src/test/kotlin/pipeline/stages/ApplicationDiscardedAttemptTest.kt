@@ -72,7 +72,7 @@ class ApplicationDiscardedAttemptTest {
             environment: Map<String, String>,
             onEvent: (suspend (AgentTranscriptEvent) -> Unit)?
         ): AgentRunResult {
-            val source = File(cwd, "src/Main.java")
+            val source = File(cwd, "src/main/java/Main.java")
             source.parentFile.mkdirs()
             source.writeText("class Main { @example.NonNull String value; }\n")
             val now = Instant.now().toString()
@@ -249,7 +249,7 @@ class ApplicationDiscardedAttemptTest {
             Git.run(worktree, "init")
             Git.run(worktree, "config", "user.email", "test@example.com")
             Git.run(worktree, "config", "user.name", "Test")
-            File(worktree, "src/Main.java").apply {
+            File(worktree, "src/main/java/Main.java").apply {
                 parentFile.mkdirs()
                 writeText("class Main { String value; }\n")
             }
@@ -301,7 +301,10 @@ class ApplicationDiscardedAttemptTest {
                 assertTrue(outcome is StageResult.TransientFailure)
                 val records = database.readDiscardedAttempts(runId)
                 assertEquals(ApplicationStage.MAX_ATTEMPTS, records.size)
-                assertTrue(records.all { it.discardCheck == DiscardCheck.COMPILE })
+                assertTrue(
+                    records.all { it.discardCheck == DiscardCheck.COMPILE },
+                    "checks=${records.map { it.discardCheck }}, feedback=${records.map { it.feedback }}",
+                )
                 assertTrue(records.all { it.stageAttemptNumber == 1 })
                 assertTrue(records.all { it.termination == AgentSessionTermination.NORMAL_EXIT })
                 records.forEach { record ->
