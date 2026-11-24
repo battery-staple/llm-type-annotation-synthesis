@@ -213,11 +213,20 @@ class SynthesisStage(
                 val feedback =
                     "\n\n## Corrective feedback (attempt $attempt failed validation; workspace files persist, fix them in place):\n" +
                         problems.joinToString("\n") { "- $it" }
+                // The rejected session saw the previous prompt; the corrective
+                // feedback is stored separately in the record's `feedback` field.
+                val rejectedPrompt = prompt
                 prompt = basePrompt + feedback
+                val check = when {
+                    problems.any { it.startsWith("javac compilation failed") || it.startsWith("javac invocation failed") } ->
+                        DiscardCheck.COMPILE
+                    problems.any { it.contains("checker canary", ignoreCase = true) } -> DiscardCheck.CHECKER
+                    else -> DiscardCheck.OTHER
+                }
                 DiscardedAttemptRecorder.record(
-                    ctx, StageName.SYNTHESIS, attempt, attemptStartedMs, prompt,
+                    ctx, StageName.SYNTHESIS, attempt, attemptStartedMs, rejectedPrompt,
                     runResult.transcript, runResult, ctx.config.agent.steps.synthesis,
-                    DiscardCheck.OTHER, feedback,
+                    check, feedback,
                     patchOmittedReason = "synthesis writes into a non-Git workspace; qualifier sources, " +
                         "placement guide and decision file remain there and are not a worktree diff",
                     diagnostics = buildString {

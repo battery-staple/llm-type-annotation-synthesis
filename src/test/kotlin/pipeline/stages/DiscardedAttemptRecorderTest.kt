@@ -100,7 +100,9 @@ class DiscardedAttemptRecorderTest {
             assertNull(record.patchPath)
             assertTrue(record.timedOut)
 
-            val expectedDir = DiscardedAttemptRecorder.artifactDir(ctx, StageName.APPLICATION, 2)
+            val expectedDir = DiscardedAttemptRecorder.artifactDir(
+                ctx, StageName.APPLICATION, 2, record.attemptId,
+            )
             assertEquals(expectedDir.absolutePath, File(record.transcriptPath!!).parentFile.absolutePath)
             assertTrue(File(record.promptPath!!).readText().contains("Feedback from previous attempt"))
             val storedTranscript = PipelineJson.json.decodeFromString(
@@ -131,6 +133,25 @@ class DiscardedAttemptRecorderTest {
                 setOf(2 to 2, 2 to 3, 3 to 1),
                 database.discarded.map { it.stageAttemptNumber to it.internalAttemptNumber }.toSet(),
             )
+
+            // A second diagnostic for the SAME internal attempt (e.g. an
+            // in-loop rejection followed by a final-checker failure) must not
+            // overwrite the first one's evidence.
+            DiscardedAttemptRecorder.record(
+                ctx, StageName.APPLICATION, internalAttempt = 2,
+                attemptStartedMs = 1_700_000_150_000L, effectivePrompt = prompt, transcript = transcript,
+                runResult = result, maxSteps = 20, check = DiscardCheck.CHECKER,
+                feedback = "final checker failed",
+            )
+            assertEquals(4, database.discarded.size)
+            assertEquals(
+                4,
+                database.discarded.map { File(it.transcriptPath!!).parentFile.absolutePath }.distinct().size,
+            )
+            assertTrue(File(record.promptPath!!).readText().contains("Feedback from previous attempt"))
+            assertEquals("final checker failed", database.discarded.last().feedback)
+            assertTrue(record.promptPath != database.discarded.last().promptPath)
+            assertTrue(File(database.discarded.last().promptPath!!).isFile)
         } finally {
             root.deleteRecursively()
         }

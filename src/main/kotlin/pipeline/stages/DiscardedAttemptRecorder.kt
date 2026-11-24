@@ -43,8 +43,12 @@ internal object DiscardedAttemptRecorder {
         patchOmittedReason: String? = null,
         diagnostics: String? = null,
         completedMs: Long = System.currentTimeMillis(),
+        attemptId: String = TelemetryIds.id(),
     ) {
-        val dir = artifactDir(ctx, stage, internalAttempt)
+        // Include the unique record id so two diagnostics for the same internal
+        // attempt (e.g. an agent rejection and a later final-checker failure)
+        // never overwrite each other's artifacts.
+        val dir = artifactDir(ctx, stage, internalAttempt, attemptId)
         runCatching { dir.mkdirs() }
 
         // The prompt is written separately from the transcript so the initial
@@ -60,7 +64,7 @@ internal object DiscardedAttemptRecorder {
         val diagnosticsPath = diagnostics?.let { writeIfPresent(dir, "diagnostics.txt", it) }
 
         val record = DiscardedAttemptRecord(
-            attemptId = TelemetryIds.id(),
+            attemptId = attemptId,
             runId = ctx.runId,
             stepId = ctx.stepId,
             stage = stage.identifier,
@@ -88,7 +92,14 @@ internal object DiscardedAttemptRecorder {
         // Diagnostics are best-effort: a DB failure must not change stage control
         // flow, but it is logged so a silently missing record is detectable.
         runCatching { ctx.database.recordDiscardedAttempt(record) }
-            .onFailure { logger.warn(it) { "Could not persist discarded ${stage.identifier} attempt $internalAttempt for ${ctx.runId}" } }
+            .onFailure { error ->
+                // The artifact files are already durable on disk; log their
+                // location so the attempt is still findable if the DB write fails.
+                logger.error(error) {
+                    "Could not persist discarded ${stage.identifier} attempt $internalAttempt " +
+                        "for ${ctx.runId}; artifacts=$dir"
+                }
+            }
         logger.info {
             "discarded ${stage.identifier} attempt ${ctx.attemptNumber}/$internalAttempt " +
                 "($check, ${record.termination}) artifacts=$dir"
@@ -96,7 +107,12 @@ internal object DiscardedAttemptRecorder {
     }
 
     /** Artifact root, derived from the database location unless explicitly overridden. */
-    internal fun artifactDir(ctx: RunContext, stage: StageName, internalAttempt: Int): File {
+    internal fun artifactDir(
+        ctx: RunContext,
+        stage: StageName,
+        internalAttempt: Int,
+        attemptId: String,
+    ): File {
         val configured = Env.get("PIPELINE_DISCARDED_ATTEMPTS_DIR")?.takeIf { it.isNotBlank() }
         val base = configured?.let(::File)
             ?: File(ctx.config.paths.databaseFile().parentFile ?: File("."), "discarded-attempts")
@@ -105,6 +121,7 @@ internal object DiscardedAttemptRecorder {
             .resolve(stage.identifier)
             .resolve("stage-attempt-${ctx.attemptNumber}")
             .resolve("attempt-$internalAttempt")
+            .resolve(attemptId)
     }
 
     /**
