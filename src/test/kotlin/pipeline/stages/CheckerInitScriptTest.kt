@@ -147,5 +147,12 @@ class CheckerInitScriptTest {
         override suspend fun updateCommit(update: CommitTriageUpdate) = Unit
         override suspend fun recordRetry(event: pipeline.db.RetryEvent) = Unit
         override suspend fun recordSubprocess(metric: pipeline.db.SubprocessMetricRecord) = Unit
+        override suspend fun recordDiscardedAttempt(record: pipeline.db.DiscardedAttemptRecord) = Unit
+        override suspend fun readDiscardedAttempts(
+            runId: pipeline.stages.RunId,
+            stage: String?,
+            stageAttemptNumber: Int?,
+            internalAttemptNumber: Int?
+        ): List<pipeline.db.DiscardedAttemptRecord> = emptyList()
     }
 }

@@ -65,8 +65,13 @@ harness validates the guide even when the Java sources are already present.
    Each file declares exactly one qualifier annotation:
    - `@Target({ElementType.TYPE_USE, ElementType.TYPE_PARAMETER})`
    - `@Retention(RetentionPolicy.RUNTIME)`
-   - A `@SubtypeOf(...)` edge that builds a strict lattice with one root
-     (marked `@DefaultQualifierInHierarchy`) and at least one child qualifier.
+   - An explicit `@SubtypeOf(...)` annotation on EVERY qualifier, root included.
+     The root (the one marked `@DefaultQualifierInHierarchy`) MUST be written as
+     `@SubtypeOf({})` so it registers an empty supertype edge. Omitting
+     `@SubtypeOf` on the root or relying on `@DefaultQualifierInHierarchy` alone
+     makes the Checker Framework crash with "is not a key in the directSuperMap".
+     The other annotations build a strict lattice with that single root and at
+     least one child qualifier.
    - EXACTLY ONE bottom qualifier. The Checker Framework rejects a hierarchy with
      multiple bottoms ("Multiple bottoms found"). If you create two or more sibling
      children, add one dedicated bottom marker (for example `AccountIdBottom`)
@@ -126,5 +131,7 @@ values). Never name concrete repository symbols, files, or the regression test.
   repository or any other checkout outside it.
 - Every custom qualifier source must compile with `javac -proc:none` against
   `checker-qual.jar`.
+- The hierarchy root must be written literally as `@SubtypeOf({})` (an explicitly
+  registered empty supertype edge); never leave the root without `@SubtypeOf`.
 - Keep the package stable; the harness discovers all `@Target(TYPE_USE)`
   qualifiers automatically for `-Aquals`.

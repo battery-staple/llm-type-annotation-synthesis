@@ -250,6 +250,61 @@ data class SubprocessMetricRecord(
     val timedOut: Boolean, val success: Boolean, val errorMessage: String?
 )
 
+/** How an agent process ended, as reported by the runner and the step budget. */
+enum class AgentSessionTermination {
+    NORMAL_EXIT,
+    TIMEOUT,
+    STEP_CAP,
+    AGENT_FAILURE,
+    STARTUP_FAILURE
+}
+
+/** The post-session validation check that rejected a discarded attempt. */
+enum class DiscardCheck {
+    NO_CHANGES,
+    GUARDRAILS,
+    COMPILE,
+    TESTS,
+    CHECKER,
+    OTHER
+}
+
+/**
+ * Durable diagnostic record for one agent session whose output was thrown away.
+ *
+ * [stageAttemptNumber] is the orchestrator's whole-stage retry counter
+ * (`RunContext.attemptNumber`); [internalAttemptNumber] is the stage's own
+ * re-prompt loop counter. Together they distinguish, for example, application
+ * attempt 2 of stage attempt 1 from attempt 2 of stage attempt 2.
+ *
+ * The transcript, effective prompt, patch and diagnostics live in artifact
+ * files; their locations are recorded here so a diagnosis can be reproduced
+ * after process restarts. [feedback] is stored inline because it is the exact
+ * text injected into the following attempt's prompt.
+ */
+data class DiscardedAttemptRecord(
+    val attemptId: String,
+    val runId: RunId,
+    val stepId: String,
+    val stage: String,
+    val stageAttemptNumber: Int,
+    val internalAttemptNumber: Int,
+    val startedAt: String,
+    val completedAt: String,
+    val termination: AgentSessionTermination,
+    val discardCheck: DiscardCheck,
+    val feedback: String?,
+    val agentFailureMessage: String?,
+    val exitCode: Int?,
+    val stepsCounted: Int,
+    val timedOut: Boolean,
+    val promptPath: String?,
+    val transcriptPath: String?,
+    val patchPath: String?,
+    val patchOmittedReason: String?,
+    val diagnosticsPath: String?
+)
+
 data class TelemetryProjection(
     val synthesisRun: SynthesisRunRecord? = null,
     val qualifiers: List<QualifierRecord> = emptyList(),

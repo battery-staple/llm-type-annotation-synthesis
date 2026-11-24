@@ -18,8 +18,10 @@ import pipeline.cas.PatchManager
 import pipeline.cas.StageArtifactWriter
 import pipeline.db.CheckerDiagnosticRecord
 import pipeline.db.CheckerRunRecord
+import pipeline.db.DiscardCheck
 import pipeline.db.GuardrailEventRecord
 import pipeline.db.TelemetryProjection
+import pipeline.ports.AgentRunResult
 import pipeline.ports.AgentRunner
 import pipeline.ports.BuildRunner
 import pipeline.runners.BuildMetrics
@@ -126,6 +128,9 @@ class RepairStage(
         val errorProgression = mutableListOf<Int>()
         var stepsTaken = 0
         var turn = 0
+        var lastRunResult: AgentRunResult? = null
+        var lastPrompt = basePrompt
+        var lastAttemptStartedMs = System.currentTimeMillis()
         var prompt = basePrompt
         var feedback = ""
         var lastDiagnostics = initialErrors
@@ -139,6 +144,7 @@ class RepairStage(
         val maxTurns = minOf(MAX_AGENT_TURNS, ctx.config.agent.maxCheckerInvocations)
         while (turn < maxTurns && !converged) {
             turn++
+            val attemptStartedMs = System.currentTimeMillis()
             val effectivePrompt = if (feedback.isEmpty()) prompt else "$prompt\n\n## Feedback (fix the workspace in place):\n$feedback"
             val runResult = agentRunner.runAgent(
                 effectivePrompt,
@@ -153,8 +159,30 @@ class RepairStage(
             )
             stepsTaken += runResult.stepsCounted
             fullTranscript += runResult.transcript
-            agentStartupFailure(runResult)?.let { throw StageHaltException(it) }
-            haltIfBenchmarkRepoDirty(ctx, "repair")
+            lastRunResult = runResult
+            lastPrompt = effectivePrompt
+            lastAttemptStartedMs = attemptStartedMs
+            agentStartupFailure(runResult)?.let { failure ->
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.REPAIR, turn, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.repair,
+                    DiscardCheck.OTHER, failure,
+                    patchOmittedReason = "agent failed to start; no edits were produced",
+                )
+                throw StageHaltException(failure)
+            }
+            try {
+                haltIfBenchmarkRepoDirty(ctx, "repair")
+            } catch (t: Throwable) {
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.REPAIR, turn, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.repair,
+                    DiscardCheck.OTHER, t.message,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = t.stackTraceToString(),
+                )
+                throw t
+            }
 
             FileOps.mirrorTreeInto(workspace, worktree, MIRROR_EXCLUDES)
             val changed = PatchManager(worktree).changedPaths()
@@ -162,6 +190,13 @@ class RepairStage(
                 feedback = "No file changes were detected. The last checker diagnostics were:\n" +
                     lastDiagnostics.take(MAX_FEEDBACK_CHARS) +
                     (agentFailureMessage(runResult)?.let { "\n$it" } ?: "")
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.REPAIR, turn, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.repair,
+                    DiscardCheck.NO_CHANGES, feedback,
+                    patchOmittedReason = "no file changes were detected in the worktree",
+                    diagnostics = lastDiagnostics,
+                )
                 continue
             }
             treeChangedSinceChecker = true
@@ -184,6 +219,13 @@ class RepairStage(
                 appendRepairViolationEvents(ctx, guardrailEvents, turn, "diff_aware_ast_guard", repairAudit.violations)
                 feedback = "Anti-cheat guards rejected the edits; the tree was reset to the annotated baseline:\n" +
                     lastAuditViolations.joinToString("\n").take(MAX_FEEDBACK_CHARS)
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.REPAIR, turn, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.repair,
+                    DiscardCheck.GUARDRAILS, feedback,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = lastAuditViolations.joinToString("\n"),
+                )
                 resetToBaseline(worktree)
                 prepareRepairWorkspace(worktree, workspace, checker, ctx)
                 continue
@@ -195,11 +237,25 @@ class RepairStage(
             errorProgression += result.errorCount
             lastDiagnostics = sanitizeCheckerLogPaths(worktree, result.diagnosticsLog.readText()).take(MAX_FEEDBACK_CHARS)
             if (result.timedOut) {
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.REPAIR, turn, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.repair,
+                    DiscardCheck.CHECKER, "Repair checker timed out",
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = lastDiagnostics,
+                )
                 persistRepairCheckerTimeout(ctx, checkerRuns.last(), checkerDiagnostics.takeLast(result.diagnostics.size))
                 return StageResult.TransientFailure(RuntimeException("Repair checker timed out"), stepsTaken, fullTranscript.toList())
             }
             if (!checkerCompletedSuccessfully(result)) {
                 feedback = "The selected checker pass did not complete (invoked=${result.checkerInvoked}, success=${result.success})."
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.REPAIR, turn, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.repair,
+                    DiscardCheck.CHECKER, feedback,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = lastDiagnostics,
+                )
                 refreshWorkspace(worktree, workspace, checker, ctx)
                 continue
             }
@@ -207,6 +263,13 @@ class RepairStage(
                 converged = true
             } else {
                 feedback = "The selected checker still reports ${result.errorCount} error(s). Resolve them:\n$lastDiagnostics"
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.REPAIR, turn, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.repair,
+                    DiscardCheck.CHECKER, feedback,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = lastDiagnostics,
+                )
                 refreshWorkspace(worktree, workspace, checker, ctx)
                 prompt = basePrompt
             }
@@ -220,6 +283,15 @@ class RepairStage(
             checkerRunsUsed++
             treeChangedSinceChecker = false
             if (finalChecker.timedOut) {
+                lastRunResult?.let { lastResult ->
+                    DiscardedAttemptRecorder.record(
+                        ctx, StageName.REPAIR, turn.coerceAtLeast(1), lastAttemptStartedMs, lastPrompt,
+                        lastResult.transcript, lastResult, ctx.config.agent.steps.repair,
+                        DiscardCheck.CHECKER, "Final repair checker timed out",
+                        patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                        diagnostics = lastDiagnostics,
+                    )
+                }
                 persistRepairCheckerTimeout(ctx, checkerRuns.last(), checkerDiagnostics.takeLast(finalChecker.diagnostics.size))
                 return StageResult.TransientFailure(RuntimeException("Final repair checker timed out"), stepsTaken, fullTranscript.toList())
             }
@@ -229,11 +301,17 @@ class RepairStage(
         }
         val remainingTypeErrors = finalCheckerRecord?.errorCount ?: -1
         if (finalCheckerRecord == null || !checkerCompletedSuccessfully(finalCheckerRecord.checkerInvoked, finalCheckerRecord.success)) {
-            return StageResult.TransientFailure(
-                RuntimeException("Repair checker did not complete successfully; convergence cannot be established"),
-                stepsTaken,
-                fullTranscript.toList()
-            )
+            val haltMessage = "Repair checker did not complete successfully; convergence cannot be established"
+            lastRunResult?.let { lastResult ->
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.REPAIR, turn.coerceAtLeast(1), lastAttemptStartedMs, lastPrompt,
+                    lastResult.transcript, lastResult, ctx.config.agent.steps.repair,
+                    DiscardCheck.CHECKER, haltMessage,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = lastDiagnostics,
+                )
+            }
+            return StageResult.TransientFailure(RuntimeException(haltMessage), stepsTaken, fullTranscript.toList())
         }
 
         val patchFile = PatchManager(worktree).writePatch(stagingDir.resolve(ArtifactNames.REPAIR_PATCH))

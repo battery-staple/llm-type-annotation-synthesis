@@ -17,6 +17,12 @@ class CheckerCrashDetectionTest {
     }
 
     @Test
+    fun `directSuperMap message alone is reported as a checker crash`() {
+        val output = "error: PolicySignal is not a key in the directSuperMap.  Does it have a @SubtypeOf annotation?"
+        assertTrue(outputShowsCheckerCrash(output))
+    }
+
+    @Test
     fun `ordinary type errors are not a checker crash`() {
         val output = """
             src/main/java/A.java:46: error: [argument] incompatible argument for parameter accountId of Repo.debit.

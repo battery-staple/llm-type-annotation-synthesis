@@ -10,6 +10,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.builtins.ListSerializer
 import pipeline.stages.AgentTranscriptEvent
 import pipeline.stages.EvalVerdict
+import pipeline.stages.RunId
 import pipeline.util.PipelineJson
 
 data class RetryEvent(
@@ -44,6 +45,101 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
                 s.setLong(7, metric.durationMs); if (metric.exitCode == null) s.setNull(8, Types.INTEGER) else s.setInt(8, metric.exitCode)
                 s.setInt(9, if (metric.timedOut) 1 else 0); s.setInt(10, if (metric.success) 1 else 0)
                 s.setString(11, metric.errorMessage?.take(1000)); s.executeUpdate()
+            }
+        }
+    }
+
+    override suspend fun recordDiscardedAttempt(record: DiscardedAttemptRecord) {
+        // A diagnostic write must be committed immediately: the worktree reset
+        // that follows may destroy the only copy of the transcript source.
+        transaction("record_discarded_attempt", recordMetric = false) { c ->
+            c.prepareStatement(
+                """INSERT INTO discarded_attempts(
+                     attempt_id, run_id, step_id, stage, stage_attempt_number, internal_attempt_number,
+                     started_at, completed_at, termination, discard_check, feedback, agent_failure_message,
+                     exit_code, steps_counted, timed_out, prompt_path, transcript_path, patch_path,
+                     patch_omitted_reason, diagnostics_path)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+            ).use { s ->
+                s.setString(1, record.attemptId)
+                s.setString(2, record.runId.value)
+                s.setString(3, record.stepId)
+                s.setString(4, record.stage)
+                s.setInt(5, record.stageAttemptNumber)
+                s.setInt(6, record.internalAttemptNumber)
+                s.setString(7, record.startedAt)
+                s.setString(8, record.completedAt)
+                s.setString(9, record.termination.name.lowercase())
+                s.setString(10, record.discardCheck.name.lowercase())
+                s.setString(11, record.feedback)
+                s.setString(12, record.agentFailureMessage)
+                if (record.exitCode == null) s.setNull(13, Types.INTEGER) else s.setInt(13, record.exitCode)
+                s.setInt(14, record.stepsCounted)
+                s.setInt(15, if (record.timedOut) 1 else 0)
+                s.setString(16, record.promptPath)
+                s.setString(17, record.transcriptPath)
+                s.setString(18, record.patchPath)
+                s.setString(19, record.patchOmittedReason)
+                s.setString(20, record.diagnosticsPath)
+                s.executeUpdate()
+            }
+        }
+    }
+
+    override suspend fun readDiscardedAttempts(
+        runId: RunId,
+        stage: String?,
+        stageAttemptNumber: Int?,
+        internalAttemptNumber: Int?
+    ): List<DiscardedAttemptRecord> = read("read_discarded_attempts") { c ->
+        val filters = mutableListOf("run_id = ?")
+        val values = mutableListOf<Any?>(runId.value)
+        if (stage != null) { filters += "stage = ?"; values += stage }
+        if (stageAttemptNumber != null) { filters += "stage_attempt_number = ?"; values += stageAttemptNumber }
+        if (internalAttemptNumber != null) { filters += "internal_attempt_number = ?"; values += internalAttemptNumber }
+        c.prepareStatement(
+            """SELECT attempt_id, step_id, stage, stage_attempt_number, internal_attempt_number,
+                      started_at, completed_at, termination, discard_check, feedback, agent_failure_message,
+                      exit_code, steps_counted, timed_out, prompt_path, transcript_path, patch_path,
+                      patch_omitted_reason, diagnostics_path
+               FROM discarded_attempts WHERE ${filters.joinToString(" AND ")}
+               ORDER BY stage_attempt_number, internal_attempt_number, started_at, attempt_id"""
+        ).use { s ->
+            values.forEachIndexed { index, value -> s.setObject(index + 1, value) }
+            s.executeQuery().use { rs ->
+                buildList {
+                    while (rs.next()) {
+                        val exitCode = rs.getInt("exit_code").takeUnless { rs.wasNull() }
+                        add(
+                            DiscardedAttemptRecord(
+                                attemptId = rs.getString("attempt_id"),
+                                runId = runId,
+                                stepId = rs.getString("step_id"),
+                                stage = rs.getString("stage"),
+                                stageAttemptNumber = rs.getInt("stage_attempt_number"),
+                                internalAttemptNumber = rs.getInt("internal_attempt_number"),
+                                startedAt = rs.getString("started_at"),
+                                completedAt = rs.getString("completed_at"),
+                                termination = runCatching {
+                                    AgentSessionTermination.valueOf(rs.getString("termination").uppercase())
+                                }.getOrDefault(AgentSessionTermination.NORMAL_EXIT),
+                                discardCheck = runCatching {
+                                    DiscardCheck.valueOf(rs.getString("discard_check").uppercase())
+                                }.getOrDefault(DiscardCheck.OTHER),
+                                feedback = rs.getString("feedback"),
+                                agentFailureMessage = rs.getString("agent_failure_message"),
+                                exitCode = exitCode,
+                                stepsCounted = rs.getInt("steps_counted"),
+                                timedOut = rs.getInt("timed_out") != 0,
+                                promptPath = rs.getString("prompt_path"),
+                                transcriptPath = rs.getString("transcript_path"),
+                                patchPath = rs.getString("patch_path"),
+                                patchOmittedReason = rs.getString("patch_omitted_reason"),
+                                diagnosticsPath = rs.getString("diagnostics_path"),
+                            )
+                        )
+                    }
+                }
             }
         }
     }
@@ -262,17 +358,24 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
 
     override suspend fun updateCommit(update: CommitTriageUpdate) {
         transaction("update_commit") { c ->
-            val assignments = mutableListOf<String>()
-            val values = mutableListOf<Pair<Int, Any?>>()
+            // Each entry owns exactly one '?' placeholder, so the bind ordinal
+            // is always the entry's position + 1. Nulls are bound explicitly
+            // with setNull, never skipped, which lets a verified update clear
+            // stale discard metadata without shifting later placeholders.
+            val columns = mutableListOf<Pair<String, Any?>>()
             fun add(column: String, value: Any?) {
-                if (value != null) {
-                    assignments += "$column=?"
-                    values += (assignments.size) to value
-                }
+                if (value != null) columns += column to value
             }
             add("triage_status", update.triageStatus)
-            add("discard_reason", update.discardReason)
-            add("compiler_error_log", update.compilerErrorLog)
+            if (update.triageStatus == "verified") {
+                // A commit discarded on an early triage attempt may be verified
+                // on retry; discard metadata from that attempt must not linger.
+                columns += "discard_reason" to null
+                columns += "compiler_error_log" to null
+            } else {
+                add("discard_reason", update.discardReason)
+                add("compiler_error_log", update.compilerErrorLog)
+            }
             add("classification", update.classification?.name?.lowercase())
             add("bugfix_score", update.bugfixScore)
             add("regression_tests_found", update.regressionTestsFound)
@@ -282,17 +385,19 @@ class SQLiteDatabaseManager(private val databaseFile: File) :
             add("test_patch", update.testPatch)
             add("author_date", update.authorDate)
             add("commit_msg", update.commitMsg)
-            if (assignments.isEmpty()) return@transaction
-            val sql = "UPDATE commits SET ${assignments.joinToString(",")} WHERE commit_hash=?"
+            if (columns.isEmpty()) return@transaction
+            val sql = "UPDATE commits SET ${columns.joinToString(",") { "${it.first}=?" }} WHERE commit_hash=?"
             c.prepareStatement(sql).use { s ->
-                values.forEach { (index, value) ->
+                columns.forEachIndexed { position, (_, value) ->
+                    val index = position + 1
                     when (value) {
+                        null -> s.setNull(index, Types.VARCHAR)
                         is Int -> s.setInt(index, value)
                         is Double -> s.setDouble(index, value)
                         else -> s.setString(index, value.toString())
                     }
                 }
-                s.setString(values.size + 1, update.commitHash)
+                s.setString(columns.size + 1, update.commitHash)
                 s.executeUpdate()
             }
         }

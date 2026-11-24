@@ -297,6 +297,37 @@ CREATE TABLE IF NOT EXISTS retry_events (
     error_message TEXT NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Durable diagnostics for agent sessions whose output was discarded by an
+-- internal retry loop or a whole-stage retry. Artifact files are written next
+-- to the pipeline database before any worktree reset discards their source.
+-- No FK on run_id: a diagnostic must survive even if run setup failed.
+CREATE TABLE IF NOT EXISTS discarded_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    stage_attempt_number INTEGER NOT NULL,
+    internal_attempt_number INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    termination TEXT NOT NULL,
+    discard_check TEXT NOT NULL,
+    feedback TEXT,
+    agent_failure_message TEXT,
+    exit_code INTEGER,
+    steps_counted INTEGER NOT NULL DEFAULT 0,
+    timed_out BOOLEAN NOT NULL DEFAULT 0,
+    prompt_path TEXT,
+    transcript_path TEXT,
+    patch_path TEXT,
+    patch_omitted_reason TEXT,
+    diagnostics_path TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_discarded_attempts_run_stage_attempt
+    ON discarded_attempts(run_id, stage, stage_attempt_number, internal_attempt_number);
+
 CREATE TABLE IF NOT EXISTS subprocess_metrics (
     metric_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step_id TEXT NOT NULL, stage TEXT NOT NULL,
     kind TEXT NOT NULL, tool TEXT NOT NULL, duration_ms INTEGER NOT NULL, exit_code INTEGER,

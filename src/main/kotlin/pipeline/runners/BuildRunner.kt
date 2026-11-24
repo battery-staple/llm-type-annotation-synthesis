@@ -317,7 +317,7 @@ class GradleBuildRunner(
 }
 
 private val checkerCrashPattern =
-    Regex("""TypeSystemError|BugInCF|The Checker Framework crashed|\bUserError\b""")
+    Regex("""TypeSystemError|BugInCF|The Checker Framework crashed|\bUserError\b|directSuperMap""")
 
 /** True when the Checker Framework itself failed, as opposed to reporting type errors. */
 internal fun outputShowsCheckerCrash(output: String): Boolean = checkerCrashPattern.containsMatchIn(output)

@@ -43,6 +43,13 @@ class AutomatedTriageStageTest {
         override suspend fun readVerdict(runId: RunId): EvalVerdict? = null
         override suspend fun recordRetry(event: pipeline.db.RetryEvent) = Unit
         override suspend fun recordSubprocess(metric: pipeline.db.SubprocessMetricRecord) = Unit
+        override suspend fun recordDiscardedAttempt(record: pipeline.db.DiscardedAttemptRecord) = Unit
+        override suspend fun readDiscardedAttempts(
+            runId: pipeline.stages.RunId,
+            stage: String?,
+            stageAttemptNumber: Int?,
+            internalAttemptNumber: Int?
+        ): List<pipeline.db.DiscardedAttemptRecord> = emptyList()
         override suspend fun updateCommit(update: CommitTriageUpdate) {
             updates += update
         }

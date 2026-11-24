@@ -59,6 +59,88 @@
       .replace(/'/g, "&#39;");
   }
 
+  // ---- Stage attempts vs. agent sessions ----
+  // A *stage attempt* is one step_trajectories row: the orchestrator retries the
+  // whole stage on a transient failure and records that in retry_events.
+  // An *agent session* is one agentRunner.runAgent() call inside a stage attempt.
+  // Each session begins with an initial_prompt event, and every session after the
+  // first is a feedback retry. They are separate layers and stay labelled apart.
+  function isSessionStart(ev) {
+    return Boolean(ev) && (ev.event_type === "initial_prompt" || ev.event_type === "prompt" || ev.event_type === "user_prompt");
+  }
+
+  /** Prefer the CAS copy, but fall back to the durable DB transcript (CAS may be pruned). */
+  function durableTranscript(step) {
+    if (step.cas_transcript && step.cas_transcript.length) return step.cas_transcript;
+    if (Array.isArray(step.agent_transcript) && step.agent_transcript.length) return step.agent_transcript;
+    return null;
+  }
+
+  /** Returns null when the transcript is missing or has no session markers. */
+  function sessionStats(step) {
+    const transcript = durableTranscript(step);
+    if (!transcript) return null;
+    const sessions = transcript.filter(isSessionStart).length;
+    if (!sessions) return null;
+    return { sessions, retries: Math.max(0, sessions - 1) };
+  }
+
+  /** Turns across all sessions. v_step_summaries.turns_taken is a MAX over a
+   *  session-local counter, so it undercounts whenever a session was retried. */
+  function totalTurns(step) {
+    const transcript = durableTranscript(step);
+    if (!transcript) return null;
+    let total = 0;
+    let sessionMax = 0;
+    let sawTurn = false;
+    for (const ev of transcript) {
+      if (isSessionStart(ev)) {
+        total += sessionMax;
+        sessionMax = 0;
+        sawTurn = false;
+        continue;
+      }
+      const idx = Number(ev.turn_index) || 0;
+      if (idx > 0) {
+        sessionMax = Math.max(sessionMax, idx);
+        sawTurn = true;
+      }
+    }
+    total += sessionMax;
+    return sawTurn || total ? total : null;
+  }
+
+  // DB telemetry rows (llm_invocations, guardrail_events, compilation_events,
+  // checker_runs, ...) carry no session id: they are all projected once at the
+  // end of a stage attempt and share one created_at value. They therefore cannot
+  // be attributed to a specific agent session. Do not guess from timestamps.
+
+  function stageAttemptCount(run, step) {
+    return (run.steps || []).filter((s) => s.step_name === step.step_name).length;
+  }
+
+  function retryTotals(run) {
+    const events = run.retry_events || [];
+    let sessions = 0;
+    let sessionRetries = 0;
+    let known = false;
+    for (const step of run.steps || []) {
+      const stats = sessionStats(step);
+      if (stats) {
+        known = true;
+        sessions += stats.sessions;
+        sessionRetries += stats.retries;
+      }
+    }
+    return {
+      stageRetries: events.filter((e) => e.will_retry).length,
+      finalStageFailures: events.filter((e) => !e.will_retry).length,
+      sessions,
+      sessionRetries,
+      known,
+    };
+  }
+
   function renderMarkdown(md) {
     if (!md) return "";
     const lines = String(md).split(/\r?\n/);
@@ -1460,13 +1542,15 @@
     );
 
     const runDuration = durationHtml(r.started_at, r.completed_at, r.status === "running" && !r.completed_at);
+    const retries = retryTotals(r);
 
     $("hdrMetrics").innerHTML = `
       <span>Duration: <strong>${runDuration}</strong></span>
       <span>Tokens: <strong>${esc(fmtNum(totalTokens))}</strong></span>
       <span>LLM Latency: <strong>${esc(fmtNum(totalLatency))} ms</strong></span>
       ${r.remaining_type_errors !== null && r.remaining_type_errors !== undefined ? `<span>Remaining Errors: <strong>${esc(r.remaining_type_errors)}</strong></span>` : ""}
-      ${(r.retry_events || []).length ? `<span>Retries: <strong>${(r.retry_events || []).filter((e) => e.will_retry).length}</strong> · final transient failures: <strong>${(r.retry_events || []).filter((e) => !e.will_retry).length}</strong></span>` : ""}
+      ${(r.retry_events || []).length ? `<span title="Orchestrator retries of a whole stage (retry_events): a failed attempt that was followed by another.">Stage retries: <strong>${retries.stageRetries}</strong> · final stage failures: <strong>${retries.finalStageFailures}</strong></span>` : ""}
+      ${retries.known ? `<span title="Agent sessions are runAgent() calls inside a stage attempt; sessions after the first are feedback retries, not stage retries.">Agent sessions: <strong>${retries.sessions}</strong> · session retries: <strong>${retries.sessionRetries}</strong></span>` : ""}
     `;
 
     const subprocess = r.subprocess_metrics || [];
@@ -1620,18 +1704,26 @@
       }
       const dotCls = stageState(state.runDetail, latest);
       const dur = durationHtml(latest.started_at, latest.completed_at, isStepRunning(latest));
-      const turns = latest.turns_taken ? `${latest.turns_taken}t` : "";
-      const attBadge = attempts.length > 1 ? ` (${attempts.length} att)` : "";
+      const computedTurns = totalTurns(latest);
+      const turns = computedTurns ?? latest.turns_taken;
+      const turnsLabel = turns ? `<span title="${computedTurns !== null ? "Summed over all agent sessions; the DB view only takes a per-session max" : "Turns"}">${esc(turns)}t</span>` : "";
+      const sess = sessionStats(latest);
+      const stageRetryBadge = attempts.length > 1
+        ? `<span class="badge badge-muted" title="${attempts.length - 1} orchestrator retry/retries of this whole stage (stage attempt count — not agent sessions)">${attempts.length} stage att</span>`
+        : "";
+      const sessionRetryBadge = sess && sess.retries
+        ? `<span class="badge badge-yellow" title="${sess.retries} agent feedback retry/retries inside this stage attempt (not stage retries)">${sess.retries} sess retry</span>`
+        : "";
       const stateLabel = dotCls === "skip" ? "skipped" : (dotCls === "running" ? "running" : (dotCls === "warn" ? "incomplete" : (latest.cache_hit ? "cached" : (latest.success ? "completed" : "failed"))));
       return `
-        <button class="step-card ${active}" data-step-name="${esc(name)}" tabindex="-1">
+        <button class="step-card ${active}" data-step-name="${esc(name)}" tabindex="-1" title="${esc(name)}: ${stateLabel}${attempts.length > 1 ? ` · ${attempts.length} stage attempts` : ""}${sess ? ` · ${sess.sessions} agent session(s)` : ""}">
           <div class="step-card-top">
-            <span class="step-name">${esc(name)}${esc(attBadge)}</span>
+            <span class="step-name">${esc(name)}</span>
             <span class="stage-dot ${dotCls}"></span>
           </div>
           <div class="step-card-sub">
             <span>${stateLabel}</span>
-            <span>${esc(turns)} ${dur}</span>
+            <span>${stageRetryBadge}${sessionRetryBadge}${turnsLabel} ${dur}</span>
           </div>
         </button>
       `;
@@ -1684,13 +1776,18 @@
     $("stageDuration").innerHTML = isStepRunning(step)
       ? `${liveDurationHtml(step.started_at)} ${startedLabel}`
       : `${esc(fmtDuration(step.started_at, step.completed_at))} ${startedLabel}`;
+
+    const attempts = (state.runDetail.steps || []).filter((s) => s.step_name === step.step_name);
+    const sess = sessionStats(step);
+    const turns = totalTurns(step) ?? step.turns_taken;
     $("stageStats").textContent = [
-      step.turns_taken ? `${step.turns_taken} turns` : null,
+      `stage attempt ${step.attempt_number}/${attempts.length}`,
+      sess ? `${sess.sessions} agent session${sess.sessions === 1 ? "" : "s"}${sess.retries ? ` (${sess.retries} session retry${sess.retries === 1 ? "" : "s"})` : ""}` : null,
+      turns ? `${turns} turns` : null,
       step.total_tokens ? `${fmtNum(step.total_tokens)} tokens` : null,
     ].filter(Boolean).join(" · ");
 
-    // Attempt selector
-    const attempts = (state.runDetail.steps || []).filter((s) => s.step_name === step.step_name);
+    // Stage-attempt selector (orchestrator retries only; agent sessions are in the transcript tab)
     const attWrap = $("attemptSelectorWrap");
     if (attempts.length > 1) {
       attWrap.classList.remove("hidden");
@@ -1698,7 +1795,7 @@
       sel.innerHTML = attempts.map((a) => {
         const attemptState = stageState(state.runDetail, a);
         const label = { ok: "ok", fail: "fail", running: "running", skip: "skipped" }[attemptState];
-        return `<option value="${esc(a.step_id)}">#${a.attempt_number} (${label})</option>`;
+        return `<option value="${esc(a.step_id)}">Stage attempt #${a.attempt_number} (${label})</option>`;
       }).join("");
       sel.value = step.step_id;
     } else {
@@ -1708,13 +1805,20 @@
     // Tab counts
     const hasPatch = Boolean(step.diff_patch || step.cas_diff_patch || (step.annotation_placements || []).length);
     $("cntPatch").textContent = hasPatch ? (step.annotation_placements?.length || "1") : "";
-    const turnCount = Math.max(
+    const rawEventCount = Math.max(
       (step.agent_turns || []).length,
       (step.cas_transcript || []).length,
       liveEventsFor(step).length,
       (step.agent_transcript || []).length
     );
-    $("cntTranscript").textContent = turnCount ? String(turnCount) : "";
+    const sessInfo = sessionStats(step);
+    const cntTranscript = $("cntTranscript");
+    cntTranscript.textContent = sessInfo && sessInfo.sessions > 1
+      ? `${sessInfo.sessions} sessions`
+      : (rawEventCount ? String(rawEventCount) : "");
+    cntTranscript.title = sessInfo
+      ? `${sessInfo.sessions} agent session(s), ${sessInfo.retries} session retry/retries`
+      : "Transcript events recorded";
     const diagCount = (step.checker_runs || []).length + (step.checker_diagnostics || []).length + (step.compilation_events || []).length + (step.compiler_diagnostics ? 1 : 0);
     $("cntDiagnostics").textContent = diagCount ? String(diagCount) : "";
     const testCount = (step.test_executions || []).length || (step.test_runs || []).length;
@@ -1956,13 +2060,25 @@
   function renderStageOverview(step) {
     const manifestArtifacts = step.artifacts_manifest?.artifacts || [];
     const casFiles = step.cas_files || [];
+    const sess = sessionStats(step);
+    const sessionCell = sess
+      ? `${sess.sessions} (${sess.retries ? `${sess.retries} session retr${sess.retries === 1 ? "y" : "ies"}` : "no retries"})`
+      : `<span class="muted">unknown — no transcript available</span>`;
+    const retryEvents = (state.runDetail?.retry_events || []).filter((e) => e.step_id === step.step_id);
+    const retryCell = retryEvents.length
+      ? retryEvents.map((e) => `<span class="badge ${e.will_retry ? "badge-yellow" : "badge-red"}" title="${esc(e.error_message || "")}">${e.will_retry ? "scheduled another stage attempt" : "final stage failure"}</span>`).join(" ")
+      : `<span class="muted">none</span>`;
+    const discardedCount = (step.discarded_attempts || []).length;
 
     const summaryCard = `
       <div class="card">
         <h4>Stage Metadata</h4>
         <table class="kv-table">
           <tr><th>Step ID</th><td><code>${esc(step.step_id)}</code></td></tr>
-          <tr><th>Attempt</th><td>${esc(step.attempt_number)}</td></tr>
+          <tr><th>Stage attempt</th><td>${esc(step.attempt_number)} of ${stageAttemptCount(state.runDetail, step)} <span class="muted">(orchestrator retry of the whole stage)</span></td></tr>
+          <tr><th>Agent sessions</th><td>${sessionCell}</td></tr>
+          <tr><th>Stage retry decision</th><td>${retryCell}</td></tr>
+          ${discardedCount ? `<tr><th>Discarded agent attempts</th><td>${discardedCount} (session retries, tracked separately from stage attempts)</td></tr>` : ""}
           <tr><th>Success</th><td>${isSkippedStep(state.runDetail, step)
             ? `<span class="badge badge-muted" title="The stage did not fail; triage rejected the commit, which is a filtering decision.">skipped (triage discard)</span>`
             : isStepRunning(step)
@@ -1976,6 +2092,7 @@
           <tr><th>Started</th><td>${esc(fmtTs(step.started_at))}</td></tr>
           <tr><th>Completed</th><td>${esc(fmtTs(step.completed_at))}</td></tr>
         </table>
+        <p class="muted" style="font-size:11px;margin:10px 0 0;">Stage attempts are whole-stage retries by the orchestrator (see retry_events). Agent sessions are separate agent runs inside one stage attempt; every session after the first is a feedback retry, shown in the Transcript tab.</p>
       </div>
     `;
 
@@ -2349,18 +2466,16 @@
 
   // ---- Stage Tab: Transcript & Turns ----
   function buildInvocations(step) {
-    // The durable CAS transcript wins; while the step runs, fall back to the live stream.
-    const casEvents = (step.cas_transcript && step.cas_transcript.length)
-      ? step.cas_transcript
-      : liveEventsFor(step);
-    const isPrompt = (ev) => ev && (ev.event_type === "initial_prompt" || ev.event_type === "prompt" || ev.event_type === "user_prompt");
+    // Durable transcripts win (CAS first, then the DB copy); while a step runs,
+    // fall back to the provisional live stream.
+    const events = durableTranscript(step) || liveEventsFor(step);
 
-    if (casEvents.length > 0) {
+    if (events.length > 0) {
       const invocations = [];
       let current = { index: 1, timestamp: null, prompt: null, events: [] };
 
-      for (const ev of casEvents) {
-        if (isPrompt(ev)) {
+      for (const ev of events) {
+        if (isSessionStart(ev)) {
           if (current.prompt !== null || current.events.length > 0) {
             invocations.push(current);
             current = { index: invocations.length + 1, timestamp: null, prompt: null, events: [] };
@@ -2377,11 +2492,13 @@
 
       return invocations.map((inv) => ({
         ...inv,
+        // Session boundaries only exist in the transcript; DB telemetry rows are
+        // not session-tagged, so keep them with session #1 rather than guessing.
         turns: buildTurnsFromEvents(inv.events, inv.index === 1 ? step : null),
       }));
     }
 
-    // Fallback when no cas_transcript
+    // No transcript at all: one synthetic session from the DB-only telemetry.
     const turns = buildTurnTimeline(step);
     return [{
       index: 1,
@@ -2391,7 +2508,7 @@
     }];
   }
 
-  function buildTurnsFromEvents(casEvents, stepForCorrelated) {
+  function buildTurnsFromEvents(casEvents, correlated) {
     const byTurn = new Map();
     const ensureTurn = (idx) => {
       const key = idx ?? 0;
@@ -2414,14 +2531,14 @@
       });
     }
 
-    if (stepForCorrelated) {
-      for (const llm of (stepForCorrelated.llm_invocations || [])) {
+    if (correlated) {
+      for (const llm of (correlated.llm_invocations || [])) {
         ensureTurn(llm.turn_index ?? 0).llmCalls.push(llm);
       }
-      for (const g of (stepForCorrelated.guardrail_events || [])) {
+      for (const g of (correlated.guardrail_events || [])) {
         ensureTurn(g.turn_index ?? 0).events.push({ kind: "guardrail", timestamp: g.created_at, guard: g });
       }
-      for (const ce of (stepForCorrelated.compilation_events || [])) {
+      for (const ce of (correlated.compilation_events || [])) {
         ensureTurn(ce.turn_index ?? 0).events.push({ kind: "compilation", timestamp: ce.created_at, compilation: ce });
       }
     }
@@ -2546,7 +2663,7 @@
       <div class="turn-group" data-turn="${t.turnIndex}">
         <div class="turn-header">
           <div class="turn-header-left">
-            <strong>Turn ${esc(t.turnIndex)}</strong>
+            <strong title="Turn numbering restarts at 1 in every agent session">Turn ${esc(t.turnIndex)}</strong>
             <span class="badge badge-muted">${t.events.length} events</span>
             ${tools.map((tn) => `<span class="badge badge-blue">${esc(tn)}</span>`).join("")}
             ${hasGuard ? `<span class="badge badge-red">guardrail</span>` : ""}
@@ -2562,6 +2679,30 @@
     `;
   }
 
+  function renderDiscardedAttempts(step) {
+    const rows = step.discarded_attempts || [];
+    if (!rows.length) return "";
+    return `
+      <div class="card" style="margin-bottom:12px;">
+        <h4>Discarded agent attempts (${rows.length})</h4>
+        <p class="muted" style="font-size:11px;">Agent sessions whose output was discarded. “Stage attempt” is the orchestrator counter; “internal attempt” is the session retry counter inside that stage attempt.</p>
+        <table class="data-table">
+          <thead><tr><th>Stage attempt</th><th>Internal attempt (session)</th><th>Termination</th><th>Discard check</th><th>Steps</th><th>Failure</th></tr></thead>
+          <tbody>${rows.map((d) => `
+            <tr>
+              <td>${esc(d.stage_attempt_number)}</td>
+              <td>${esc(d.internal_attempt_number)}${Number(d.internal_attempt_number) > 1 ? ` <span class="badge badge-yellow">session retry ${Number(d.internal_attempt_number) - 1}</span>` : ""}</td>
+              <td>${esc(d.termination)}</td>
+              <td><code>${esc(d.discard_check)}</code></td>
+              <td>${esc(d.steps_counted)}</td>
+              <td>${d.agent_failure_message ? `<pre class="event-pre">${esc(String(d.agent_failure_message).slice(0, 400))}</pre>` : `<span class="muted">-</span>`}</td>
+            </tr>
+          `).join("")}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
   function renderStageTranscript(step) {
     const invocations = buildInvocations(step);
     const hasAnyTurns = invocations.some((inv) => inv.turns.length > 0 || inv.prompt);
@@ -2570,28 +2711,33 @@
       return `<div class="card"><div class="muted">No agent turns or transcript recorded for this stage.</div></div>`;
     }
 
-    const multi = invocations.length > 1;
+    const hasTranscript = Boolean(durableTranscript(step));
+    const intro = hasTranscript
+      ? `Each agent session is one <code>runAgent()</code> call inside stage attempt ${esc(step.attempt_number)}. Sessions after #1 are feedback retries within this attempt — not orchestrator stage retries. DB telemetry rows are not session-tagged, so LLM/guardrail/compilation data is only shown under session #1.`
+      : `No durable transcript is available, so DB telemetry is shown as one synthetic session; the real session count is unknown.`;
     const bodyHtml = invocations.map((inv) => {
+      const retryBadge = inv.index > 1
+        ? `<span class="badge badge-yellow" title="Feedback retry: a later runAgent() call inside this same stage attempt, not an orchestrator stage retry">session retry ${inv.index - 1}</span>`
+        : `<span class="badge badge-muted" title="First agent run in this stage attempt">initial run</span>`;
       const promptHtml = inv.prompt
-        ? `<div class="card" style="margin-bottom:10px;">${renderCollapsibleCode(multi ? `Invocation #${inv.index} Prompt` : "Initial Prompt", inv.prompt, false)}</div>`
+        ? `<div style="margin-bottom:10px;">${renderCollapsibleCode(`Agent session #${inv.index} prompt`, inv.prompt, false)}</div>`
         : "";
-      const turnsHtml = inv.turns.map((t) => renderTurnGroup(t)).join("");
-      if (!multi) {
-        return `${promptHtml}${turnsHtml}`;
-      }
       return `
         <div class="card" style="margin-bottom:14px;">
           <h4>
-            <span>Agent Invocation #${inv.index}</span>
+            <span>Agent session #${inv.index}</span>
+            ${retryBadge}
             <span class="muted" style="font-weight:400;font-size:11px;">${inv.timestamp ? esc(fmtTs(inv.timestamp)) : ""} &middot; ${inv.turns.length} turn(s)</span>
           </h4>
           ${promptHtml}
-          ${turnsHtml}
+          ${inv.turns.map((t) => renderTurnGroup(t)).join("")}
         </div>
       `;
     }).join("");
 
     return `
+      ${renderDiscardedAttempts(step)}
+      <div class="card" style="margin-bottom:12px;"><div class="muted" style="font-size:11px;">${intro}</div></div>
       <div class="transcript-toolbar">
         <input id="transcriptSearch" type="search" placeholder="Search transcript..." />
         <select id="transcriptKindFilter">
@@ -2881,7 +3027,7 @@
         <div class="card">
           <h4>Checker Runs (${checkerRuns.length})</h4>
           <table class="data-table">
-            <thead><tr><th>Stage</th><th>Attempt</th><th>Processor</th><th>Invoked</th><th>Success</th><th>Errors</th><th>Warnings</th></tr></thead>
+            <thead><tr><th>Stage</th><th>Stage attempt</th><th>Processor</th><th>Invoked</th><th>Success</th><th>Errors</th><th>Warnings</th></tr></thead>
             <tbody>
               ${checkerRuns.map((cr) => `
                 <tr>
@@ -2909,7 +3055,7 @@
             <tbody>
               ${diags.map((d) => `
                 <tr>
-                  <td>${esc(d.turn_index ?? "-")}</td>
+                  <td title="Turn numbering restarts at 1 in every agent session">${esc(d.turn_index ?? "-")}</td>
                   <td><span class="badge ${d.severity === "error" ? "badge-red" : "badge-yellow"}">${esc(d.severity)}</span></td>
                   <td><code>${esc(d.error_category)}</code></td>
                   <td><code>${esc(d.file_path)}:${esc(d.line_number)}</code>${d.enclosing_method ? `<div class="muted">${esc(d.enclosing_method)}</div>` : ""}</td>
@@ -2945,7 +3091,7 @@
       `;
     }
 
-    return html;
+    return `<div class="card"><p class="muted" style="font-size:11px;margin:0;">Turn indices restart at 1 in every agent session, and the DB telemetry rows below are not tagged with a session, so a turn number alone does not identify which session produced it. Session boundaries are in the Transcript tab.</p></div>${html}`;
   }
 
   // ---- Stage Tab: Tests ----
@@ -3015,11 +3161,11 @@
     if (!events.length) {
       return `<div class="card"><div class="muted">No guardrail interventions recorded for this stage.</div></div>`;
     }
-    return events.map((g) => `
+    return `<div class="card"><p class="muted" style="font-size:11px;margin:0;">Turn indices restart at 1 in each agent session and guardrail rows are not session-tagged; a turn number here does not identify a session.</p></div>` + events.map((g) => `
       <div class="card">
         <h4>
           <span>${esc(g.guard_type)} &middot; ${esc(g.violation_category)}</span>
-          <span class="badge ${g.action_blocked ? "badge-red" : "badge-yellow"}">${g.action_blocked ? "BLOCKED" : "WARNED"} (turn ${esc(g.turn_index)})</span>
+          <span class="badge ${g.action_blocked ? "badge-red" : "badge-yellow"}" title="Session-local turn number; session not recorded on this row">${g.action_blocked ? "BLOCKED" : "WARNED"} (turn ${esc(g.turn_index)})</span>
         </h4>
         ${g.file_path ? `<div class="muted" style="margin-bottom:6px;">File: <code>${esc(g.file_path)}</code></div>` : ""}
         <pre class="event-pre">${esc(g.feedback_message)}</pre>
@@ -3433,6 +3579,7 @@
               <th>Triage</th>
               ${STAGE_ORDER.map((s) => `<th><button class="matrix-col-btn" data-matrix-stage="${esc(s)}" title="Focus on ${esc(s)} across all commits">${esc(s)}</button></th>`).join("")}
               <th>Outcome</th>
+              <th title="Orchestrator retries of a whole stage, not agent-session retries">Stage retries</th>
               <th>Tokens</th>
             </tr>
           </thead>
@@ -3455,6 +3602,7 @@
                     ${facetBadge("outcome", outcome.key, outcome.cls, outcome.label, outcome.tooltip)}
                     ${outcome.reasonLabel ? `<div class="muted" style="font-size:11px;margin-top:2px;">${outcomeReasonControl(r, outcome)}</div>` : ""}
                   </td>
+                  <td>${r.stage_retries ? `<span class="badge badge-yellow" title="${r.stage_retries} orchestrator stage retry/retries; ${r.final_stage_failures} final stage failure(s)">${esc(r.stage_retries)}</span>` : `<span class="muted">0</span>`}</td>
                   <td>${esc(tokens)}</td>
                 </tr>
               `;
@@ -3550,13 +3698,18 @@
     const telemetryHtml = `<div class="grid-2 telemetry-grid">
       <div class="card"><h3>Database operation performance</h3>${telemetry.db_operations.length ? `<table class="data-table"><thead><tr><th>Operation</th><th>Calls</th><th>Failures</th><th>Avg ms</th><th>Max ms</th></tr></thead><tbody>${telemetry.db_operations.map((x) => `<tr><td>${esc(x.operation)}</td><td>${esc(fmtNum(x.calls))}</td><td>${esc(fmtNum(x.failures))}</td><td>${esc(Number(x.avg_duration_ms || 0).toFixed(2))}</td><td>${esc(Number(x.max_duration_ms || 0).toFixed(2))}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No DB operation telemetry${telemetry.notes.length ? ` · ${esc(telemetry.notes.join(" "))}` : ""}</p>`}</div>
       <div class="card"><h3>Subprocess timing</h3><p class="muted">Compare Gradle compile/test and checker time with LLM latency in run details.</p>${telemetry.subprocesses.length ? `<table class="data-table"><thead><tr><th>Stage</th><th>Kind</th><th>Calls</th><th>Failures</th><th>Timeouts</th><th>Avg ms</th><th>Max ms</th><th>Total ms</th></tr></thead><tbody>${telemetry.subprocesses.map((x) => `<tr><td>${esc(x.stage)}</td><td>${esc(x.kind)}</td><td>${esc(fmtNum(x.calls))}</td><td>${esc(fmtNum(x.failures))}</td><td>${esc(fmtNum(x.timeouts))}</td><td>${esc(Number(x.avg_duration_ms || 0).toFixed(2))}</td><td>${esc(fmtNum(x.max_duration_ms))}</td><td>${esc(fmtNum(x.total_duration_ms))}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No subprocess timing telemetry${telemetry.notes.length ? ` · ${esc(telemetry.notes.join(" "))}` : ""}</p>`}</div>
-      <div class="card"><h3>Retry telemetry</h3>${telemetry.retries.length ? `<table class="data-table"><thead><tr><th>Stage</th><th>Error class</th><th>Attempts</th><th>Retries</th><th>Final failures</th></tr></thead><tbody>${telemetry.retries.map((x) => `<tr><td>${esc(x.stage)}</td><td>${esc(x.error_class)}</td><td>${esc(fmtNum(x.attempts))}</td><td>${esc(fmtNum(x.retries))}</td><td>${esc(fmtNum(x.attempts - x.retries))}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No retry telemetry${telemetry.notes.length ? ` · ${esc(telemetry.notes.join(" "))}` : ""}</p>`}${telemetry.recent_retries.length ? `<h4>Recent retry events</h4><table class="data-table"><thead><tr><th>Stage</th><th>Error class</th><th>Attempt</th><th>Disposition</th><th>Delay ms</th><th>Last message</th></tr></thead><tbody>${telemetry.recent_retries.map((x) => `<tr><td>${esc(x.stage)}</td><td>${esc(x.error_class)}</td><td>${esc(x.attempt_number)}</td><td>${x.will_retry ? "retry" : "final failure"}</td><td>${esc(fmtNum(x.delay_ms))}</td><td>${esc(x.error_message)}</td></tr>`).join("")}</tbody></table>` : ""}</div>
+      <div class="card">
+        <h3>Stage retry telemetry</h3>
+        <p class="muted" style="font-size:11px;">Orchestrator retries of whole stages, from <code>retry_events</code>. Agent-session feedback retries are shown per stage in the Transcript tab and are not part of this table.</p>
+        ${telemetry.retries.length ? `<table class="data-table"><thead><tr><th>Stage</th><th>Error class</th><th title="Number of failed stage attempts recorded in retry_events">Failed stage attempts</th><th title="Failed stage attempts that were followed by another attempt">Stage retries</th><th title="Failed stage attempts that were not retried">Final stage failures</th></tr></thead><tbody>${telemetry.retries.map((x) => `<tr><td>${esc(x.stage)}</td><td>${esc(x.error_class)}</td><td>${esc(fmtNum(x.attempts))}</td><td>${esc(fmtNum(x.retries))}</td><td>${esc(fmtNum(x.attempts - x.retries))}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No stage retry telemetry${telemetry.notes.length ? ` · ${esc(telemetry.notes.join(" "))}` : ""}</p>`}
+        ${telemetry.recent_retries.length ? `<h4>Recent stage retry events</h4><table class="data-table"><thead><tr><th>Stage</th><th>Error class</th><th>Stage attempt</th><th>Disposition</th><th>Delay ms</th><th>Last message</th></tr></thead><tbody>${telemetry.recent_retries.map((x) => `<tr><td>${esc(x.stage)}</td><td>${esc(x.error_class)}</td><td>${esc(x.attempt_number)}</td><td>${x.will_retry ? "stage retry" : "final stage failure"}</td><td>${esc(fmtNum(x.delay_ms))}</td><td>${esc(x.error_message)}</td></tr>`).join("")}</tbody></table>` : ""}
+      </div>
     </div>`;
     el.innerHTML = `
       <div class="matrix-toolbar">
         <div>
           <h2 style="margin:0 0 4px 0;">Stage Matrix <span class="muted" style="font-size:13px;font-weight:400;">(${runs.length} commit${runs.length === 1 ? "" : "s"})</span>${batchId ? `<span class="badge badge-muted" style="margin-left:8px;">Batch: <code>${esc(batchId.slice(0, 8))}</code></span>` : ""}</h2>
-          <div class="muted" style="font-size:12px;">Click a stage column or pill to compare one stage across all commits; click any row or cell to inspect that commit.</div>
+          <div class="muted" style="font-size:12px;">Click a stage column or pill to compare one stage across all commits; click any row or cell to inspect that commit. “Stage retries” are whole-stage orchestrator retries; agent session retries are shown per stage in the Transcript tab.</div>
         </div>
         <div class="matrix-stage-pills">
           <label class="checkbox-inline" style="margin-right:8px;font-size:12px;">

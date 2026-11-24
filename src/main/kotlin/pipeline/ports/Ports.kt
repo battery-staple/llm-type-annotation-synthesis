@@ -4,6 +4,7 @@ import java.io.File
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import pipeline.db.CommitTriageUpdate
+import pipeline.db.DiscardedAttemptRecord
 import pipeline.db.EvaluationRunRecord
 import pipeline.db.StepTrajectoryRecord
 import pipeline.db.TelemetryProjection
@@ -207,4 +208,18 @@ interface DatabasePort {
     suspend fun updateCommit(update: CommitTriageUpdate)
     suspend fun recordRetry(event: RetryEvent)
     suspend fun recordSubprocess(metric: SubprocessMetricRecord)
+
+    /** Persist a discarded agent attempt and the paths of its durable artifacts. */
+    suspend fun recordDiscardedAttempt(record: DiscardedAttemptRecord)
+
+    /**
+     * Query discarded attempts by run, optionally narrowed by stage and either
+     * attempt counter. Results are ordered oldest internal attempt first.
+     */
+    suspend fun readDiscardedAttempts(
+        runId: RunId,
+        stage: String? = null,
+        stageAttemptNumber: Int? = null,
+        internalAttemptNumber: Int? = null
+    ): List<DiscardedAttemptRecord>
 }

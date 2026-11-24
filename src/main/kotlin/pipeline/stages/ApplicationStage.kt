@@ -20,6 +20,7 @@ import pipeline.cas.StageArtifactWriter
 import pipeline.db.AnnotationPlacementRecord
 import pipeline.db.CheckerDiagnosticRecord
 import pipeline.db.CheckerRunRecord
+import pipeline.db.DiscardCheck
 import pipeline.db.GuardrailEventRecord
 import pipeline.db.TelemetryProjection
 import pipeline.db.TestExecutionRecord
@@ -147,6 +148,7 @@ class ApplicationStage(
         val timeoutSeconds = ctx.config.agent.timeoutMs / 1000
         while (attempt < MAX_ATTEMPTS && !accepted) {
             attempt++
+            val attemptStartedMs = System.currentTimeMillis()
             val effectivePrompt = if (feedback.isEmpty()) {
                 basePrompt
             } else {
@@ -165,14 +167,40 @@ class ApplicationStage(
             )
             stepsTaken += runResult.stepsCounted
             fullTranscript += runResult.transcript
-            agentStartupFailure(runResult)?.let { throw StageHaltException(it) }
-            haltIfBenchmarkRepoDirty(ctx, "application")
+            agentStartupFailure(runResult)?.let { failure ->
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.OTHER, failure,
+                    patchOmittedReason = "agent failed to start; no edits were produced",
+                )
+                throw StageHaltException(failure)
+            }
+            try {
+                haltIfBenchmarkRepoDirty(ctx, "application")
+            } catch (t: Throwable) {
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.OTHER, t.message,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = t.stackTraceToString(),
+                )
+                throw t
+            }
 
             FileOps.mirrorTreeInto(workspace, worktree, MIRROR_EXCLUDES)
             val changed = PatchManager(worktree).changedPaths()
             if (changed.isEmpty()) {
                 feedback = "No file changes were detected in the worktree. Apply type annotations and qualifier imports; an empty patch is not acceptable." +
                     (agentFailureMessage(runResult)?.let { "\n$it" } ?: "")
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.NO_CHANGES, feedback,
+                    patchOmittedReason = "no file changes were detected in the worktree",
+                    diagnostics = agentFailureMessage(runResult),
+                )
                 continue
             }
             val pathAudit = FilesystemGuard.audit(
@@ -183,9 +211,16 @@ class ApplicationStage(
             if (!pathAudit.valid || !astAudit.valid) {
                 appendViolationEvents(ctx, guardrailEvents, attempt, "filesystem_guard", pathAudit.violations)
                 appendViolationEvents(ctx, guardrailEvents, attempt, "ast_gate", astAudit.violations)
-                feedback = "Guardrails rejected the edits:\n" +
-                    (violationTexts(pathAudit.violations) + violationTexts(astAudit.violations))
-                        .joinToString("\n").take(8000)
+                val violations = violationTexts(pathAudit.violations) + violationTexts(astAudit.violations)
+                feedback = "Guardrails rejected the edits:\n" + violations.joinToString("\n").take(8000)
+                // Capture the rejected patch and transcript BEFORE the reset below.
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.GUARDRAILS, feedback,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = violations.joinToString("\n"),
+                )
                 resetWorktree(worktree)
                 prepareWorkspace(worktree, workspace, lattice, ctx)
                 continue
@@ -194,6 +229,13 @@ class ApplicationStage(
             val compile = metrics.compile("application compile", worktree, lattice.toCheckerConfig())
             if (!compile.success) {
                 feedback = "Compilation of the annotated tree failed:\n" + compile.output.take(8000)
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.COMPILE, feedback,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = compile.output,
+                )
                 resetWorktree(worktree)
                 prepareWorkspace(worktree, workspace, lattice, ctx)
                 continue
@@ -237,16 +279,38 @@ class ApplicationStage(
                 )
             }
             if (tests.success && tests.outcomes.any { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }) {
+                val haltMessage = "existing tests fail on annotated tree"
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.TESTS, haltMessage,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = buildString {
+                        append(tests.output)
+                        tests.outcomes.filter { it.status == TestStatus.FAILED || it.status == TestStatus.ERROR }
+                            .forEach { outcome ->
+                                append("\n${outcome.testClass.value}.${outcome.testMethod}: ")
+                                append(outcome.failureMessage ?: outcome.status)
+                            }
+                    },
+                )
                 recordApplicationFailureTelemetry(
                     ctx.database, ctx, fullTranscript, System.currentTimeMillis() - startedMs,
                     guardrailEvents = guardrailEvents,
                     testRun = testRun,
                     testExecutions = testExecutions,
                 )
-                throw StageHaltException("existing tests fail on annotated tree")
+                throw StageHaltException(haltMessage)
             }
             if (!tests.success) {
                 feedback = "Test execution failed to produce a report:\n" + tests.output.take(8000)
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.TESTS, feedback,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = tests.output,
+                )
                 resetWorktree(worktree)
                 prepareWorkspace(worktree, workspace, lattice, ctx)
                 continue
@@ -298,15 +362,32 @@ class ApplicationStage(
                     false,
                 )
             }
-            if (!checker.checkerInvoked || !checker.success) {                feedback = "The selected checker pass did not complete (invoked=${checker.checkerInvoked}, success=${checker.success}). " +
+            if (!checker.checkerInvoked || !checker.success) {
+                val checkerLog = runCatching { checker.diagnosticsLog.readText() }.getOrDefault("")
+                feedback = "The selected checker pass did not complete (invoked=${checker.checkerInvoked}, success=${checker.success}). " +
                     "Fix the annotated tree so the checker post-pass runs:\n" +
-                    checker.diagnosticsLog.readText().take(8000)
+                    checkerLog.take(8000)
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.CHECKER, feedback,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = checkerLog + "\n" + checker.diagnostics.joinToString("\n") { it.message },
+                )
                 resetWorktree(worktree)
                 prepareWorkspace(worktree, workspace, lattice, ctx)
                 continue
             }
             if (checker.errorCount == 0) {
-                throw StageHaltException("trivial application: selected checker reported zero errors")
+                val haltMessage = "trivial application: selected checker reported zero errors"
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.APPLICATION, attempt, attemptStartedMs, effectivePrompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.application,
+                    DiscardCheck.CHECKER, haltMessage,
+                    patch = DiscardedAttemptRecorder.patchOrNull(worktree),
+                    diagnostics = checker.diagnostics.joinToString("\n") { it.message },
+                )
+                throw StageHaltException(haltMessage)
             }
             successChanged = changed
             accepted = true

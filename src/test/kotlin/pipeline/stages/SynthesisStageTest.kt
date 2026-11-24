@@ -57,6 +57,26 @@ class SynthesisStageTest {
             assertEquals("agent", run.decisionSource)
             assertEquals(false, run.fallbackOccurred)
             assertTrue(run.decisionRationale.orEmpty().isNotBlank())
+            assertTrue(
+                fixture.database.projections.single().compilationEvents.any { it.stage == "synthesis_canary" && it.exitCode == 0 },
+                "a successful canary must be recorded on the compilation/telemetry path",
+            )
+        }
+    }
+
+    @Test
+    fun `checker canary crash is retried and no bundle is published`() = runBlocking {
+        val crashScript = """
+            echo 'error: Root is not a key in the directSuperMap.  Does it have a @SubtypeOf annotation?'
+            echo 'org.checkerframework.javacutil.TypeSystemError: Root is not a key in the directSuperMap.'
+            exit 1
+        """.trimIndent()
+        withFixture(AllowedCheckers.CUSTOM_ONLY, canaryScript = crashScript) { fixture ->
+            val result = fixture.stage.execute(fixture.context, SynthesisInput(bug))
+            val failure = assertIs<StageResult.TransientFailure>(result)
+            assertContains(failure.error.message.orEmpty(), "directSuperMap")
+            assertEquals(3, fixture.agent.calls)
+            assertTrue(fixture.database.projections.isEmpty(), "a broken hierarchy must not be published")
         }
     }
 
@@ -154,12 +174,21 @@ class SynthesisStageTest {
         customDecision: Boolean = true,
         malformed: Boolean = false,
         processor: String? = null,
+        canaryScript: String? = null,
         block: suspend (Fixture) -> Unit,
     ) {
         val root = Files.createTempDirectory("synthesis-stage-test").toFile()
         try {
             root.resolve("agent").mkdirs()
             root.resolve("cas").mkdirs()
+            val checkerHome = root.resolve("checker-home")
+            checkerHome.resolve("checker/bin").mkdirs()
+            checkerHome.resolve("checker/dist").mkdirs()
+            checkerHome.resolve("checker/dist/checker-qual.jar").writeBytes(byteArrayOf())
+            checkerHome.resolve("checker/bin/javac").apply {
+                writeText("#!/bin/sh\n${canaryScript ?: "exit 0"}\n")
+                setExecutable(true)
+            }
             // The stage checks that the benchmark checkout remains clean; keep the
             // agent/cas workspaces outside the git repository.
             val repo = root.resolve("repo").also { it.mkdirs() }
@@ -175,7 +204,10 @@ class SynthesisStageTest {
             val javac = FakeJavac()
             val database = RecordingDatabase()
             val base = ProjectConfig()
-            val config = base.copy(synthesis = base.synthesis.copy(allowedCheckers = allowed))
+            val config = base.copy(
+                environment = base.environment.copy(checkerFrameworkHome = checkerHome.absolutePath),
+                synthesis = base.synthesis.copy(allowedCheckers = allowed),
+            )
             val context = RunContext(
                 config = config,
                 build = BuildSection(),
@@ -231,9 +263,11 @@ class SynthesisStageTest {
             import java.lang.annotation.RetentionPolicy;
             import java.lang.annotation.Target;
             import org.checkerframework.framework.qual.DefaultQualifierInHierarchy;
+            import org.checkerframework.framework.qual.SubtypeOf;
             $target
             @Retention(RetentionPolicy.RUNTIME)
             @DefaultQualifierInHierarchy
+            @SubtypeOf({})
             public @interface Root {}
             """.trimIndent(),
         )
@@ -319,5 +353,12 @@ class SynthesisStageTest {
         override suspend fun updateCommit(update: CommitTriageUpdate) = Unit
         override suspend fun recordRetry(event: pipeline.db.RetryEvent) = Unit
         override suspend fun recordSubprocess(metric: pipeline.db.SubprocessMetricRecord) = Unit
+        override suspend fun recordDiscardedAttempt(record: pipeline.db.DiscardedAttemptRecord) = Unit
+        override suspend fun readDiscardedAttempts(
+            runId: pipeline.stages.RunId,
+            stage: String?,
+            stageAttemptNumber: Int?,
+            internalAttemptNumber: Int?
+        ): List<pipeline.db.DiscardedAttemptRecord> = emptyList()
     }
 }

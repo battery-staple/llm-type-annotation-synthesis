@@ -11,6 +11,7 @@ import pipeline.config.ProjectConfig
 import pipeline.db.CheckerDiagnosticRecord
 import pipeline.db.CheckerRunRecord
 import pipeline.db.CommitTriageUpdate
+import pipeline.db.DiscardedAttemptRecord
 import pipeline.db.EvaluationRunRecord
 import pipeline.db.GuardrailEventRecord
 import pipeline.db.RetryEvent
@@ -38,6 +39,13 @@ class ApplicationStageFailureTelemetryTest {
         override suspend fun updateCommit(update: CommitTriageUpdate) = Unit
         override suspend fun recordRetry(event: RetryEvent) = Unit
         override suspend fun recordSubprocess(metric: SubprocessMetricRecord) = Unit
+        override suspend fun recordDiscardedAttempt(record: DiscardedAttemptRecord) = Unit
+        override suspend fun readDiscardedAttempts(
+            runId: RunId,
+            stage: String?,
+            stageAttemptNumber: Int?,
+            internalAttemptNumber: Int?
+        ): List<DiscardedAttemptRecord> = emptyList()
     }
 
     private fun context(database: DatabasePort) = RunContext(

@@ -18,6 +18,7 @@ import pipeline.cas.CasEngine
 import pipeline.cas.StageArtifactWriter
 import pipeline.cas.createJarFromDirectory
 import pipeline.db.CompilationEventRecord
+import pipeline.db.DiscardCheck
 import pipeline.db.QualifierRecord
 import pipeline.db.SynthesisRunRecord
 import pipeline.db.TelemetryProjection
@@ -143,6 +144,7 @@ class SynthesisStage(
         val timeoutSeconds = ctx.config.agent.timeoutMs / 1000
         while (attempt < MAX_ATTEMPTS && !accepted) {
             attempt++
+            val attemptStartedMs = System.currentTimeMillis()
             val runResult = agentRunner.runAgent(
                 prompt,
                 workspace,
@@ -156,8 +158,27 @@ class SynthesisStage(
             )
             stepsTaken += runResult.stepsCounted
             fullTranscript += runResult.transcript
-            agentStartupFailure(runResult)?.let { throw StageHaltException(it) }
-            haltIfBenchmarkRepoDirty(ctx, "synthesis")
+            agentStartupFailure(runResult)?.let { failure ->
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.SYNTHESIS, attempt, attemptStartedMs, prompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.synthesis,
+                    DiscardCheck.OTHER, failure,
+                    patchOmittedReason = "agent failed to start; no workspace artifacts were produced",
+                )
+                throw StageHaltException(failure)
+            }
+            try {
+                haltIfBenchmarkRepoDirty(ctx, "synthesis")
+            } catch (t: Throwable) {
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.SYNTHESIS, attempt, attemptStartedMs, prompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.synthesis,
+                    DiscardCheck.OTHER, t.message,
+                    patchOmittedReason = "benchmark checkout contamination detected; workspace artifacts were discarded",
+                    diagnostics = t.stackTraceToString(),
+                )
+                throw t
+            }
             val decisionResult = runCatching {
                 SynthesisDecisionParser.parse(workspace.resolve(SynthesisDecision.FILE_NAME))
             }
@@ -189,9 +210,22 @@ class SynthesisStage(
             } else {
                 lastProblems = problems
                 logger.warn { "synthesis attempt $attempt failed validation: ${problems.joinToString("; ")}" }
-                prompt = basePrompt +
+                val feedback =
                     "\n\n## Corrective feedback (attempt $attempt failed validation; workspace files persist, fix them in place):\n" +
-                    problems.joinToString("\n") { "- $it" }
+                        problems.joinToString("\n") { "- $it" }
+                prompt = basePrompt + feedback
+                DiscardedAttemptRecorder.record(
+                    ctx, StageName.SYNTHESIS, attempt, attemptStartedMs, prompt,
+                    runResult.transcript, runResult, ctx.config.agent.steps.synthesis,
+                    DiscardCheck.OTHER, feedback,
+                    patchOmittedReason = "synthesis writes into a non-Git workspace; qualifier sources, " +
+                        "placement guide and decision file remain there and are not a worktree diff",
+                    diagnostics = buildString {
+                        append(problems.joinToString("\n"))
+                        compilationEvents.filter { it.turnIndex == attempt }
+                            .forEach { append("\n${it.stage} exit=${it.exitCode}:\n${it.diagnosticsText.orEmpty()}") }
+                    },
+                )
             }
         }
         if (!accepted) {
@@ -439,6 +473,44 @@ class SynthesisStage(
                         if (!result.success) {
                             problems += "javac compilation failed: " +
                                 result.diagnostics.joinToString("; ") { it.message }.take(2000)
+                        } else {
+                            // The jar compiles, but the Checker may still crash while
+                            // building its hierarchy (e.g. a root without @SubtypeOf({})).
+                            // Run a harness-side canary before accepting the attempt.
+                            val qualifiers = QualifierDiscovery.typeUseQualifiers(sourcesWorkspace).map { it.fqcn }
+                            val canary = runCatching {
+                                CheckerCanary.run(
+                                    checkerHome = File(ctx.config.environment.checkerFrameworkHome),
+                                    customQualsJar = stagingJar,
+                                    checkerQualJar = checkerQualJar,
+                                    processor = decision?.processor ?: ctx.config.checker.processor,
+                                    qualifiers = qualifiers,
+                                )
+                            }.getOrElse { error ->
+                                CheckerCanaryResult(
+                                    invoked = false,
+                                    exitCode = -1,
+                                    output = "",
+                                    problem = "checker canary invocation threw: ${error.message}",
+                                )
+                            }
+                            compilationEvents += CompilationEventRecord(
+                                TelemetryIds.id(),
+                                ctx.runId,
+                                ctx.stepId,
+                                null,
+                                "synthesis_canary",
+                                attempt,
+                                canary.exitCode,
+                                buildString {
+                                    append("checker canary invoked=${canary.invoked} exit=${canary.exitCode} ")
+                                    append("processor=${decision?.processor ?: ctx.config.checker.processor}")
+                                    append("\nquals=${qualifiers.joinToString(",") { it.value }}")
+                                    if (canary.problem != null) append("\nproblem=${canary.problem}")
+                                    else append("\n${canary.output.take(1500)}")
+                                }.take(4000),
+                            )
+                            canary.problem?.let { problems += it }
                         }
                     }
                 }

@@ -113,6 +113,7 @@ class SynthesisDecisionTest {
     fun `lattice validator accepts valid two qualifier hierarchy`() = withTempDir { dir ->
         writeQualifier(dir, "Root", """
             @DefaultQualifierInHierarchy
+            @SubtypeOf({})
             @Target(ElementType.TYPE_USE)
             @Retention(RetentionPolicy.RUNTIME)
             public @interface Root {}
@@ -127,9 +128,40 @@ class SynthesisDecisionTest {
     }
 
     @Test
+    fun `lattice validator rejects default root without SubtypeOf`() = withTempDir { dir ->
+        // This is the exact shape that crashes Checker with
+        // "PolicySignal is not a key in the directSuperMap".
+        writeQualifier(dir, "PolicySignal", """
+            @DefaultQualifierInHierarchy
+            @Target(ElementType.TYPE_USE)
+            @Retention(RetentionPolicy.RUNTIME)
+            public @interface PolicySignal {}
+        """)
+        writeQualifier(dir, "Child", child("Child", "PolicySignal"))
+        val problems = QualifierValidator.validateTypeUseLattice(dir)
+        assertTrue(problems.any { it.contains("@PolicySignal") && it.contains("missing @SubtypeOf") }, problems.toString())
+        assertTrue(problems.any { it.contains("@SubtypeOf({})") }, problems.toString())
+    }
+
+    @Test
+    fun `lattice validator rejects default root with nonempty SubtypeOf`() = withTempDir { dir ->
+        writeQualifier(dir, "Root", """
+            @DefaultQualifierInHierarchy
+            @SubtypeOf(Child.class)
+            @Target(ElementType.TYPE_USE)
+            @Retention(RetentionPolicy.RUNTIME)
+            public @interface Root {}
+        """)
+        writeQualifier(dir, "Child", child("Child", "Root"))
+        val problems = QualifierValidator.validateTypeUseLattice(dir)
+        assertTrue(problems.any { it.contains("root qualifier") && it.contains("@SubtypeOf({})") }, problems.toString())
+    }
+
+    @Test
     fun `lattice validator reports missing TYPE_USE target`() = withTempDir { dir ->
         writeQualifier(dir, "Root", """
             @DefaultQualifierInHierarchy
+            @SubtypeOf({})
             @Retention(RetentionPolicy.RUNTIME)
             public @interface Root {}
         """)
@@ -198,6 +230,7 @@ class SynthesisDecisionTest {
 
     private fun root(name: String) = """
         @DefaultQualifierInHierarchy
+        @SubtypeOf({})
         @Target(ElementType.TYPE_USE)
         @Retention(RetentionPolicy.RUNTIME)
         public @interface $name {}

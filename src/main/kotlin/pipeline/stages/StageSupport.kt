@@ -150,6 +150,13 @@ data class QualifierInfo(
     val packageName: String,
     val simpleName: String,
     val subtypesOf: List<String>,
+    /**
+     * Whether an `@SubtypeOf` annotation is present at all. This is deliberately
+     * distinct from `subtypesOf.isEmpty()`: an omitted annotation and an explicit
+     * `@SubtypeOf({})` both yield no parents, but only the latter registers the
+     * empty edge the Checker Framework needs to build its hierarchy map.
+     */
+    val hasSubtypeOf: Boolean,
     val isTop: Boolean,
     val isBottom: Boolean,
     val typeUse: Boolean,
@@ -178,14 +185,14 @@ object QualifierDiscovery {
             val typeUse = target?.toString()?.contains("TYPE_USE") == true
             val subtypeAnnotation = declaration.annotations.firstOrNull { it.nameAsString.endsWith("SubtypeOf") }
             val parents = subtypeAnnotation?.let { parseSubtypeOf(it) } ?: emptyList()
-            val isTop = declaration.annotations.any { it.nameAsString.endsWith("DefaultQualifierInHierarchy") } ||
-                (subtypeAnnotation != null && parents.isEmpty())
+            val isTop = declaration.annotations.any { it.nameAsString.endsWith("DefaultQualifierInHierarchy") }
             val simple = declaration.nameAsString
             QualifierInfo(
                 fqcn = Fqcn(if (pkg.isEmpty()) simple else "$pkg.$simple"),
                 packageName = pkg,
                 simpleName = simple,
                 subtypesOf = parents,
+                hasSubtypeOf = subtypeAnnotation != null,
                 isTop = isTop,
                 isBottom = false,
                 typeUse = typeUse
@@ -257,6 +264,11 @@ object QualifierValidator {
      * Structural validation for a custom marker hierarchy. Compilation only
      * proves the annotations are legal Java; this proves they form the single
      * root / single bottom strict lattice the Level 0 contract requires.
+     *
+     * Every qualifier must carry an explicit `@SubtypeOf`: the root is the sole
+     * `@DefaultQualifierInHierarchy` marker and must declare `@SubtypeOf({})`.
+     * Without that empty edge the Checker Framework omits the root from its
+     * directSuperMap and crashes before reporting any source diagnostics.
      */
     fun validateTypeUseLattice(sourceDir: File): List<String> {
         if (!sourceDir.isDirectory) return listOf("custom_quals_src/ is missing")
@@ -277,6 +289,15 @@ object QualifierValidator {
         val unique = qualifiers.filter { bySimpleName.getValue(it.simpleName).size == 1 }
         if (unique.isEmpty()) return problems
 
+        // An omitted @SubtypeOf is NOT equivalent to @SubtypeOf({}) for the
+        // Checker Framework: the latter registers an empty supertype edge, while
+        // the former leaves the qualifier out of directSuperMap entirely and
+        // crashes the processor with "X is not a key in the directSuperMap".
+        unique.filterNot { it.hasSubtypeOf }.forEach {
+            problems += "@${it.simpleName} is missing @SubtypeOf; every qualifier, including the root, " +
+                "must declare it explicitly (root: @SubtypeOf({}))"
+        }
+
         unique.forEach { qualifier ->
             qualifier.subtypesOf.forEach { parent ->
                 if (parent !in bySimpleName) {
@@ -292,12 +313,13 @@ object QualifierValidator {
         val roots = unique.filter { it.isTop }
         when {
             roots.isEmpty() -> problems += "no root qualifier; exactly one qualifier must be " +
-                "annotated @DefaultQualifierInHierarchy or @SubtypeOf({})"
+                "annotated @DefaultQualifierInHierarchy and declare @SubtypeOf({})"
             roots.size > 1 -> problems += "multiple root qualifiers: " +
                 roots.joinToString(", ") { "@${it.simpleName}" } + "; exactly one is required"
         }
-        roots.filter { it.subtypesOf.isNotEmpty() }.forEach {
-            problems += "root qualifier @${it.simpleName} must not declare @SubtypeOf parents"
+        roots.filter { it.hasSubtypeOf && it.subtypesOf.isNotEmpty() }.forEach {
+            problems += "root qualifier @${it.simpleName} must declare @SubtypeOf({}) with an empty " +
+                "supertype edge, not @SubtypeOf parents"
         }
 
         val parentNames = qualifiers.flatMap { it.subtypesOf }.toSet()

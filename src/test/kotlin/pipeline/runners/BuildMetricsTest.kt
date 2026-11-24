@@ -17,6 +17,13 @@ class BuildMetricsTest {
     private class Db : DatabasePort {
         val records = mutableListOf<SubprocessMetricRecord>()
         override suspend fun recordSubprocess(metric: SubprocessMetricRecord) { records += metric }
+        override suspend fun recordDiscardedAttempt(record: pipeline.db.DiscardedAttemptRecord) = Unit
+        override suspend fun readDiscardedAttempts(
+            runId: pipeline.stages.RunId,
+            stage: String?,
+            stageAttemptNumber: Int?,
+            internalAttemptNumber: Int?
+        ): List<pipeline.db.DiscardedAttemptRecord> = emptyList()
         override suspend fun recordRunStart(run: EvaluationRunRecord) = Unit
         override suspend fun recordStep(step: StepTrajectoryRecord) = Unit
         override suspend fun recordStageTelemetry(projection: TelemetryProjection) = Unit

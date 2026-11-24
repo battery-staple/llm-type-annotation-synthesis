@@ -1116,6 +1116,21 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
         ):
             llm_by_run[row["run_id"]] = row
 
+        # Stage-level retries are run-wide; keep them separate from the
+        # per-attempt/session information attached to each step.
+        retry_by_run: dict[str, dict[str, int]] = {}
+        for row in rows_to_dicts(
+            conn.execute(
+                """
+                SELECT run_id,
+                       SUM(CASE WHEN will_retry=1 THEN 1 ELSE 0 END) AS stage_retries,
+                       SUM(CASE WHEN will_retry=0 THEN 1 ELSE 0 END) AS final_stage_failures
+                FROM retry_events GROUP BY run_id
+                """
+            ).fetchall()
+        ):
+            retry_by_run[row["run_id"]] = row
+
         result = []
         for r in runs:
             cfg = safe_json_loads(r.pop("config_snapshot", None), {}) or {}
@@ -1134,6 +1149,9 @@ def fetch_runs_list(db_path: Path) -> list[dict[str, Any]]:
                     "total_latency_ms": 0,
                 },
             )
+            retries = retry_by_run.get(run_id, {})
+            r["stage_retries"] = retries.get("stage_retries", 0)
+            r["final_stage_failures"] = retries.get("final_stage_failures", 0)
             result.append(r)
         return result
 
@@ -1239,6 +1257,23 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
         except sqlite3.Error:
             run["subprocess_metrics"] = []
 
+        # Discarded agent sessions carry both counters explicitly, so they are
+        # the one place where stage attempts and internal (session) retries can
+        # be told apart without inferring from a transcript. Tolerate older DBs.
+        discarded_by_step: dict[str, list[dict[str, Any]]] = {}
+        try:
+            for row in rows_to_dicts(conn.execute(
+                """SELECT step_id, stage, stage_attempt_number, internal_attempt_number,
+                          termination, discard_check, feedback, agent_failure_message,
+                          exit_code, steps_counted, timed_out
+                   FROM discarded_attempts WHERE run_id = ?
+                   ORDER BY stage, stage_attempt_number, internal_attempt_number""",
+                (run_id,),
+            ).fetchall()):
+                discarded_by_step.setdefault(row["step_id"], []).append(row)
+        except sqlite3.Error:
+            pass
+
         for step in steps:
             sid = step["step_id"]
             step["artifacts_manifest"] = safe_json_loads(step.get("artifacts_manifest"), None)
@@ -1299,6 +1334,7 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
             step["guardrail_events"] = guardrail_events.get(sid, [])
             step["agent_turns"] = turns
             step["llm_invocations"] = llm_invocations.get(sid, [])
+            step["discarded_attempts"] = discarded_by_step.get(sid, [])
 
         # Sort steps canonically by step_number, then STAGE_ORDER
         order_map = {name: i for i, name in enumerate(STAGE_ORDER)}
@@ -1311,7 +1347,7 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
         run["steps"] = steps
         try:
             run["retry_events"] = rows_to_dicts(conn.execute(
-                """SELECT stage, error_class, attempt_number, max_attempts, will_retry,
+                """SELECT step_id, stage, error_class, attempt_number, max_attempts, will_retry,
                           delay_ms, error_message, created_at
                    FROM retry_events WHERE run_id = ? ORDER BY created_at, attempt_number""",
                 (run_id,),
