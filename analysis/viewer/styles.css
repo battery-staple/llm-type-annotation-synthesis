@@ -22,6 +22,8 @@
   --purple-soft: rgba(163, 113, 247, 0.15);
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  /* Duration for the scroll-driven compact/normal chrome transition. */
+  --compact-ease: 0.15s ease;
 }
 
 * {
@@ -32,6 +34,9 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* The viewer is a fixed-size app shell; never let wheel overscroll shift the
+     whole page (which would move the run header and sidebar out of view). */
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
@@ -61,7 +66,8 @@ code, pre {
   display: grid;
   grid-template-columns: 330px 1fr;
   height: 100vh;
-  overflow: hidden;
+  /* `clip` is not a scroll container, so wheel chains cannot scroll the shell. */
+  overflow: clip;
 }
 
 /* Sidebar */
@@ -308,6 +314,7 @@ code, pre {
 .runs-list {
   flex: 1;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 8px;
   display: flex;
   flex-direction: column;
@@ -824,6 +831,11 @@ code, pre {
   display: flex;
   justify-content: space-between;
   gap: 6px;
+  /* Collapsible in compact mode without a layout-affecting display toggle.
+     Leave room for wrapped badges/retry counts in the normal layout. */
+  max-height: 4em;
+  opacity: 1;
+  overflow: hidden;
 }
 
 /* Stage Inspector */
@@ -899,7 +911,108 @@ code, pre {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 16px;
+  /* Chrome height changes on scroll must never nudge the scroll offset. */
+  overflow-anchor: none;
+}
+
+/* Compact chrome while a stage tab (usually the transcript) is scrolled.
+   Every pinned element stays visible and usable — only decorative padding,
+   font size and secondary step metadata give way to the content viewport. */
+.run-header,
+.run-meta-row,
+.config-pills-row,
+.cfg-pill,
+.run-tabs,
+.run-tab,
+.stage-stepper,
+.step-card,
+.step-card-top,
+.step-name,
+.step-card-sub,
+.stage-header-bar,
+.stage-tabs,
+.stage-tab {
+  /* Only paint properties animate. Layout-affecting properties must change in
+     one step so JS can compensate scrollTop and keep content visually still. */
+  transition: background-color var(--compact-ease), border-color var(--compact-ease),
+    color var(--compact-ease), opacity var(--compact-ease);
+}
+
+.run-view.chrome-compact .run-header {
+  padding-top: 8px;
+}
+
+.run-view.chrome-compact .run-title-left h2 {
+  font-size: 15px;
+}
+
+.run-view.chrome-compact .run-meta-row {
+  margin-top: 2px;
+}
+
+.run-view.chrome-compact .config-pills-row {
+  margin-top: 4px;
+}
+
+.run-view.chrome-compact .cfg-pill {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+.run-view.chrome-compact .run-tabs {
+  margin-top: 6px;
+}
+
+.run-view.chrome-compact .run-tab {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.run-view.chrome-compact .stage-stepper {
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.run-view.chrome-compact .step-card {
+  padding: 5px 10px;
+}
+
+.run-view.chrome-compact .step-card-top {
+  margin-bottom: 0;
+}
+
+.run-view.chrome-compact .step-name {
+  font-size: 12px;
+}
+
+/* Secondary metadata is still available via each card's title tooltip. */
+.run-view.chrome-compact .step-card-sub {
+  max-height: 0;
+  opacity: 0;
+  margin: 0;
+}
+
+.run-view.chrome-compact .stage-header-bar {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.run-view.chrome-compact .stage-tabs {
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+.run-view.chrome-compact .stage-tab {
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --compact-ease: 0s;
+  }
 }
 
 /* Cards, Grids, Tables */

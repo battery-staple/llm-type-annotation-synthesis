@@ -1657,6 +1657,7 @@
     } else if (tabName === "log") {
       loadAndRenderLog();
     }
+    updateCompactChrome();
   }
 
   // ---- Stage Stepper & Inspector ----
@@ -1722,8 +1723,12 @@
         ? `<span class="badge badge-yellow" title="${sess.retries} agent feedback retry/retries inside this stage attempt (not stage retries)">${sess.retries} sess retry</span>`
         : "";
       const stateLabel = dotCls === "skip" ? "skipped" : (dotCls === "running" ? "running" : (dotCls === "warn" ? "incomplete" : (latest.cache_hit ? "cached" : (latest.success ? "completed" : "failed"))));
+      // Keep turns and duration reachable in the tooltip when compact mode hides
+      // the card's secondary metadata row.
+      const durText = isStepRunning(latest) ? fmtElapsed(latest.started_at) : fmtDuration(latest.started_at, latest.completed_at);
+      const compactDetails = `${turns ? ` · ${turns} turns` : ""}${durText !== "-" ? ` · ${durText}` : ""}`;
       return `
-        <button class="step-card ${active}" data-step-name="${esc(name)}" tabindex="-1" title="${esc(name)}: ${stateLabel}${attempts.length > 1 ? ` · ${attempts.length} stage attempts` : ""}${sess ? ` · ${sess.sessions} agent session(s)` : ""}">
+        <button class="step-card ${active}" data-step-name="${esc(name)}" tabindex="-1" title="${esc(name)}: ${stateLabel}${compactDetails}${attempts.length > 1 ? ` · ${attempts.length} stage attempts` : ""}${sess ? ` · ${sess.sessions} agent session(s)` : ""}">
           <div class="step-card-top">
             <span class="step-name">${esc(name)}</span>
             <span class="stage-dot ${dotCls}"></span>
@@ -1751,6 +1756,7 @@
     const insp = $("stageInspector");
     if (!step) {
       insp.classList.add("hidden");
+      updateCompactChrome();
       return;
     }
     insp.classList.remove("hidden");
@@ -1842,7 +1848,10 @@
       b.classList.toggle("active", b.dataset.stageTab === tabName);
     });
     const step = getSelectedStep();
-    if (!step) return;
+    if (!step) {
+      updateCompactChrome();
+      return;
+    }
 
     const container = $("stageTabContent");
     switch (tabName) {
@@ -1854,6 +1863,51 @@
       case "guardrails": container.innerHTML = renderStageGuardrails(step); break;
     }
     syncLiveTranscript(step);
+    // Replacing innerHTML resets the container's scroll position; keep the
+    // compact state (and therefore the chrome height) in sync with it.
+    updateCompactChrome();
+  }
+
+  // ---- Compact chrome driven by the stage tab scroll container ----
+  // The stage tab content is the only real scroll container in the inspector.
+  // Shrinking the pinned chrome while it is scrolled gives the transcript more
+  // room without removing any pinned control. Hysteresis plus rAF coalescing
+  // keeps the class toggle from feeding back into the scroll position.
+  // Enter only after scrolling farther than the chrome can shrink (~100px),
+  // so the scroll offset can absorb the height change without clamping at 0.
+  const COMPACT_ENTER_PX = 120;
+  const COMPACT_EXIT_PX = 4;
+  let compactRaf = 0;
+
+  function updateCompactChrome() {
+    const container = $("stageTabContent");
+    const view = $("runView");
+    const stagesPanel = $("runTabStages");
+    const inspector = $("stageInspector");
+    if (!container || !view || !stagesPanel || !inspector) return;
+    const stagesVisible = !view.classList.contains("hidden") &&
+      !stagesPanel.classList.contains("hidden") &&
+      !inspector.classList.contains("hidden");
+    const y = container.scrollTop;
+    const wasCompact = view.classList.contains("chrome-compact");
+    const compact = stagesVisible && (wasCompact ? y > COMPACT_EXIT_PX : y > COMPACT_ENTER_PX);
+    if (compact === wasCompact) return;
+
+    // Shrinking the chrome moves the scroll container's top edge up, so the
+    // same scroll offset would make the content jump. Move scrollTop by the
+    // opposite amount to keep the text under the cursor visually stationary.
+    const beforeHeight = container.clientHeight;
+    view.classList.toggle("chrome-compact", compact);
+    const heightDelta = container.clientHeight - beforeHeight;
+    container.scrollTop -= heightDelta;
+  }
+
+  function scheduleCompactChrome() {
+    if (compactRaf) return;
+    compactRaf = requestAnimationFrame(() => {
+      compactRaf = 0;
+      updateCompactChrome();
+    });
   }
 
   // ---- Live transcript (in-progress steps) ----
@@ -1927,16 +1981,21 @@
     tmp.innerHTML = renderStageTranscript(step);
     const fresh = tmp.querySelector("#turnsTimeline");
     const timeline = container.querySelector("#turnsTimeline");
+    // The transcript scrolls inside #stageTabContent, not the document. Using
+    // the real container keeps newly streamed events pinned to the bottom only
+    // when the user was already near it.
+    const scroller = $("stageTabContent");
+    const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
     if (!fresh || !timeline) {
       // First events: swap the "nothing recorded" placeholder for the full view.
       container.innerHTML = tmp.innerHTML;
       bindTranscriptHandlers(container);
       $("cntTranscript").textContent = String(state.live.events.length);
+      if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+      updateCompactChrome();
       return;
     }
 
-    const scroller = document.scrollingElement || document.documentElement;
-    const nearBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
     const openStates = [...timeline.querySelectorAll("details")].map((d) => d.open);
     const hiddenBodies = [...timeline.querySelectorAll(".turn-body")].map((b) => b.classList.contains("hidden"));
 
@@ -1949,6 +2008,7 @@
     container.querySelector("#transcriptSearch")?.dispatchEvent(new Event("input"));
     $("cntTranscript").textContent = String(state.live.events.length);
     if (nearBottom) scroller.scrollTop = scroller.scrollHeight;
+    updateCompactChrome();
   }
 
   function renderLatticeGraph(qualifiers) {
@@ -3544,6 +3604,7 @@
   function setViewMode(mode) {
     state.viewMode = mode;
     syncViewVisibility();
+    updateCompactChrome();
     if (mode === "matrix") renderMatrixView();
   }
 
@@ -3862,6 +3923,10 @@
     document.querySelectorAll(".stage-tab").forEach((btn) => {
       btn.addEventListener("click", () => switchStageTab(btn.dataset.stageTab));
     });
+
+    // Bound to the persistent scroll container rather than its innerHTML: tab
+    // switches and live transcript re-renders replace the content, not this node.
+    $("stageTabContent").addEventListener("scroll", scheduleCompactChrome, { passive: true });
 
     $("attemptSelector").addEventListener("change", (e) => {
       state.selectedStepId = e.target.value;
