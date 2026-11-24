@@ -378,14 +378,14 @@ the crawler) are not listed unless the code had to interpret the plan.
 
 ## Build integration for third-party repositories (Dockerization plan, Phase 0)
 
-57. **The qualifier jar is compiled with `--release 8`.** `JavacRunner` runs in
+58. **The qualifier jar is compiled with `--release 8`.** `JavacRunner` runs in
     the pipeline's JVM and previously wrote that JVM's class-file version (65 on
     JDK 21), which a JDK 17 toolchain rejects ("bad class file ... wrong version
     65.0", JSqlParser). Version 52 is readable by every JDK in the envelope and
     does not depend on a configured Java level, which may be a default. The
     synthesis prompt requires Java 8 qualifier sources and names the same
     `javac --release 8 -proc:none` command.
-58. **Module projects keep `module-info.java`.** Excluding the descriptor from
+59. **Module projects keep `module-info.java`.** Excluding the descriptor from
     the main source set did not avoid module mode (javac found it through
     `-sourcepath`) and stripped it from the project's own compile. Every
     `JavaCompile` task except `checkerPass` whose sources contain a descriptor
@@ -398,11 +398,11 @@ the crawler) are not listed unless the code had to interpret the plan.
     mode, without the descriptor and with an empty source path. A harness jar
     that is an explicit module is rejected. Synthesis rejects qualifier packages
     that the project declares at C-1 (a split package stays unreadable).
-59. **checker-qual is on the main compile classpath.** Without it, javac warns
+60. **checker-qual is on the main compile classpath.** Without it, javac warns
     "Cannot find annotation method 'value()' in type 'SubtypeOf'" (fatal under
     `-Werror`, Agrona), and a `package-info.java` importing checker-qual
     defaulting annotations does not compile.
-60. **`checkerPass` gets the checker's compiler configuration, not the
+61. **`checkerPass` gets the checker's compiler configuration, not the
     project's.** It is a `JavaCompile` task, so `withType(JavaCompile)` blocks
     configured it with the project's `-Werror`, `-Xlint`, Error Prone plugin,
     and similar flags. A `doFirst` action now keeps only an allowlist of flags
@@ -420,7 +420,7 @@ the crawler) are not listed unless the code had to interpret the plan.
     `CommandLineArgumentProvider`, because projects may assign an immutable list
     to `compilerArgs` (RoaringBitmap assigns a Kotlin `listOf`), on which the
     old `addAll` threw while the task was created.
-61. **The application agent gets a compile-only helper.** `run-compile.sh` runs
+62. **The application agent gets a compile-only helper.** `run-compile.sh` runs
     the compile and `compileTestJava` tasks through the harness init script with
     the harness environment, so qualifier imports resolve as in the harness
     compile. It never runs the checker: seeing checker errors would let the
@@ -429,7 +429,7 @@ the crawler) are not listed unless the code had to interpret the plan.
     agent to set up a classpath, and it states the non-triviality requirement
     only when that flag is true (previously it always did, so the flag had no
     effect).
-62. **Agent workspaces are one-commit Git repositories without project history,
+63. **Agent workspaces are one-commit Git repositories without project history,
     and they never contain agent instruction files.** After the sanitized
     export, application and repair workspaces get a synthetic one-commit `.git`,
     so build scripts that call `git` during configuration (JSqlParser's
@@ -438,14 +438,14 @@ the crawler) are not listed unless the code had to interpret the plan.
     `.opencode/`, and `.claude/` are excluded from every export at any depth;
     RoaringBitmap, caffeine, and wiremock ship such files, and OpenCode reads
     them as instructions.
-63. **Build-stage cache keys hash `checker.init.gradle`.** The template is a
+64. **Build-stage cache keys hash `checker.init.gradle`.** The template is a
     resource, so `StageCodeFingerprint` did not see template-only changes.
     Application, repair, and verification keys now include its hash; synthesis
     and triage, which do not use it, are unaffected.
 
 ## Build-integration preflight (Dockerization plan, Phase 0.5)
 
-64. **Preflight is an optional pipeline stage between ingestion and triage.**
+65. **Preflight is an optional pipeline stage between ingestion and triage.**
     It is off by default, so a run has the original six stages and step
     numbers; `pipeline run --preflight` or `preflight.enabled: true` adds it
     (the plan has it always on). `pipeline preflight` always runs it. It runs
@@ -457,13 +457,13 @@ the crawler) are not listed unless the code had to interpret the plan.
     `unsupported` and no verdict, so it is excluded from evaluation metrics.
     With preflight, the step numbers after ingestion shift by one (triage is
     step 3); without it they are unchanged.
-65. **P7 runs the full test suite**, which the plan did not have. Application
+66. **P7 runs the full test suite**, which the plan did not have. Application
     and verification both run the full suite under the build timeout, so a
     suite that cannot finish (`suite_timeout`) or already fails at C-1
     (`suite_fails_at_baseline`) means no run on that repository can reach a
     verdict. `preflight.suite_check: false` or `pipeline preflight
     --skip-suite` skips it.
-66. **The source level comes from the build.** P1 reads the compile task's
+67. **The source level comes from the build.** P1 reads the compile task's
     `release`, then a `--release` in its `compilerArgs` (Agrona), then its
     `sourceCompatibility`; P2 then reads the class-file version of the
     compiled classes, which also covers builds where a plugin sets the level
@@ -471,7 +471,7 @@ the crawler) are not listed unless the code had to interpret the plan.
     level. A `benchmarks.yaml` value that disagrees is reported in the report,
     not used; the later stages still use the configured value until the
     section 7.5 change feeds the probe value into `checkerPass`.
-67. **Preflight never downloads a toolchain and never uses the build cache.**
+68. **Preflight never downloads a toolchain and never uses the build cache.**
     Every preflight Gradle call passes
     `-Porg.gradle.java.installations.auto-download=false`, so a missing JDK is
     `jdk_unavailable` on the host as in Docker, and `--no-build-cache`.
@@ -483,43 +483,43 @@ the crawler) are not listed unless the code had to interpret the plan.
     cache setting: repaired code has new inputs, so verification misses the
     cache anyway, and up-to-date checks already skip repeated unchanged
     builds within one worktree.
-68. **Cache key: the build configuration, not the sources.** The key hashes
+69. **Cache key: the build configuration, not the sources.** The key hashes
     every committed file except Java sources under the production and test
     roots (Java files in `buildSrc` and in included builds, found by their own
     settings file, count as build logic), plus the P6 test class source, the
     init script, the probe templates, and the configuration that affects
     builds. Outcomes that depend on the sources, such as a checker crash on new
     syntax or a newly failing test, are rechecked by the later stages.
-69. **Reason codes added to the plan's list**: `gradle_runtime_unsupported`,
+70. **Reason codes added to the plan's list**: `gradle_runtime_unsupported`,
     `init_script_failure`, `checker_jdk_unsupported`, `checker_misreport`,
     `suite_timeout`, and `suite_fails_at_baseline`. The codes were fixed, and
     `expected_preflight` predictions recorded, in a commit before the first
     preflight run.
-70. **CAS directory artifacts validate by digest.** `CasEngine.validateArtifacts`
+71. **CAS directory artifacts validate by digest.** `CasEngine.validateArtifacts`
     treated only `custom_quals_src` as a directory, so any other registered
     directory (preflight's logs) made its bundle fail validation and never hit.
-71. **CAS staging directories carry their owner's PID.** Startup cleanup
+72. **CAS staging directories carry their owner's PID.** Startup cleanup
     deleted every `.staging-*` directory, so starting a second pipeline process
     destroyed a bundle another process was still writing (it wiped an
     in-progress preflight). Only directories of dead owners are removed now;
     directories with the old naming are removed after six hours.
-72. **The checker flag sanitizer runs directly before the compile action.** A
+73. **The checker flag sanitizer runs directly before the compile action.** A
     project `doFirst` runs at execution time and can append `-proc:none`,
     which silently disabled the checker because the sanitizer ran first. After
     the task graph is ready, the init script inserts the sanitizer behind every
     `doFirst`, before the first action that is not a `doFirst`/`doLast`
     closure; if none exists, it runs first as before.
-73. **Project argument providers pass through the allowlist** instead of being
+74. **Project argument providers pass through the allowlist** instead of being
     dropped whole. Error Prone's `-Xplugin:ErrorProne` is still dropped, while
     an `--add-exports` a project supplies through a provider is kept, so
     sources that compile normally also compile in `checkerPass`.
-74. **The init script registers its per-project setup with
+75. **The init script registers its per-project setup with
     `gradle.beforeProject`, not `allprojects`.** An init-script `allprojects`
     block, even an empty one, breaks `buildSrc` convention plugins that use
     type-safe version-catalog accessors ("Extension of type 'LibrariesForLibs'
     does not exist"); wiremock failed P3 on it, and the pre-Phase-0 template
     had the same problem.
-75. **Gradle fixture tests.** `src/fixtureTest` runs the real init script with
+76. **Gradle fixture tests.** `src/fixtureTest` runs the real init script with
     Gradle TestKit on generated offline projects, one per build condition that
     broke the harness (module descriptors, `-Werror`, inherited and late
     compiler flags, argument providers, immutable `compilerArgs`, the agent's

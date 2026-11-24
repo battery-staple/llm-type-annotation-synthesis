@@ -597,7 +597,7 @@ automatically, so they also serve as the regression tests for the Phase 0 fixes.
 ### Phase 0 status (2026-11-23)
 
 Implemented on branch `dockerization`; the decisions behind each change
-are recorded in `deviations.md` items 57–63. Verified on the host with JDK 21
+are recorded in `deviations.md` items 58–64. Verified on the host with JDK 21
 running Gradle, using scripted versions of preflight checks P3–P5 (fixed
 `ProbeTop`/`ProbeBottom` lattice compiled with `--release 8`; a probe-annotated
 file in one main and one test package; `checkerPass` on that tree, then with
@@ -628,7 +628,7 @@ pipeline run of JSqlParser and Agrona.
 
 Done on branch `dockerization`. Preflight is an opt-in stage
 (`pipeline run --preflight`) plus the standalone `pipeline preflight`
-command; `deviations.md` items 64-75 record the decisions. Predictions
+command; `deviations.md` items 65-76 record the decisions. Predictions
 (`expected_preflight`) were committed before the first run, together with the
 reason-code list.
 
