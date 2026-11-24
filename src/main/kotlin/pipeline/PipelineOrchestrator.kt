@@ -87,7 +87,8 @@ class PipelineOrchestrator(
         }
         val commits = Git.listCommits(mirror, startRef, config.triage.depth)
         val batchId = UUID.randomUUID().toString()
-        BenchmarkCheckoutGuard.reset(File(target.repoUrl), batchId)
+        val checkoutDir = File(target.repoUrl)
+        BenchmarkCheckoutGuard.reset(checkoutDir, contaminationScopeFor(checkoutDir))
         // Root commits have no C-1 and are excluded before scheduling.
         commits.filter { it.parents.isEmpty() }.forEach { meta ->
             logger.info { "Crawler: skipping root commit ${meta.hash.take(8)} (no parent)" }
@@ -199,8 +200,11 @@ class PipelineOrchestrator(
                 if (worktree.exists() && mirror == null) {
                     worktreesUnregistered = false
                     logger.warn { "Cannot unregister ${worktree.path}; no existing Git mirror is available" }
-                } else if (worktree.exists()) {
-                    runCatching { Git.removeWorktree(mirror!!, worktree) }
+                } else if (mirror != null) {
+                    // Unregister even when the directory is already gone: a stale
+                    // registration would otherwise survive a completed run and block
+                    // a later add at this path (Git.removeWorktree handles both cases).
+                    runCatching { Git.removeWorktree(mirror, worktree) }
                         .onFailure {
                             worktreesUnregistered = false
                             logger.warn(it) { "Could not unregister run worktree ${worktree.path}" }
@@ -246,7 +250,10 @@ class PipelineOrchestrator(
         scratchRoot.mkdirs()
         val scratchBase = scratchRoot.resolve("run_$runId").apply { mkdirs() }
         val repoDir = File(entry.repoUrl)
-        if (batchId == null) BenchmarkCheckoutGuard.reset(repoDir, runId.value)
+        // Guard state is shared by every run on this checkout. Crawler mode resets
+        // it once at the batch top level (see crawlAndRun); single-sample mode relies
+        // on a fresh JVM. Resetting per run here would clear poison detected by a
+        // concurrent run sharing this checkout.
         val metadata = runCatching { Git.metadata(resolveMetadataRepo(entry), entry.commitHash.hash) }
             .getOrElse { CommitMetadata("", emptyList(), "", "") }
 
@@ -288,7 +295,7 @@ class PipelineOrchestrator(
             database = database,
             productionRoots = entry.productionRoots,
             testRoots = entry.testRoots,
-            contaminationScope = batchId ?: runId.value
+            contaminationScope = contaminationScopeFor(repoDir)
         )
         return Triple(runId, worktreeBase, baseCtx)
     }

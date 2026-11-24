@@ -272,7 +272,7 @@ data class RunContext(
     // test_roots). Defaults preserve the legacy src/main + src/test layout.
     val productionRoots: List<String> = SourceRoots.DEFAULT_PRODUCTION_ROOTS,
     val testRoots: List<String> = SourceRoots.DEFAULT_TEST_ROOTS,
-    val contaminationScope: String = runId.value,
+    val contaminationScope: String = contaminationScopeFor(repoDir),
     // Set per stage attempt by the orchestrator. Orchestrator-only data.
     val stepId: String = "",
     val stepNumber: Int = 0,

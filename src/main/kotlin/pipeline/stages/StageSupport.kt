@@ -99,6 +99,10 @@ fun agentFailureMessage(result: AgentRunResult): String? {
 fun agentStartupFailure(result: AgentRunResult): String? =
     agentFailureMessage(result)?.takeIf { !result.timedOut && result.stepsCounted == 0 }
 
+/** Contamination state is shared by every run using the same local checkout. */
+internal fun contaminationScopeFor(repoDir: File): String =
+    runCatching { repoDir.canonicalPath }.getOrDefault(repoDir.absolutePath)
+
 /**
  * Agents are not OS-sandboxed: they can reach the benchmark checkout even when
  * their working directory is a scratch export. Detect and roll back any such
@@ -111,7 +115,7 @@ fun haltIfBenchmarkRepoDirty(ctx: RunContext, stage: String) {
     BenchmarkCheckoutGuard.check(repo, ctx.contaminationScope, stage)
 }
 
-/** Serializes contamination detection/rollback and poisons a checkout for its run. */
+/** Serializes contamination detection/rollback and poisons a shared checkout for all runs on it. */
 internal object BenchmarkCheckoutGuard {
     private data class State(val lock: Any = Any(), var contaminated: Boolean = false)
     private val states = ConcurrentHashMap<String, State>()

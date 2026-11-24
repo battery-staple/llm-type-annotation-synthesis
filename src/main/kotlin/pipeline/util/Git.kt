@@ -1,6 +1,7 @@
 package pipeline.util
 
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -14,11 +15,98 @@ data class CommitMetadata(
 
 object Git {
     private val repositoryLocks = ConcurrentHashMap<String, ReentrantLock>()
+    private val worktreeFileLockMutex = ReentrantLock()
     internal val worktreeOperationsLock = ReentrantLock()
     internal fun worktreeLockFor(repo: File): ReentrantLock = worktreeOperationsLock
     private fun lockFor(repo: File): ReentrantLock = repositoryLocks.computeIfAbsent(
-        runCatching { repo.canonicalPath }.getOrDefault(repo.absolutePath)
+        canonicalPath(repo)
     ) { ReentrantLock() }
+
+    private fun canonicalPath(file: File): String =
+        runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
+
+    /** The common git dir is shared by a bare mirror and all of its linked worktrees. */
+    private fun gitCommonDir(repo: File): File {
+        val absolute = run(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        val result = if (absolute.exitCode == 0 && absolute.stdout.isNotBlank()) absolute
+        else run(repo, "rev-parse", "--git-common-dir")
+        // Fail loudly instead of silently keying the cross-process lock on a
+        // bogus path (File("") resolves to the repo root) when rev-parse fails.
+        val stdout = requireOk(result, "git rev-parse --git-common-dir")
+        require(stdout.isNotBlank()) { "git rev-parse --git-common-dir returned an empty path for $repo" }
+        val path = File(stdout)
+        val resolved = if (path.isAbsolute) path else File(repo, path.path)
+        return File(canonicalPath(resolved))
+    }
+
+    /**
+     * Cross-process mutex for worktree lifecycle mutations. The OS file lock
+     * provides the actual exclusion between pipeline processes; the JVM-side
+     * mutex only prevents OverlappingFileLockException when two threads in this
+     * process acquire lock files at the same time. The lock file lives at the
+     * root of the common git dir, outside git's own worktrees/ metadata.
+     */
+    internal fun <T> withWorktreeFileLock(repo: File, block: () -> T): T {
+        val lockFile = File(gitCommonDir(repo), "pipeline-worktree.lock")
+        return worktreeFileLockMutex.withLock {
+            lockFile.parentFile?.mkdirs()
+            FileOutputStream(lockFile, true).use { stream ->
+                val lock = stream.channel.lock()
+                try {
+                    block()
+                } finally {
+                    lock.release()
+                }
+            }
+        }
+    }
+
+    private fun worktreePaths(repo: File): Set<String> {
+        // Never treat a git failure as "no registrations": removeWorktree would
+        // then delete the directory while leaving a live registration behind.
+        val stdout = requireOk(run(repo, "worktree", "list", "--porcelain"), "git worktree list")
+        return stdout.lineSequence()
+            .filter { it.startsWith("worktree ") }
+            .map { canonicalPath(File(it.removePrefix("worktree "))) }
+            .toSet()
+    }
+
+    /**
+     * Last-resort cleanup: remove only the administrative entries whose gitdir
+     * file points at [destination]. This is a targeted prune, never a blanket
+     * `git worktree prune` over unrelated registrations.
+     */
+    internal fun pruneStaleWorktreeEntry(repo: File, destination: File) {
+        val gitDir = gitCommonDir(repo)
+        val destinationGitFile = canonicalPath(File(destination, ".git"))
+        val destinationPath = canonicalPath(destination)
+        File(gitDir, "worktrees").takeIf { it.isDirectory }?.listFiles()?.forEach { entry ->
+            val target = runCatching { File(entry, "gitdir").readText().trim() }.getOrNull()?.takeIf { it.isNotBlank() }
+                ?: return@forEach
+            val pointedAt = if (File(target).isAbsolute) canonicalPath(File(target))
+                            else canonicalPath(File(gitDir, target))
+            if (pointedAt == destinationGitFile || pointedAt == destinationPath) {
+                FileOps.deleteRecursively(entry)
+            }
+        }
+    }
+
+    /**
+     * Clears only the registration for [destination], never another run's worktree.
+     * Returns null once the destination is gone from the registration list, or
+     * git's failure output when the registration could not be cleared, so the
+     * caller can report the underlying diagnostic instead of losing it.
+     */
+    private fun unregisterWorktree(repo: File, destination: File): String? {
+        val destinationPath = canonicalPath(destination)
+        if (destinationPath !in worktreePaths(repo)) return null
+        val removal = run(repo, "worktree", "remove", "--force", destination.absolutePath)
+        if (removal.exitCode == 0) return null
+
+        pruneStaleWorktreeEntry(repo, destination)
+        return if (destinationPath !in worktreePaths(repo)) null else removal.output.takeLast(4000)
+    }
+
     fun run(cwd: File, vararg args: String, timeoutSeconds: Long = 300, env: Map<String, String> = emptyMap()): ProcResult =
         Processes.run(listOf("git") + args.toList(), cwd, environment = env, timeoutSeconds = timeoutSeconds)
 
@@ -102,20 +190,35 @@ object Git {
 
     fun addWorktree(repo: File, destination: File, commit: String) {
         worktreeLockFor(repo).withLock {
-            destination.parentFile?.mkdirs()
-            FileOps.deleteRecursively(destination)
-            requireOk(
-                run(repo, "worktree", "add", "--detach", destination.absolutePath, commit, timeoutSeconds = 600),
-                "git worktree add $destination"
-            )
+            withWorktreeFileLock(repo) {
+                destination.parentFile?.mkdirs()
+                FileOps.deleteRecursively(destination)
+                unregisterWorktree(repo, destination)
+                var result = run(repo, "worktree", "add", "--detach", destination.absolutePath, commit, timeoutSeconds = 600)
+                // Last-resort fallback, still under the lock: only a missing
+                // worktree registered at this exact path may be overridden.
+                if (result.exitCode != 0 && !destination.exists() && canonicalPath(destination) in worktreePaths(repo)) {
+                    result = run(
+                        repo, "worktree", "add", "--detach", "--force", destination.absolutePath, commit,
+                        timeoutSeconds = 600
+                    )
+                }
+                requireOk(result, "git worktree add $destination")
+            }
         }
     }
 
     fun removeWorktree(repo: File, destination: File) {
         worktreeLockFor(repo).withLock {
-            if (!destination.exists()) return
-            requireOk(run(repo, "worktree", "remove", "--force", destination.absolutePath), "git worktree remove $destination")
-            FileOps.deleteRecursively(destination)
+            withWorktreeFileLock(repo) {
+                // Unregister even when the directory is already gone: a stale
+                // registration blocks a later add at the same path.
+                val error = unregisterWorktree(repo, destination)
+                if (error != null) {
+                    throw GitException("git worktree remove $destination failed: registration still present; git reported: ${error.trim()}")
+                }
+                FileOps.deleteRecursively(destination)
+            }
         }
     }
 
