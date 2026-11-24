@@ -968,7 +968,7 @@ def read_live_transcript(path: Path, after: int) -> dict[str, Any]:
     """Return complete JSONL events written to ``path`` at or after byte ``after``.
 
     Only whole lines (ending in a newline) are returned, so a line the pipeline
-    is mid-way through writing is picked up on a later poll. If the file is
+    is midway through writing is picked up on a later poll. If the file is
     shorter than ``after`` it was truncated or replaced; the read restarts at 0
     and ``reset`` tells the client to discard what it had.
     """

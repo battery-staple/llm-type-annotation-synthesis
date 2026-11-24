@@ -1530,9 +1530,9 @@
         Boolean(state.filters.facets.batch?.has(item.batchId));
 
       const summaryPills = [
-        passCount ? `<span class="badge badge-green">${passCount} pass</span>` : "",
-        failCount ? `<span class="badge badge-red">${failCount} evaluated fail</span>` : "",
-        skippedCount ? `<span class="badge badge-muted">${skippedCount} triage skip</span>` : "",
+        passCount ? `<span class="badge badge-green">${passCount} ${passCount === 1 ? "pass" : "passes"}</span>` : "",
+        failCount ? `<span class="badge badge-red">${failCount} evaluated ${failCount === 1 ? "fail" : "fails"}</span>` : "",
+        skippedCount ? `<span class="badge badge-muted">${skippedCount} triage ${skippedCount === 1 ? "skip" : "skips"}</span>` : "",
         triageOnlyCount ? `<span class="badge badge-muted">${triageOnlyCount} triaged · not evaluated</span>` : "",
         incompleteCount ? `<span class="badge badge-yellow">${incompleteCount} incomplete</span>` : "",
         runningCount ? `<span class="badge badge-blue">${runningCount} running</span>` : "",
@@ -1847,10 +1847,10 @@
       const turnsLabel = turns ? `<span title="${computedTurns !== null ? "Summed over all agent sessions; the DB view only takes a per-session max" : "Turns"}">${esc(turns)}t</span>` : "";
       const sess = sessionStats(latest);
       const stageRetryBadge = attempts.length > 1
-        ? `<span class="badge badge-muted" title="${attempts.length - 1} orchestrator retry/retries of this whole stage (stage attempt count — not agent sessions)">${attempts.length} stage att</span>`
+        ? `<span class="badge badge-muted" title="${attempts.length - 1} orchestrator ${attempts.length - 1 === 1 ? "retry" : "retries"} of this whole stage (stage attempt count — not agent sessions)">${attempts.length} stage att</span>`
         : "";
       const sessionRetryBadge = sess && sess.retries
-        ? `<span class="badge badge-yellow" title="${sess.retries} agent feedback retry/retries inside this stage attempt (not stage retries)">${sess.retries} sess retry</span>`
+        ? `<span class="badge badge-yellow" title="${sess.retries} agent feedback ${sess.retries === 1 ? "retry" : "retries"} inside this stage attempt (not stage retries)">${sess.retries} sess ${sess.retries === 1 ? "retry" : "retries"}</span>`
         : "";
       const stateLabel = dotCls === "skip" ? "skipped" : (dotCls === "running" ? "running" : (dotCls === "warn" ? "incomplete" : (latest.cache_hit ? "cached" : (latest.success ? "completed" : "failed"))));
       // Keep turns and duration reachable in the tooltip when compact mode hides
@@ -1858,7 +1858,7 @@
       const durText = isStepRunning(latest) ? fmtElapsed(latest.started_at) : fmtDuration(latest.started_at, latest.completed_at);
       const compactDetails = `${turns ? ` · ${turns} turns` : ""}${durText !== "-" ? ` · ${durText}` : ""}`;
       return `
-        <button class="step-card ${active}" data-step-name="${esc(name)}" tabindex="-1" title="${esc(name)}: ${stateLabel}${compactDetails}${attempts.length > 1 ? ` · ${attempts.length} stage attempts` : ""}${sess ? ` · ${sess.sessions} agent session(s)` : ""}">
+        <button class="step-card ${active}" data-step-name="${esc(name)}" tabindex="-1" title="${esc(name)}: ${stateLabel}${compactDetails}${attempts.length > 1 ? ` · ${attempts.length} stage attempts` : ""}${sess ? ` · ${sess.sessions} agent ${sess.sessions === 1 ? "session" : "sessions"}` : ""}">
           <div class="step-card-top">
             <span class="step-name">${esc(name)}</span>
             <span class="stage-dot ${dotCls}"></span>
@@ -1960,7 +1960,7 @@
       ? `${sessInfo.sessions} sessions`
       : (rawEventCount ? String(rawEventCount) : "");
     cntTranscript.title = sessInfo
-      ? `${sessInfo.sessions} agent session(s), ${sessInfo.retries} session retry/retries`
+      ? `${sessInfo.sessions} agent ${sessInfo.sessions === 1 ? "session" : "sessions"}, ${sessInfo.retries} session ${sessInfo.retries === 1 ? "retry" : "retries"}`
       : "Transcript events recorded";
     const diagCount = (step.checker_runs || []).length + (step.checker_diagnostics || []).length + (step.compilation_events || []).length + (step.compiler_diagnostics ? 1 : 0);
     $("cntDiagnostics").textContent = diagCount ? String(diagCount) : "";
@@ -2933,7 +2933,7 @@
           <h4>
             <span>Agent session #${inv.index}</span>
             ${retryBadge}
-            <span class="muted" style="font-weight:400;font-size:11px;">${inv.timestamp ? esc(fmtTs(inv.timestamp)) : ""} &middot; ${inv.turns.length} turn(s)</span>
+            <span class="muted" style="font-weight:400;font-size:11px;">${inv.timestamp ? esc(fmtTs(inv.timestamp)) : ""} &middot; ${inv.turns.length} ${inv.turns.length === 1 ? "turn" : "turns"}</span>
           </h4>
           ${promptHtml}
           ${inv.turns.map((t) => renderTurnGroup(t)).join("")}
@@ -4160,7 +4160,7 @@
                     ${facetBadge("outcome", outcome.key, outcome.cls, outcome.label, outcome.tooltip)}
                     ${outcome.reasonLabel ? `<div class="muted" style="font-size:11px;margin-top:2px;">${outcomeReasonControl(r, outcome)}</div>` : ""}
                   </td>
-                  <td>${r.stage_retries ? `<span class="badge badge-yellow" title="${r.stage_retries} orchestrator stage retry/retries; ${r.final_stage_failures} final stage failure(s)">${esc(r.stage_retries)}</span>` : `<span class="muted">0</span>`}</td>
+                  <td>${r.stage_retries ? `<span class="badge badge-yellow" title="${r.stage_retries} orchestrator stage ${r.stage_retries === 1 ? "retry" : "retries"}; ${r.final_stage_failures} final stage ${r.final_stage_failures === 1 ? "failure" : "failures"}">${esc(r.stage_retries)}</span>` : `<span class="muted">0</span>`}</td>
                   <td>${esc(tokens)}</td>
                 </tr>
               `;
