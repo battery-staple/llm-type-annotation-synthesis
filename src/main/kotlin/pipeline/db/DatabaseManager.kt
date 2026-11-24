@@ -39,6 +39,7 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
         migrateCheckerRunColumns()
         migrateEvaluationRunColumns()
         migrateSynthesisRunColumns()
+        migrateTelemetrySessionColumns()
         connection.createStatement().use { statement ->
             // JDBC's execute() only runs the first statement in a multi-statement string.
             Schema.DDL.split(';').forEach { ddl ->
@@ -104,6 +105,18 @@ open class DatabaseManager(private val connection: Connection) : AutoCloseable {
             }
             if ("fallback_occurred" !in columns) {
                 statement.execute("ALTER TABLE synthesis_runs ADD COLUMN fallback_occurred BOOLEAN")
+            }
+        }
+    }
+
+    /** Tag telemetry written by earlier versions as session 1 so old rows stay attributable. */
+    private fun migrateTelemetrySessionColumns() {
+        listOf("llm_invocations", "guardrail_events", "compilation_events", "agent_turns").forEach { table ->
+            val columns = tableColumns(table)
+            if (columns.isNotEmpty() && "session_index" !in columns) {
+                connection.createStatement().use { statement ->
+                    statement.execute("ALTER TABLE $table ADD COLUMN session_index INTEGER NOT NULL DEFAULT 1")
+                }
             }
         }
     }

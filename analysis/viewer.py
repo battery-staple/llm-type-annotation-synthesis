@@ -1260,9 +1260,6 @@ def fetch_run_detail(db_path: Path, cache_dir: Path, logs_dir: Path, run_id: str
         except sqlite3.Error:
             run["subprocess_metrics"] = []
 
-        # Discarded agent sessions carry both counters explicitly, so they are
-        # the one place where stage attempts and internal (session) retries can
-        # be told apart without inferring from a transcript. Tolerate older DBs.
         discarded_by_step: dict[str, list[dict[str, Any]]] = {}
         try:
             for row in rows_to_dicts(conn.execute(

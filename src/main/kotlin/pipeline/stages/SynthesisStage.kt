@@ -462,6 +462,7 @@ class SynthesisStage(
                             attempt,
                             1,
                             "javac invocation threw: ${error.message}".take(4000),
+                            sessionIndex = attempt,
                         )
                         problems += "javac invocation failed: ${error.message}"
                         null
@@ -478,6 +479,7 @@ class SynthesisStage(
                             result.diagnostics.joinToString("\n") { diagnostic ->
                                 "${diagnostic.kind}:${diagnostic.lineNumber}:${diagnostic.columnNumber}: ${diagnostic.message}"
                             }.take(4000),
+                            sessionIndex = attempt,
                         )
                         if (!result.success) {
                             problems += "javac compilation failed: " +
@@ -518,6 +520,7 @@ class SynthesisStage(
                                     if (canary.problem != null) append("\nproblem=${canary.problem}")
                                     else append("\n${canary.output.take(1500)}")
                                 }.take(4000),
+                                sessionIndex = attempt,
                             )
                             canary.problem?.let { problems += it }
                         }

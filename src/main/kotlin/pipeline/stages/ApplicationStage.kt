@@ -588,6 +588,7 @@ internal fun appendViolationEvents(
             null,
             violation.toString().take(2000),
             violation.toString().take(4000),
+            sessionIndex = turnIndex,
         )
     }
 }

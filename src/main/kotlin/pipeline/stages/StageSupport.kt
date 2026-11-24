@@ -464,9 +464,20 @@ object AnnotationScanner {
 }
 
 object AgentTelemetry {
-    fun turns(ctx: RunContext, stage: StageName, transcript: List<AgentTranscriptEvent>): List<AgentTurnRecord> =
-        transcript.filter { it.eventType == AgentEventType.TOOL_CALL || it.eventType == AgentEventType.MESSAGE }
-            .map { event ->
+    /** One INITIAL_PROMPT seeds each runAgent() call, so its ordinal is the session index. */
+    private fun sessionIndexes(transcript: List<AgentTranscriptEvent>): List<Int> {
+        var session = 0
+        return transcript.map { event ->
+            if (event.eventType == AgentEventType.INITIAL_PROMPT) session++
+            maxOf(1, session)
+        }
+    }
+
+    fun turns(ctx: RunContext, stage: StageName, transcript: List<AgentTranscriptEvent>): List<AgentTurnRecord> {
+        val indexes = sessionIndexes(transcript)
+        return transcript.withIndex()
+            .filter { (_, event) -> event.eventType == AgentEventType.TOOL_CALL || event.eventType == AgentEventType.MESSAGE }
+            .map { (i, event) ->
                 AgentTurnRecord(
                     turnId = TelemetryIds.id(),
                     runId = ctx.runId,
@@ -478,9 +489,11 @@ object AgentTelemetry {
                     toolArguments = event.toolArguments?.let {
                         kotlinx.serialization.json.JsonObject(it).toString()
                     },
-                    toolResultSummary = event.toolResult?.take(4000)
+                    toolResultSummary = event.toolResult?.take(4000),
+                    sessionIndex = indexes[i]
                 )
             }
+    }
 
     fun llmInvocations(
         ctx: RunContext,
@@ -489,9 +502,11 @@ object AgentTelemetry {
         model: String,
         latencyMs: Long
     ): List<LlmInvocationRecord> {
-        val finishes = transcript.filter { it.eventType == AgentEventType.STEP_FINISH && it.tokenUsage != null }
+        val finishes = transcript.withIndex()
+            .filter { (_, event) -> event.eventType == AgentEventType.STEP_FINISH && event.tokenUsage != null }
         if (finishes.isEmpty()) return emptyList()
-        return finishes.map { event ->
+        val indexes = sessionIndexes(transcript)
+        return finishes.map { (i, event) ->
             val usage = event.tokenUsage!!
             LlmInvocationRecord(
                 callId = TelemetryIds.id(),
@@ -504,7 +519,8 @@ object AgentTelemetry {
                 promptTokens = usage.promptTokens,
                 completionTokens = usage.completionTokens,
                 totalTokens = usage.totalTokens,
-                latencyMs = latencyMs
+                latencyMs = latencyMs,
+                sessionIndex = indexes[i]
             )
         }
     }

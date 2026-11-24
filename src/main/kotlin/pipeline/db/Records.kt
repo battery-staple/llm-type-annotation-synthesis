@@ -117,7 +117,8 @@ data class CompilationEventRecord(
     val stage: String,
     val turnIndex: Int,
     val exitCode: Int,
-    val diagnosticsText: String?
+    val diagnosticsText: String?,
+    val sessionIndex: Int = 1
 )
 
 data class AgentTurnRecord(
@@ -129,7 +130,8 @@ data class AgentTurnRecord(
     val actionType: String,
     val toolName: String?,
     val toolArguments: String?,
-    val toolResultSummary: String?
+    val toolResultSummary: String?,
+    val sessionIndex: Int = 1
 )
 
 data class AnnotationPlacementRecord(
@@ -154,7 +156,8 @@ data class GuardrailEventRecord(
     val actionBlocked: Boolean = true,
     val filePath: String?,
     val diffSnippet: String?,
-    val feedbackMessage: String
+    val feedbackMessage: String,
+    val sessionIndex: Int = 1
 )
 
 data class CheckerRunRecord(
@@ -241,7 +244,8 @@ data class LlmInvocationRecord(
     val promptTokens: Int,
     val completionTokens: Int,
     val totalTokens: Int,
-    val latencyMs: Long
+    val latencyMs: Long,
+    val sessionIndex: Int = 1
 )
 
 data class SubprocessMetricRecord(

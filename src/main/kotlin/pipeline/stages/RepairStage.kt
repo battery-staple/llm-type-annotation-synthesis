@@ -648,6 +648,7 @@ internal fun appendRepairViolationEvents(
             null,
             violation.toString().take(2000),
             violation.toString().take(4000),
+            sessionIndex = turnIndex,
         )
     }
 }

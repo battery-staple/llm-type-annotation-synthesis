@@ -115,11 +115,6 @@
     return sawTurn || total ? total : null;
   }
 
-  // DB telemetry rows (llm_invocations, guardrail_events, compilation_events,
-  // checker_runs, ...) carry no session id: they are all projected once at the
-  // end of a stage attempt and share one created_at value. They therefore cannot
-  // be attributed to a specific agent session. Do not guess from timestamps.
-
   function stageAttemptCount(run, step) {
     return (run.steps || []).filter((s) => s.step_name === step.step_name).length;
   }
@@ -2532,6 +2527,21 @@
   }
 
   // ---- Stage Tab: Transcript & Turns ----
+  function sessionIndexOf(row) {
+    const value = row.session_index;
+    return value === null || value === undefined || value === "" ? 1 : Number(value);
+  }
+
+  function telemetryForSession(step, sessionIndex) {
+    const matching = (rows) => (rows || []).filter((row) => sessionIndexOf(row) === sessionIndex);
+    return {
+      llm_invocations: matching(step.llm_invocations),
+      guardrail_events: matching(step.guardrail_events),
+      compilation_events: matching(step.compilation_events),
+      agent_turns: matching(step.agent_turns),
+    };
+  }
+
   function buildInvocations(step) {
     // Durable transcripts win (CAS first, then the DB copy); while a step runs,
     // fall back to the provisional live stream.
@@ -2559,9 +2569,7 @@
 
       return invocations.map((inv) => ({
         ...inv,
-        // Session boundaries only exist in the transcript; DB telemetry rows are
-        // not session-tagged, so keep them with session #1 rather than guessing.
-        turns: buildTurnsFromEvents(inv.events, inv.index === 1 ? step : null),
+        turns: buildTurnsFromEvents(inv.events, telemetryForSession(step, inv.index)),
       }));
     }
 
@@ -2778,10 +2786,6 @@
       return `<div class="card"><div class="muted">No agent turns or transcript recorded for this stage.</div></div>`;
     }
 
-    const hasTranscript = Boolean(durableTranscript(step));
-    const intro = hasTranscript
-      ? `Each agent session is one <code>runAgent()</code> call inside stage attempt ${esc(step.attempt_number)}. Sessions after #1 are feedback retries within this attempt — not orchestrator stage retries. DB telemetry rows are not session-tagged, so LLM/guardrail/compilation data is only shown under session #1.`
-      : `No durable transcript is available, so DB telemetry is shown as one synthetic session; the real session count is unknown.`;
     const bodyHtml = invocations.map((inv) => {
       const retryBadge = inv.index > 1
         ? `<span class="badge badge-yellow" title="Feedback retry: a later runAgent() call inside this same stage attempt, not an orchestrator stage retry">session retry ${inv.index - 1}</span>`
@@ -2804,7 +2808,6 @@
 
     return `
       ${renderDiscardedAttempts(step)}
-      <div class="card" style="margin-bottom:12px;"><div class="muted" style="font-size:11px;">${intro}</div></div>
       <div class="transcript-toolbar">
         <input id="transcriptSearch" type="search" placeholder="Search transcript..." />
         <select id="transcriptKindFilter">
@@ -3158,7 +3161,7 @@
       `;
     }
 
-    return `<div class="card"><p class="muted" style="font-size:11px;margin:0;">Turn indices restart at 1 in every agent session, and the DB telemetry rows below are not tagged with a session, so a turn number alone does not identify which session produced it. Session boundaries are in the Transcript tab.</p></div>${html}`;
+    return html;
   }
 
   // ---- Stage Tab: Tests ----
@@ -3228,11 +3231,11 @@
     if (!events.length) {
       return `<div class="card"><div class="muted">No guardrail interventions recorded for this stage.</div></div>`;
     }
-    return `<div class="card"><p class="muted" style="font-size:11px;margin:0;">Turn indices restart at 1 in each agent session and guardrail rows are not session-tagged; a turn number here does not identify a session.</p></div>` + events.map((g) => `
+    return events.map((g) => `
       <div class="card">
         <h4>
           <span>${esc(g.guard_type)} &middot; ${esc(g.violation_category)}</span>
-          <span class="badge ${g.action_blocked ? "badge-red" : "badge-yellow"}" title="Session-local turn number; session not recorded on this row">${g.action_blocked ? "BLOCKED" : "WARNED"} (turn ${esc(g.turn_index)})</span>
+          <span class="badge ${g.action_blocked ? "badge-red" : "badge-yellow"}">${g.action_blocked ? "BLOCKED" : "WARNED"} (turn ${esc(g.turn_index)})</span>
         </h4>
         ${g.file_path ? `<div class="muted" style="margin-bottom:6px;">File: <code>${esc(g.file_path)}</code></div>` : ""}
         <pre class="event-pre">${esc(g.feedback_message)}</pre>

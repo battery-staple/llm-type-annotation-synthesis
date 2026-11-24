@@ -90,8 +90,8 @@ object TelemetryProjector {
     private fun insertCompilationEvent(c: Connection, r: CompilationEventRecord) {
         c.prepareStatement(
             """INSERT OR REPLACE INTO compilation_events
-               (event_id, run_id, step_id, checker_run_id, stage, turn_index, exit_code, diagnostics_text)
-               VALUES (?,?,?,?,?,?,?,?)"""
+               (event_id, run_id, step_id, checker_run_id, stage, turn_index, exit_code, diagnostics_text, session_index)
+               VALUES (?,?,?,?,?,?,?,?,?)"""
         ).use { s ->
             s.setString(1, r.eventId)
             s.setString(2, r.runId.value)
@@ -101,6 +101,7 @@ object TelemetryProjector {
             s.setInt(6, r.turnIndex)
             s.setInt(7, r.exitCode)
             s.setString(8, r.diagnosticsText)
+            s.setInt(9, r.sessionIndex)
             s.executeUpdate()
         }
     }
@@ -108,8 +109,8 @@ object TelemetryProjector {
     private fun insertAgentTurn(c: Connection, r: AgentTurnRecord) {
         c.prepareStatement(
             """INSERT OR REPLACE INTO agent_turns
-               (turn_id, run_id, step_id, stage, turn_index, action_type, tool_name, tool_arguments, tool_result_summary)
-               VALUES (?,?,?,?,?,?,?,?,?)"""
+               (turn_id, run_id, step_id, stage, turn_index, action_type, tool_name, tool_arguments, tool_result_summary, session_index)
+               VALUES (?,?,?,?,?,?,?,?,?,?)"""
         ).use { s ->
             s.setString(1, r.turnId)
             s.setString(2, r.runId.value)
@@ -120,6 +121,7 @@ object TelemetryProjector {
             s.setString(7, r.toolName)
             s.setString(8, r.toolArguments)
             s.setString(9, r.toolResultSummary)
+            s.setInt(10, r.sessionIndex)
             s.executeUpdate()
         }
     }
@@ -146,8 +148,8 @@ object TelemetryProjector {
         c.prepareStatement(
             """INSERT OR REPLACE INTO guardrail_events
                (event_id, run_id, step_id, stage, turn_index, guard_type, violation_category,
-                action_blocked, file_path, diff_snippet, feedback_message)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)"""
+                action_blocked, file_path, diff_snippet, feedback_message, session_index)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
         ).use { s ->
             s.setString(1, r.eventId)
             s.setString(2, r.runId.value)
@@ -160,6 +162,7 @@ object TelemetryProjector {
             s.setString(9, r.filePath)
             s.setString(10, r.diffSnippet)
             s.setString(11, r.feedbackMessage)
+            s.setInt(12, r.sessionIndex)
             s.executeUpdate()
         }
     }
@@ -274,8 +277,8 @@ object TelemetryProjector {
         c.prepareStatement(
             """INSERT OR REPLACE INTO llm_invocations
                (call_id, run_id, step_id, repo_id, stage, turn_index, model_name,
-                prompt_tokens, completion_tokens, total_tokens, latency_ms)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)"""
+                prompt_tokens, completion_tokens, total_tokens, latency_ms, session_index)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
         ).use { s ->
             s.setString(1, r.callId)
             s.setString(2, r.runId?.value)
@@ -288,6 +291,7 @@ object TelemetryProjector {
             s.setInt(9, r.completionTokens)
             s.setInt(10, r.totalTokens)
             s.setLong(11, r.latencyMs)
+            s.setInt(12, r.sessionIndex)
             s.executeUpdate()
         }
     }
