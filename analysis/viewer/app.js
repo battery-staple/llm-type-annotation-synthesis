@@ -25,6 +25,8 @@
     highlightedBatchId: null,
     expandedBatches: new Set(),
     collapsedBatches: new Set(),
+    // Restored from localStorage at startup so a reload does not silently
+    // re-show triage skips in the matrix (see persistHideTriageSkipsPreference).
     hideDiscardedInMatrix: false,
     filters: {
       // Facet key -> Set of selected values. Within a facet values are ORed;
@@ -1234,7 +1236,8 @@
 
   function clearAllFilters() {
     resetFacetFilters();
-    state.hideDiscardedInMatrix = false;
+    // "Hide triage skips" is a persisted matrix view preference, not a sidebar
+    // filter, so clearing filters must not (temporarily) undo the user's choice.
     const search = $("runSearch");
     if (search) search.value = "";
     applyFilters();
@@ -3584,6 +3587,25 @@
     `;
   }
 
+  // ---- Matrix "Hide triage skips" preference ----
+  const HIDE_TRIAGE_SKIPS_KEY = "viewer.hideTriageSkips";
+
+  function readHideTriageSkipsPreference() {
+    try {
+      return localStorage.getItem(HIDE_TRIAGE_SKIPS_KEY) === "1";
+    } catch {
+      return false; // storage disabled (private mode, file://, etc.)
+    }
+  }
+
+  function persistHideTriageSkipsPreference(hide) {
+    try {
+      localStorage.setItem(HIDE_TRIAGE_SKIPS_KEY, hide ? "1" : "0");
+    } catch {
+      // Non-fatal: the checkbox still works for this page's lifetime.
+    }
+  }
+
   function renderMatrixView() {
     const el = $("matrixView");
     let runs = getFilteredRuns();
@@ -3763,6 +3785,7 @@
     if (hideDiscardedEl) {
       hideDiscardedEl.addEventListener("change", (e) => {
         state.hideDiscardedInMatrix = e.target.checked;
+        persistHideTriageSkipsPreference(state.hideDiscardedInMatrix);
         renderMatrixView();
       });
     }
@@ -3885,6 +3908,9 @@
     $("placementDiffModal").querySelector(".modal-backdrop").addEventListener("click", () => $("placementDiffModal").classList.add("hidden"));
     $("placementDiffCopyBtn").addEventListener("click", () => copyText(state.placementDiffText || "", $("placementDiffCopyBtn")));
 
+    // Restore persisted view preferences before any render: the matrix checkbox
+    // starts unchecked in the markup, so a reload used to quietly reset it.
+    state.hideDiscardedInMatrix = readHideTriageSkipsPreference();
     setupAutoRefresh();
     startLiveClock();
     apiGet("/api/telemetry").then((data) => { state.telemetry = data; if (state.viewMode === "matrix") renderMatrixView(); }).catch(() => {});
