@@ -28,8 +28,9 @@ import pipeline.db.TestRunRecord
 import pipeline.ports.AgentRunner
 import pipeline.ports.BuildRunner
 import pipeline.ports.DatabasePort
-import pipeline.runners.BuildMetrics
 import pipeline.ports.TestStatus
+import pipeline.runners.BuildMetrics
+import pipeline.runners.qualifiedTask
 import pipeline.util.FileOps
 import pipeline.util.Git
 import pipeline.util.Hashing
@@ -127,7 +128,7 @@ class ApplicationStage(
                 "qualifier_import_prefixes" to importPrefixes.joinToString(", "),
                 "checker_mode_note" to checkerModeNote,
                 "custom_quals_jar_path" to ".agent-libs/custom-quals.jar",
-                "tell_non_triviality_error" to ctx.config.prompt.tellNonTrivialityError.toString(),
+                "non_triviality_requirement" to nonTrivialityRequirement(ctx.config.prompt.tellNonTrivialityError),
                 "production_roots" to pipeline.validators.SourceRoots.display(ctx.productionRoots),
                 "production_globs" to pipeline.validators.SourceRoots.displayGlobs(ctx.productionRoots),
                 "test_roots" to pipeline.validators.SourceRoots.display(ctx.testRoots),
@@ -515,6 +516,20 @@ class ApplicationStage(
     }
 }
 
+/**
+ * The application prompt states the non-triviality requirement only when
+ * `prompt.tell_non_triviality_error` is set: whether knowing it biases the
+ * agent toward ill-fitting types is the ablation that flag measures. The stage
+ * enforces the requirement either way.
+ */
+internal fun nonTrivialityRequirement(tell: Boolean): String =
+    if (tell) {
+        "- After your edits the dedicated checker post-pass must report at least one\n" +
+            "  error from the selected processor, otherwise the annotations are vacuous.\n"
+    } else {
+        ""
+    }
+
 internal fun fileShaOrMissing(file: File): String =
     if (file.isFile) Hashing.sha256(file) else "missing"
 
@@ -549,20 +564,34 @@ internal fun prepareWorkspace(worktree: File, workspace: File, lattice: Synthesi
             StandardCopyOption.COPY_ATTRIBUTES,
         )
     }
+    writeCheckerInitScript(workspace)
+    writeRunCompileScript(workspace, lattice.toCheckerConfig(), ctx)
+}
+
+/**
+ * Compile helper for the application agent. It compiles production and test
+ * sources through the harness init script, so the qualifier jar and
+ * checker-qual are on the classpath exactly as in the harness compile. It never
+ * runs the checker or the tests: whether the annotations produce checker errors
+ * is decided by the stage, and showing the agent those errors would let it
+ * steer placements by them (see `prompt.tell_non_triviality_error`).
+ */
+internal fun writeRunCompileScript(workspace: File, checker: CheckerConfig, ctx: RunContext) {
     val helper = workspace.resolve("run-compile.sh")
+    val tasks = listOf(ctx.build.compileTask, "compileTestJava")
+        .distinct()
+        .joinToString(" ") { qualifiedTask(ctx.build, it) }
     helper.writeText(
         """
         #!/usr/bin/env bash
-        # Best-effort local compile helper for the application agent (not part of the audited diff).
+        # Application compile helper: compiles main and test sources with the qualifier
+        # jar on the classpath. Does not run the checker or tests. Not part of the audited diff.
         set -u
-        cd "$(dirname "$0")"
-        if [ -x ./gradlew ]; then
-          ./gradlew compileJava
-        else
-          echo "no gradlew wrapper found" >&2
-          exit 1
-        fi
-        """.trimIndent(),
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+        cd "${'$'}SCRIPT_DIR"
+        $HARNESS_ENV_PLACEHOLDER
+        exec ${ctx.build.wrapperExecutable} $tasks --init-script "${'$'}SCRIPT_DIR/../.pipeline-init/checker.init.gradle" --console=plain
+        """.trimIndent().replace(HARNESS_ENV_PLACEHOLDER, harnessEnvExports(checker, ctx)),
     )
     helper.setExecutable(true)
 }

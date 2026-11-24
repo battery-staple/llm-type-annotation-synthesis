@@ -613,19 +613,32 @@ internal fun writeRunCheckerScript(workspace: File, checker: CheckerConfig, ctx:
           exit 2
         fi
         echo $((${'$'}COUNT + 1)) > "${'$'}COUNT_FILE"
-        export CHECKERFRAMEWORK_HOME="${ctx.config.environment.checkerFrameworkHome}"
-        export CUSTOM_QUAL_JAR_PATH="${'$'}SCRIPT_DIR/.agent-libs/custom-quals.jar"
-        export CF_PROCESSOR="${checker.processor}"
-        export CF_AQUALS="${checker.qualifierClassNames.joinToString(",") { it.value }}"
-        export CF_CHECKER_CATEGORY="${checkerCategoryName(checker.checkerCategory)}"
-        export CF_SOURCE_COMPATIBILITY="${ctx.sourceCompatibility}"
-        export CF_TARGET_COMPATIBILITY="${ctx.targetCompatibility}"
-        export GUARDRAILS_MODE="${ctx.config.guardrails.mode.name.lowercase()}"
+        $HARNESS_ENV_PLACEHOLDER
         exec ${ctx.build.wrapperExecutable} ${qualifiedTask(ctx.build, ctx.build.checkerTask)} --init-script "${'$'}SCRIPT_DIR/../.pipeline-init/checker.init.gradle"
-        """.trimIndent(),
+        """.trimIndent().replace(HARNESS_ENV_PLACEHOLDER, harnessEnvExports(checker, ctx)),
     )
     script.setExecutable(true)
 }
+
+/** Substituted after `trimIndent`, so the multi-line exports do not change the indent it strips. */
+internal const val HARNESS_ENV_PLACEHOLDER = "@@HARNESS_ENV@@"
+
+/**
+ * Shell `export` lines giving an agent-side Gradle invocation the environment
+ * the harness gives its own (`GradleBuildRunner.checkerEnv`), so the agent's
+ * helpers build exactly as the builds that score it. Expects `SCRIPT_DIR` to be
+ * the workspace directory.
+ */
+internal fun harnessEnvExports(checker: CheckerConfig, ctx: RunContext): String = listOf(
+    "export CHECKERFRAMEWORK_HOME=\"${ctx.config.environment.checkerFrameworkHome}\"",
+    "export CUSTOM_QUAL_JAR_PATH=\"${'$'}SCRIPT_DIR/.agent-libs/custom-quals.jar\"",
+    "export CF_PROCESSOR=\"${checker.processor}\"",
+    "export CF_AQUALS=\"${checker.qualifierClassNames.joinToString(",") { it.value }}\"",
+    "export CF_CHECKER_CATEGORY=\"${checkerCategoryName(checker.checkerCategory)}\"",
+    "export CF_SOURCE_COMPATIBILITY=\"${ctx.sourceCompatibility}\"",
+    "export CF_TARGET_COMPATIBILITY=\"${ctx.targetCompatibility}\"",
+    "export GUARDRAILS_MODE=\"${ctx.config.guardrails.mode.name.lowercase()}\"",
+).joinToString("\n")
 
 /** Records one guardrail event per violation; violations are treated opaquely as text. */
 internal fun appendRepairViolationEvents(

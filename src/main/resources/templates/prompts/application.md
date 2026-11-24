@@ -16,8 +16,6 @@ Import prefixes: {{qualifier_import_prefixes}}
 Qualifier jar: {{custom_quals_jar_path}}
 Checker qual jar: .agent-libs/checker-qual.jar
 
-Non-triviality hint enabled: {{tell_non_triviality_error}}
-
 ## Coverage requirements
 
 - Annotate role-carrying identifiers at **every** API boundary covered by the
@@ -57,7 +55,9 @@ Non-triviality hint enabled: {{tell_non_triviality_error}}
 
 ## Verification
 
-- You may run `./gradlew compileJava` with the qualifier jar on a classpath you
-  set up yourself to confirm imports resolve. Do NOT run tests.
-- After your edits the dedicated checker post-pass must report at least one
-  error from the selected processor, otherwise the annotations are vacuous.
+- Run `./run-compile.sh` to compile production and test sources with the
+  qualifier jar already on the classpath, exactly as the harness compiles
+  them. Use it to confirm that qualifier imports resolve and that every
+  annotation is in a legal position. Do NOT edit build files to set up a
+  classpath, and do NOT run tests.
+{{non_triviality_requirement}}
