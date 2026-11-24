@@ -190,7 +190,10 @@ data class ProjectConfig(
                     evalReposDir = resolve(decoded.paths.evalReposDir),
                     database = resolve(decoded.paths.database)
                 ),
-                environment = decoded.environment.copy(checkerFrameworkHome = resolve(checkerHome)),
+                environment = decoded.environment.copy(
+                    checkerFrameworkHome = resolve(checkerHome),
+                    javaHome = resolve(decoded.environment.javaHome),
+                ),
                 cache = decoded.cache.copy(stagesDir = resolve(decoded.cache.stagesDir)),
                 sourceFile = absolute
             )

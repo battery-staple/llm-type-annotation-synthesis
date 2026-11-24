@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
@@ -77,6 +78,23 @@ class SynthesisStageTest {
             assertContains(failure.error.message.orEmpty(), "directSuperMap")
             assertEquals(3, fixture.agent.calls)
             assertTrue(fixture.database.projections.isEmpty(), "a broken hierarchy must not be published")
+        }
+    }
+
+    @Test
+    fun `checker canary harness failure halts the stage without publishing`() = runBlocking {
+        val harnessScript = """
+            echo 'Error: Unable to access jarfile /Users/ro/Documents/Code/School/CS'
+            exit 1
+        """.trimIndent()
+        withFixture(AllowedCheckers.CUSTOM_ONLY, canaryScript = harnessScript) { fixture ->
+            val error = assertFailsWith<StageHaltException> {
+                fixture.stage.execute(fixture.context, SynthesisInput(bug))
+            }
+            assertContains(error.message.orEmpty(), "checker canary harness failure")
+            assertContains(error.message.orEmpty(), "could not start")
+            assertEquals(1, fixture.agent.calls)
+            assertTrue(fixture.database.projections.isEmpty(), "a broken canary harness must not be published")
         }
     }
 
@@ -182,10 +200,15 @@ class SynthesisStageTest {
             root.resolve("agent").mkdirs()
             root.resolve("cas").mkdirs()
             val checkerHome = root.resolve("checker-home")
-            checkerHome.resolve("checker/bin").mkdirs()
             checkerHome.resolve("checker/dist").mkdirs()
+            checkerHome.resolve("checker/dist/checker.jar").writeBytes(byteArrayOf())
             checkerHome.resolve("checker/dist/checker-qual.jar").writeBytes(byteArrayOf())
-            checkerHome.resolve("checker/bin/javac").apply {
+            // The canary launches `java -jar checker.jar` directly, so the
+            // canary script now drives a fake JDK rather than checker/bin/javac.
+            // There is deliberately no checker/bin/javac: if the canary ever
+            // falls back to it, these tests fail because the script is never run.
+            val fakeJdkHome = root.resolve("fake-jdk").also { it.resolve("bin").mkdirs() }
+            fakeJdkHome.resolve("bin/java").apply {
                 writeText("#!/bin/sh\n${canaryScript ?: "exit 0"}\n")
                 setExecutable(true)
             }
@@ -205,7 +228,10 @@ class SynthesisStageTest {
             val database = RecordingDatabase()
             val base = ProjectConfig()
             val config = base.copy(
-                environment = base.environment.copy(checkerFrameworkHome = checkerHome.absolutePath),
+                environment = base.environment.copy(
+                    checkerFrameworkHome = checkerHome.absolutePath,
+                    javaHome = fakeJdkHome.absolutePath,
+                ),
                 synthesis = base.synthesis.copy(allowedCheckers = allowed),
             )
             val context = RunContext(

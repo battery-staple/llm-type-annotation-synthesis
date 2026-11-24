@@ -496,13 +496,15 @@ class SynthesisStage(
                                     checkerQualJar = checkerQualJar,
                                     processor = decision?.processor ?: ctx.config.checker.processor,
                                     qualifiers = qualifiers,
+                                    javaHome = ctx.config.environment.javaHome,
                                 )
                             }.getOrElse { error ->
                                 CheckerCanaryResult(
                                     invoked = false,
                                     exitCode = -1,
                                     output = "",
-                                    problem = "checker canary invocation threw: ${error.message}",
+                                    problem = "checker canary could not start: invocation threw: ${error.message}",
+                                    harnessFailure = true,
                                 )
                             }
                             compilationEvents += CompilationEventRecord(
@@ -522,6 +524,15 @@ class SynthesisStage(
                                 }.take(4000),
                                 sessionIndex = attempt,
                             )
+                            if (canary.harnessFailure) {
+                                // A broken canary harness is deterministic for every
+                                // custom-hierarchy sample in the batch. Re-prompting the
+                                // agent (and the orchestrator's stage retries) cannot fix
+                                // the environment, so halt the run with an actionable error.
+                                val message = "checker canary harness failure: ${canary.problem ?: canary.output.take(500)}"
+                                logger.error { message }
+                                throw StageHaltException(message)
+                            }
                             canary.problem?.let { problems += it }
                         }
                     }
