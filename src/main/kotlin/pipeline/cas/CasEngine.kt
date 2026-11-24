@@ -337,6 +337,15 @@ object CacheKeys {
             // does not see it. Only stages whose builds use it hash it, so a
             // template change does not invalidate synthesis bundles.
             if (stage in INIT_SCRIPT_STAGES) put("checker_init_script", initScriptSha)
+            // Docker-mode builds run in a pinned image, so their results must
+            // never be mixed with host results. Added only in Docker mode, the
+            // same way RETIRED_CHECKER_QUALS_KEY kept old keys valid: local
+            // keys, and every existing bundle, are unchanged.
+            if (ctx.config.execution.backend == pipeline.config.ExecutionBackendKind.DOCKER) {
+                put("execution_backend", ctx.config.execution.backend.identifier)
+                put("image_id", ctx.config.execution.imageId)
+                put("runtime_jdk", ctx.build.runtimeJdk)
+            }
         }
         // Deterministic stages omit sample identity: a different seed cannot
         // change their output, so including it would only create duplicate

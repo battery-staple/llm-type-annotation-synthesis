@@ -120,8 +120,28 @@ class PreflightSupportTest {
     @Test
     fun `only strong network signals are transient`() {
         assertTrue(PreflightSupport.isTransient("java.net.UnknownHostException: repo.maven.apache.org"))
+        assertTrue(PreflightSupport.isTransient(
+            "javax.net.ssl.SSLHandshakeException: Remote host terminated the handshake\n" +
+                "Caused by: java.io.EOFException: SSL peer shut down incorrectly"
+        ))
         // A missing artifact is deterministic (for example a mavenLocal()-only dependency).
         assertFalse(PreflightSupport.isTransient("Could not resolve all files for configuration ':compileClasspath'."))
+    }
+
+    @Test
+    fun `failed tasks are read from Gradle's failure report`() {
+        // jobrunr in Docker: checkerPass pulls in resources, which run npm, which the image lacks.
+        val output = """
+            > Task :core:npmInstall FAILED
+            sh: 1: npm: not found
+            * What went wrong:
+            Execution failed for task ':core:npmInstall' (registered in build file 'core/build.gradle').
+            > Process 'command 'sh'' finished with non-zero exit value 127
+        """.trimIndent()
+        assertEquals(listOf(":core:npmInstall"), PreflightSupport.failedTasks(output))
+        assertEquals(listOf(":checkerPass"), PreflightSupport.failedTasks("Execution failed for task ':checkerPass'."))
+        assertEquals(emptyList(), PreflightSupport.failedTasks("BUILD SUCCESSFUL in 3s"))
+        assertTrue(PreflightReason.CHECKER_PREREQUISITE_FAILED in PreflightReason.ALL)
     }
 
     @Test

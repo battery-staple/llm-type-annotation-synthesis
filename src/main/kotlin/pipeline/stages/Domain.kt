@@ -385,6 +385,8 @@ object PreflightReason {
     const val CHECKER_CRASH = "checker_crash"
     const val CHECKER_JDK_UNSUPPORTED = "checker_jdk_unsupported"
     const val CHECKER_SILENT = "checker_silent"
+    /** Another task that `checkerPass` depends on failed, so the checker never ran. */
+    const val CHECKER_PREREQUISITE_FAILED = "checker_prerequisite_failed"
     const val CHECKER_MISREPORT = "checker_misreport"
     const val DIAGNOSTICS_UNPARSED = "diagnostics_unparsed"
     const val TEST_XML_MISSING = "test_xml_missing"
@@ -399,7 +401,7 @@ object PreflightReason {
         SOURCE_LEVEL_UNSUPPORTED, PROCESSOR_UNSUPPORTED, BASELINE_COMPILE_FAILED,
         QUALIFIER_JAR_VERSION, MODULE_MODE, WERROR_INTERACTION, FOREIGN_COMPILER_PLUGIN,
         INIT_SCRIPT_FAILURE, QUALIFIER_NOT_ON_CLASSPATH, CHECKER_CRASH, CHECKER_JDK_UNSUPPORTED,
-        CHECKER_SILENT, CHECKER_MISREPORT, DIAGNOSTICS_UNPARSED, TEST_XML_MISSING,
+        CHECKER_SILENT, CHECKER_PREREQUISITE_FAILED, CHECKER_MISREPORT, DIAGNOSTICS_UNPARSED, TEST_XML_MISSING,
         TEST_REQUIRES_DOCKER, SUITE_TIMEOUT, SUITE_FAILS_AT_BASELINE, TIMEOUT, UNKNOWN,
     )
 }

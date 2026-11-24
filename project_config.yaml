@@ -111,6 +111,22 @@ preflight:
   # P7: run the full test task at clean C-1 under the build timeout.
   suite_check: true
 
+# Where harness Gradle builds run (docs/dockerization_plan.md, Phase 1).
+# "local": on the host, as before. "docker": one container per Gradle
+# invocation from `image` (build it with
+# `docker build -f docker/runtime.Dockerfile -t lltas-runtime:0.1 docker`);
+# `--backend` overrides this for one command. Agents run on the host either way.
+execution:
+  backend: "local"
+  image: "lltas-runtime:0.1"
+  # Blank: resolved from `image` at startup and recorded in the run's config
+  # snapshot. Set it to refuse any other image.
+  image_id: ""
+  # Per build container. The checker fork alone requests a 4 GB heap; keep
+  # concurrency.builds x build_memory within the Docker VM's memory.
+  build_memory: "6g"
+  cpus: 4
+
 verification:
   scope: "full_suite"
   baseline: "none"

@@ -120,6 +120,44 @@ object Git {
     fun revParse(cwd: File, ref: String): String = requireOk(run(cwd, "rev-parse", ref), "git rev-parse $ref")
 
     /**
+     * Git directories outside [worktree] that Git needs to work in it: for a
+     * linked worktree, the repository its `.git` file points to (the common
+     * directory, which contains the per-worktree directory) and any object
+     * alternates. Empty for a worktree that holds its own `.git` directory and
+     * no alternates. Read from the files directly, without running git.
+     */
+    fun externalGitDirs(worktree: File): List<File> {
+        val root = worktree.absoluteFile
+        val dotGit = root.resolve(".git")
+        val result = mutableListOf<File>()
+        val common: File = when {
+            dotGit.isFile -> {
+                val line = dotGit.readLines().firstOrNull { it.startsWith("gitdir:") } ?: return emptyList()
+                val gitDir = File(line.removePrefix("gitdir:").trim()).let { if (it.isAbsolute) it else root.resolve(it) }
+                val commonFile = gitDir.resolve("commondir")
+                val common = if (commonFile.isFile) {
+                    File(commonFile.readText().trim()).let { if (it.isAbsolute) it else gitDir.resolve(it) }
+                } else gitDir
+                val normalizedCommon = common.toPath().normalize().toFile()
+                result += normalizedCommon
+                if (!gitDir.toPath().normalize().startsWith(normalizedCommon.toPath())) result += gitDir.toPath().normalize().toFile()
+                normalizedCommon
+            }
+            dotGit.isDirectory -> dotGit
+            else -> return emptyList()
+        }
+        val alternates = common.resolve("objects/info/alternates")
+        if (alternates.isFile) {
+            alternates.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.forEach { raw ->
+                val dir = File(raw).let { if (it.isAbsolute) it else common.resolve("objects").resolve(it) }
+                val normalized = dir.toPath().normalize().toFile()
+                if (!normalized.toPath().startsWith(root.toPath())) result += normalized
+            }
+        }
+        return result
+    }
+
+    /**
      * Turns an agent workspace into a one-commit repository holding exactly its
      * current files. Build scripts that call `git` during configuration
      * (`git describe`, `git rev-parse HEAD`) then work, while the workspace still

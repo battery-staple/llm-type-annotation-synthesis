@@ -17,7 +17,11 @@ import pipeline.config.BenchmarkManifestLoader
 import pipeline.config.ModelSection
 import pipeline.config.ProjectConfig
 import pipeline.db.SQLiteDatabaseManager
+import pipeline.config.ExecutionBackendKind
+import pipeline.ports.ExecutionBackend
 import pipeline.runners.CoroutineOpenCodeRunner
+import pipeline.runners.ExecutionBackends
+import pipeline.runners.LocalBackend
 import pipeline.runners.GradleBuildRunner
 import pipeline.runners.JavacRunner
 import pipeline.runners.OpenCodeDb
@@ -91,11 +95,32 @@ internal const val NO_BUILD_CACHE = "--no-build-cache"
 /** Every argument preflight adds to its Gradle invocations. */
 internal val PREFLIGHT_GRADLE_ARGS = listOf(NO_TOOLCHAIN_DOWNLOAD, NO_BUILD_CACHE)
 
-/** Gradle runners for one build configuration, sharing one build semaphore. */
-internal class Runners(config: ProjectConfig, section: pipeline.config.BuildSection, source: String, target: String) {
+/** Gradle runners for one build configuration, sharing one build semaphore and one backend. */
+internal class Runners(
+    config: ProjectConfig,
+    section: pipeline.config.BuildSection,
+    source: String,
+    target: String,
+    backend: ExecutionBackend = LocalBackend()
+) {
     private val builds = Semaphore(config.concurrency.builds)
-    val build = GradleBuildRunner(config, section, source, target, builds)
-    val preflight = GradleBuildRunner(config, section, source, target, builds, PREFLIGHT_GRADLE_ARGS)
+    val build = GradleBuildRunner(config, section, source, target, builds, backend = backend)
+    val preflight = GradleBuildRunner(config, section, source, target, builds, PREFLIGHT_GRADLE_ARGS, backend)
+}
+
+/** Parses a `--backend` value. */
+internal fun parseBackend(raw: String): ExecutionBackendKind =
+    ExecutionBackendKind.entries.firstOrNull { it.identifier == raw.trim().lowercase() }
+        ?: throw UsageError("invalid --backend '$raw'; expected one of: ${ExecutionBackendKind.entries.joinToString { it.identifier }}")
+
+/**
+ * Applies a `--backend` override, then creates the backend. Docker mode runs
+ * its startup checks here, before any run is created, and records the image ID
+ * in the returned configuration.
+ */
+internal fun withBackend(config: ProjectConfig, override: String?): Pair<ProjectConfig, ExecutionBackend> {
+    val chosen = override?.let { config.copy(execution = config.execution.copy(backend = parseBackend(it))) } ?: config
+    return ExecutionBackends.create(chosen)
 }
 
 private fun buildOrchestrator(
@@ -128,9 +153,11 @@ private fun buildOrchestrator(
 class InitCommand : CliktCommand(name = "init", help = "Initialize the SQLite database and pre-warm shared Git/Gradle caches") {
     private val configPath by option("--config", help = "Path to project_config.yaml").required()
     private val skipPrewarm by option("--skip-prewarm", help = "Only initialize the database").flag()
+    private val backendOption by option("--backend", help = "Override execution.backend (local | docker)")
 
     override fun run() = runBlocking {
-        val config = loadConfig(configPath)
+        val loaded = loadConfig(configPath)
+        val (config, backend) = if (skipPrewarm) loaded to LocalBackend() else withBackend(loaded, backendOption)
         database(config).use { db ->
             echo("Initialized database ${config.paths.databaseFile().path}")
             if (!skipPrewarm) {
@@ -142,7 +169,10 @@ class InitCommand : CliktCommand(name = "init", help = "Initialize the SQLite da
                 val entries = BenchmarkManifestLoader.load(manifestFile, config)
                 val evalRepos = config.paths.evalRepos()
                 entries.forEach { entry ->
-                    val buildRunner = GradleBuildRunner(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility, Semaphore(config.concurrency.builds))
+                    val buildRunner = GradleBuildRunner(
+                        config, entry.build, entry.sourceCompatibility, entry.targetCompatibility,
+                        Semaphore(config.concurrency.builds), backend = backend
+                    )
                     val repoName = File(entry.repoUrl).name.removeSuffix(".git")
                     val mirror = Git.ensureMirror(entry.repoUrl, evalRepos, repoName)
                     val dir = File(".worktrees/init/${entry.benchmarkId.canonical}")
@@ -170,6 +200,7 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
     private val jobs by option("--jobs", help = "Override triage.jobs (concurrent crawler commits; must be >= 1)").int()
     private val agentJobs by option("--agent-jobs", help = "Maximum concurrent agent/LLM calls (must be >= 1)").int()
     private val buildJobs by option("--build-jobs", help = "Maximum concurrent Gradle invocations (must be >= 1)").int()
+    private val backendOption by option("--backend", help = "Override execution.backend (local | docker)")
     private val preflight by option(
         "--preflight",
         help = "Also run the build-integration preflight between ingestion and triage " +
@@ -191,7 +222,7 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
             }
         }
         val loaded = loadConfig(configPath)
-        val config = loaded.let { c ->
+        val overridden = loaded.let { c ->
             var updated = model?.let { chosen ->
                 c.copy(
                     model = ModelSection(
@@ -232,7 +263,8 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
             if (preflight) updated = updated.copy(preflight = updated.preflight.copy(enabled = true))
             updated
         }
-        requirePreflightForStop(stopAfterStage, config.preflight.enabled)
+        requirePreflightForStop(stopAfterStage, overridden.preflight.enabled)
+        val (config, backend) = withBackend(overridden, backendOption)
         val cas = CasEngine(File(config.cache.stagesDir), config.cache.enabled)
         database(config).use { db ->
             // Sequential MVP: a run still marked running is stale.
@@ -249,7 +281,7 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                 val target = pipeline.config.CrawlerManifestLoader.resolve(targets, benchmark)
                     ?: error("Repo '$benchmark' not found in ${crawlerFile.path}; known ids: ${targets.joinToString { it.benchmarkId.canonical }}")
                 checkRepoClean(File(target.repoUrl))
-                val runners = Runners(config, target.build, target.sourceCompatibility, target.targetCompatibility)
+                val runners = Runners(config, target.build, target.sourceCompatibility, target.targetCompatibility, backend)
                 val orchestrator = buildOrchestrator(config, runners, db, cas, stopAfterStage)
                 val outcomes = orchestrator.crawlAndRun(target, seed)
                 outcomes.forEach { printOutcome(it) }
@@ -259,7 +291,7 @@ class RunCommand : CliktCommand(name = "run", help = "Run the end-to-end pipelin
                 val entry = BenchmarkManifestLoader.resolve(entries, benchmark)
                     ?: error("Benchmark '$benchmark' not found in ${manifestFile.path}; known ids: ${entries.joinToString { it.benchmarkId.canonical }}")
                 checkRepoClean(File(entry.repoUrl))
-                val runners = Runners(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility)
+                val runners = Runners(config, entry.build, entry.sourceCompatibility, entry.targetCompatibility, backend)
                 val orchestrator = buildOrchestrator(config, runners, db, cas, stopAfterStage)
                 val outcome = orchestrator.runSingleSample(entry, seed)
                 printOutcome(outcome)

@@ -127,6 +127,9 @@ repos:
       compile_task: "compileJava"
       test_task: "test"
       checker_task: "checkerPass"
+      # Its Micronaut build plugin needs Gradle itself to run on JDK 25
+      # (Phase 0.5 preflight: gradle_runtime_unsupported on JDK 21).
+      runtime_jdk: "25"
   - id: "reactor-core"
     repo_url: "eval-repos/reactor-core"
     default_branch: "main"

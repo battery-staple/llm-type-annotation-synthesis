@@ -133,6 +133,10 @@ class PreflightStage(
             status = PreflightReport.STATUS_PASS,
             sourceLevelConfigured = input.configuredSourceLevel,
             cacheKey = key.toString(),
+            backend = ctx.config.execution.backend.identifier,
+            imageIdentity = ctx.config.execution.imageId.takeIf {
+                ctx.config.execution.backend == pipeline.config.ExecutionBackendKind.DOCKER && it.isNotBlank()
+            },
         )
 
         private fun task(name: String) = qualifiedTask(ctx.build, name)
@@ -186,10 +190,11 @@ class PreflightStage(
             checker: CheckerConfig? = null,
             initScripts: List<File> = emptyList(),
             env: Map<String, String> = emptyMap(),
+            writableDirs: List<File> = emptyList(),
         ): Pair<BuildResult, Long> {
             val start = System.currentTimeMillis()
             val result = pipeline.runners.BuildMetrics(ctx).task("preflight", label) {
-                this@PreflightStage.gradle.runTasks(worktree, tasks, checker, initScripts, env)
+                this@PreflightStage.gradle.runTasks(worktree, tasks, checker, initScripts, env, writableDirs)
             }
             val duration = System.currentTimeMillis() - start
             runCatching { logsDir.resolve("$label.log").writeText(result.output.takeLast(LOG_LIMIT)) }
@@ -225,6 +230,8 @@ class PreflightStage(
             val (result, duration) = gradle(
                 "P1-probe", listOf("help", "--no-configuration-cache"), initScripts = listOf(probeScript),
                 env = mapOf("LLTAS_PREFLIGHT_REPORT" to reportFile.absolutePath, "LLTAS_PREFLIGHT_PROJECT" to projectPath),
+                // The probe writes its report from inside Gradle.
+                writableDirs = listOf(reportFile.parentFile),
             )
             if (!result.success || !reportFile.isFile) {
                 fail("P1", PreflightSupport.classify("P1", result.output, result.timedOut),
@@ -403,6 +410,9 @@ class PreflightStage(
                 outputShowsCheckerCrash(output) -> fail("P5", PreflightReason.CHECKER_CRASH, "the Checker Framework crashed", output, duration)
                 PreflightSupport.classify("P5", output, false) == PreflightReason.CHECKER_JDK_UNSUPPORTED ->
                     fail("P5", PreflightReason.CHECKER_JDK_UNSUPPORTED, "the checker fork cannot start on the toolchain JDK", output, duration)
+                prerequisiteFailure(output) != null ->
+                    fail("P5", PreflightReason.CHECKER_PREREQUISITE_FAILED,
+                        "task ${prerequisiteFailure(output)} failed before checkerPass ran", output, duration)
                 !invoked -> fail("P5", PreflightReason.CHECKER_SILENT, "checkerPass did not run", output, duration)
                 !result.success && parseCheckerDiagnostics(output).isEmpty() -> {
                     val reason = PreflightSupport.classify("P5", output, false)
@@ -411,6 +421,12 @@ class PreflightStage(
                 }
                 else -> null
             }
+        }
+
+        /** A failed task other than the checker task itself, such as a resource step `checkerPass` depends on. */
+        private fun prerequisiteFailure(output: String): String? {
+            val checkerName = ctx.build.checkerTask.substringAfterLast(':')
+            return PreflightSupport.failedTasks(output).firstOrNull { it.substringAfterLast(':') != checkerName }
         }
 
         private fun resetWorktree() {

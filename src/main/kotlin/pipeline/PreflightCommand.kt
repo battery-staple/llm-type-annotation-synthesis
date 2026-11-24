@@ -48,12 +48,16 @@ class PreflightCommand : CliktCommand(
     private val ids by option("--id", help = "Only these entry ids (repeatable)").multiple()
     private val skipSuite by option("--skip-suite", help = "Skip check P7, the full test suite").flag()
     private val noCache by option("--no-cache", help = "Ignore cached preflight results").flag()
+    private val backendOption by option("--backend", help = "Override execution.backend (local | docker)")
 
     override fun run() = runBlocking {
         val file = File(configPath)
         Env.loadFor(file)
         val loaded = ProjectConfig.load(file)
-        val config = loaded.copy(preflight = loaded.preflight.copy(suiteCheck = loaded.preflight.suiteCheck && !skipSuite))
+        val (config, backend) = withBackend(
+            loaded.copy(preflight = loaded.preflight.copy(suiteCheck = loaded.preflight.suiteCheck && !skipSuite)),
+            backendOption
+        )
         val targets = PreflightTargets.load(File(manifestPath), config)
             .filter { ids.isEmpty() || it.id in ids }
         require(targets.isNotEmpty()) { "no manifest entries match ${ids.ifEmpty { listOf("<all>") }}" }
@@ -62,7 +66,7 @@ class PreflightCommand : CliktCommand(
         SQLiteDatabaseManager(config.paths.databaseFile()).use { db ->
             targets.forEach { target ->
                 echo("preflight ${target.id} ...")
-                val report = runCatching { preflight(config, cas, db, target) }
+                val report = runCatching { preflight(config, backend, cas, db, target) }
                     .onFailure { echo("  error: ${it.message}", err = true) }
                     .getOrNull()
                 report?.let { echo("  ${describe(it)}") }
@@ -75,6 +79,7 @@ class PreflightCommand : CliktCommand(
 
     private suspend fun preflight(
         config: ProjectConfig,
+        backend: pipeline.ports.ExecutionBackend,
         cas: CasEngine,
         db: SQLiteDatabaseManager,
         target: PreflightTarget,
@@ -88,7 +93,7 @@ class PreflightCommand : CliktCommand(
         val preflightDir = base.resolve("preflight")
         try {
             Git.addWorktree(mirror, ingestionDir, commit)
-            val runners = Runners(config, target.build, target.sourceCompatibility, target.targetCompatibility)
+            val runners = Runners(config, target.build, target.sourceCompatibility, target.targetCompatibility, backend)
             val stage = PreflightStage(runners.preflight, JavacRunner())
             val ctx = RunContext(
                 config = config,

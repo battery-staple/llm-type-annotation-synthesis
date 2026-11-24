@@ -21,7 +21,10 @@ import pipeline.stages.CheckerConfig
 import pipeline.stages.Fqcn
 import pipeline.stages.GuardrailsMode
 import pipeline.stages.TestCoordinate
-import pipeline.util.Processes
+import pipeline.ports.ExecSpec
+import pipeline.ports.ExecutionBackend
+import pipeline.ports.Mount
+import pipeline.util.Git
 
 /**
  * Executes `./gradlew` in the target worktree. Checker runs use a dedicated
@@ -39,15 +42,23 @@ class GradleBuildRunner(
      * `-Porg.gradle.java.installations.auto-download=false` so a missing
      * toolchain fails instead of being downloaded into the Gradle home.
      */
-    private val extraGradleArgs: List<String> = emptyList()
+    private val extraGradleArgs: List<String> = emptyList(),
+    /** Where Gradle runs: on the host, or in a build container (plan section 3.1). */
+    private val backend: ExecutionBackend = LocalBackend()
 ) : BuildRunner, pipeline.ports.GradleTaskRunner {
+
+    init {
+        // Fail at construction, before any run starts, on a JDK the image lacks.
+        (backend as? DockerBackend)?.image?.jdkHome(build.runtimeJdk)
+    }
 
     override suspend fun runTasks(
         worktreeDir: File,
         tasks: List<String>,
         checker: CheckerConfig?,
         extraInitScripts: List<File>,
-        extraEnv: Map<String, String>
+        extraEnv: Map<String, String>,
+        writableDirs: List<File>
     ): BuildResult {
         val env = baseEnv().toMutableMap()
         val args = mutableListOf(build.wrapperExecutable)
@@ -56,7 +67,7 @@ class GradleBuildRunner(
         extraInitScripts.forEach { args += listOf("--init-script", it.absolutePath) }
         if (checker != null) addCheckerInit(worktreeDir, checker, emptyList(), args, env)
         env.putAll(extraEnv)
-        val result = runGradle(worktreeDir, args, env)
+        val result = runGradle(worktreeDir, args, env, writableDirs)
         return BuildResult(
             success = result.exitCode == 0 && !result.timedOut,
             exitCode = result.exitCode,
@@ -217,9 +228,21 @@ class GradleBuildRunner(
         )
     }
 
-    private fun baseEnv(): Map<String, String> = buildMap {
-        if (config.environment.javaHome.isNotBlank()) put("JAVA_HOME", config.environment.javaHome)
-        if (config.environment.gradleUserHome.isNotBlank()) put("GRADLE_USER_HOME", config.environment.gradleUserHome)
+    /**
+     * The JDK and Gradle home. On the host they come from the configuration or
+     * the inherited environment; in a container they come from the image, and
+     * the host paths in `environment.*` are ignored (plan section 3.2).
+     */
+    private fun baseEnv(): Map<String, String> = when (val b = backend) {
+        is DockerBackend -> mapOf(
+            "JAVA_HOME" to b.image.jdkHome(build.runtimeJdk),
+            "GRADLE_USER_HOME" to b.image.gradleHome,
+            "HOME" to b.image.home,
+        )
+        else -> buildMap {
+            if (config.environment.javaHome.isNotBlank()) put("JAVA_HOME", config.environment.javaHome)
+            if (config.environment.gradleUserHome.isNotBlank()) put("GRADLE_USER_HOME", config.environment.gradleUserHome)
+        }
     }
 
     private fun checkerEnv(
@@ -259,11 +282,45 @@ class GradleBuildRunner(
     private suspend fun runGradle(
         worktreeDir: File,
         args: List<String>,
-        env: Map<String, String>
+        env: Map<String, String>,
+        writableDirs: List<File> = emptyList()
     ): pipeline.util.ProcResult = concurrency.withPermit { withContext(Dispatchers.IO) {
         val timeoutSeconds = maxOf(60L, config.agent.timeoutMs / 1000L)
-        Processes.run(args + extraGradleArgs, worktreeDir, environment = env, timeoutSeconds = timeoutSeconds)
+        val backendArgs = (backend as? DockerBackend)?.toolchainArgs.orEmpty()
+        val spec = ExecSpec(
+            command = args + extraGradleArgs + backendArgs,
+            cwd = worktreeDir.absoluteFile,
+            environment = env,
+            mounts = buildMounts(worktreeDir, args, env, writableDirs),
+        )
+        backend.run(spec, timeoutSeconds)
     } }
+}
+
+/** Environment variables that name harness files a build reads (single paths). */
+private val HARNESS_PATH_VARIABLES = listOf("CHECKERFRAMEWORK_HOME", "CUSTOM_QUAL_JAR_PATH")
+
+/**
+ * What a build container sees (plan section 3.2): the worktree, writable; the
+ * Git directories its `.git` file points to, read-only, so build scripts that
+ * call `git` work; and each harness file at its own path, read-only: the init
+ * scripts passed on the command line, the Checker Framework, the qualifier jar,
+ * and `CF_EXTRA_CLASSPATH` entries. [writableDirs] are output directories a
+ * caller asked for. Nothing else of the host, in particular not the project
+ * root, `data/`, `.cache/` as a whole, or `.env`.
+ */
+internal fun buildMounts(
+    worktreeDir: File,
+    args: List<String>,
+    env: Map<String, String>,
+    writableDirs: List<File> = emptyList()
+): List<Mount> = buildList {
+    add(Mount(worktreeDir.absoluteFile, readOnly = false))
+    Git.externalGitDirs(worktreeDir).forEach { add(Mount(it, readOnly = true)) }
+    args.zipWithNext().filter { it.first == "--init-script" }.forEach { add(Mount(File(it.second).absoluteFile)) }
+    HARNESS_PATH_VARIABLES.mapNotNull { env[it] }.filter { it.isNotBlank() }.forEach { add(Mount(File(it).absoluteFile)) }
+    env["CF_EXTRA_CLASSPATH"]?.split(File.pathSeparator)?.filter { it.isNotBlank() }?.forEach { add(Mount(File(it).absoluteFile)) }
+    writableDirs.forEach { add(Mount(it.absoluteFile, readOnly = false)) }
 }
 
 private val checkerCrashPattern =

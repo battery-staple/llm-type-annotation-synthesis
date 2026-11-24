@@ -43,14 +43,22 @@ object Processes {
             // resolve paths from PWD would otherwise target the pipeline checkout.
             this["PWD"] = cwd.absolutePath
         }
-        val process = builder.start()
+        return collect(LocalProcessHandle(builder.start()), timeoutSeconds, stdin)
+    }
+
+    /**
+     * Drains [handle]'s output, feeds [stdin] (or closes it), and waits up to
+     * [timeoutSeconds]; on timeout the whole invocation is killed through the
+     * handle, which for a container also removes the container.
+     */
+    fun collect(handle: pipeline.ports.ExecutionHandle, timeoutSeconds: Long, stdin: String? = null): ProcResult {
         val stdout = StringBuilder()
         val stderr = StringBuilder()
         val outThread = Thread {
-            process.inputStream.bufferedReader().useLines { lines -> lines.forEach { stdout.appendLine(it) } }
+            runCatching { handle.stdout.bufferedReader().useLines { lines -> lines.forEach { stdout.appendLine(it) } } }
         }
         val errThread = Thread {
-            process.errorStream.bufferedReader().useLines { lines -> lines.forEach { stderr.appendLine(it) } }
+            runCatching { handle.stderr.bufferedReader().useLines { lines -> lines.forEach { stderr.appendLine(it) } } }
         }
         outThread.isDaemon = true
         errThread.isDaemon = true
@@ -58,19 +66,19 @@ object Processes {
         errThread.start()
         if (stdin != null) {
             runCatching {
-                process.outputStream.bufferedWriter().use { it.write(stdin) }
+                handle.stdin.bufferedWriter().use { it.write(stdin) }
             }
         } else {
-            runCatching { process.outputStream.close() }
+            runCatching { handle.stdin.close() }
         }
-        val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+        val finished = handle.waitFor(timeoutSeconds, TimeUnit.SECONDS)
         if (!finished) {
-            terminateTree(process)
+            handle.kill()
         }
         outThread.join(5_000)
         errThread.join(5_000)
         return ProcResult(
-            exitCode = if (finished) process.exitValue() else -1,
+            exitCode = if (finished) handle.exitValue() else -1,
             stdout = stdout.toString(),
             stderr = stderr.toString(),
             timedOut = !finished
@@ -87,6 +95,17 @@ object Processes {
             process.waitFor(5, TimeUnit.SECONDS)
         }
     }
+}
+
+/** A host process; [kill] terminates it and its descendants. */
+class LocalProcessHandle(val process: Process) : pipeline.ports.ExecutionHandle {
+    override val stdout: java.io.InputStream get() = process.inputStream
+    override val stderr: java.io.InputStream get() = process.errorStream
+    override val stdin: java.io.OutputStream get() = process.outputStream
+    override fun isAlive(): Boolean = process.isAlive
+    override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = process.waitFor(timeout, unit)
+    override fun exitValue(): Int = process.exitValue()
+    override fun kill() = Processes.terminateTree(process)
 }
 
 // --- Hashing -----------------------------------------------------------------

@@ -72,11 +72,20 @@ object PreflightSupport {
         "Network is unreachable",
         "Temporary failure in name resolution",
         "Read timed out",
+        // TLS connections cut mid-handshake (seen downloading a Gradle distribution).
+        "Remote host terminated the handshake",
+        "SSL peer shut down incorrectly",
+        "Connection reset",
     )
 
     fun isTransient(output: String): Boolean = TRANSIENT.any { it in output }
 
     fun requiresDocker(output: String): Boolean = DOCKER.any { it in output }
+
+    private val failedTask = Regex("""Execution failed for task '([^']+)'""")
+
+    /** The paths of the tasks Gradle reports as failed, in output order. */
+    fun failedTasks(output: String): List<String> = failedTask.findAll(output).map { it.groupValues[1] }.toList()
 
     /**
      * Classifies a failed Gradle invocation of [check]. The most specific

@@ -664,6 +664,8 @@ that apply to any repository:
 - An init-script `allprojects` block broke `buildSrc` convention plugins that
   use version-catalog accessors (wiremock, P3). Setup now uses
   `gradle.beforeProject`.
+  This change broke reactor-core, whose `pass` above predates it; see
+  "Known gaps" under Phase 1.
 - A build plugin that needs a newer JVM than the one running Gradle (jobrunr)
   is now classified as `gradle_runtime_unsupported`.
 
@@ -685,6 +687,99 @@ was checked to fail against the code before its fix. One fix has no
 fixture test: the `beforeProject` change needs a `buildSrc` with Kotlin DSL
 catalog accessors, which requires downloading the `kotlin-dsl` plugin; the
 wiremock preflight covers it.
+
+### Phase 1 status (2026-11-24)
+
+The exit criteria are met on branch `dockerization`; `deviations.md` items
+77–91 record the decisions. Image `lltas-runtime:0.1` =
+`sha256:7939b5b2…`. Local runs used Corretto 21.0.13.1 as `JAVA_HOME`; the
+image's JDK 21 is Temurin 21.0.13 (same release, different vendor build;
+item 91).
+
+**Full-run parity.** Each benchmark ran once per backend, independently
+(stage cache off, Docker with `--build-jobs 1`):
+
+| Benchmark | Backend | Run | Verdict | Remaining errors | Wall time |
+|---|---|---|---|---|---|
+| synthetic-id-swap | local | `8af2409c` | full_success | 0 | 3.7 min |
+| synthetic-id-swap | docker | `68704085` | full_success | 0 | 7.2 min |
+| cmsx-assignment-extension | local | `338ac406` | fixer_incomplete | 60 | 71 min |
+| cmsx-assignment-extension | docker | `d8550b2c` | fixer_incomplete | 6 | 54 min |
+
+The verdicts match. The cmsx runs differ in their paths, and the differences
+trace back to the agents, not to the backend:
+
+- They diverged at synthesis, before any build ran: 16 rules locally against
+  17 in Docker. Application then annotated 23 files with 60 initial errors
+  locally, against 17 files with 25 errors in Docker.
+- Repair used all four sessions (`repair.retry_turns`) on both backends and
+  every session was discarded.
+  - Locally, all four were rejected by guardrails: changes to local-variable
+    annotations under the `frozen` policy, plus signature changes in the last
+    session.
+  - In Docker, two sessions were rejected by guardrails and two ended with
+    real type errors (19 and 6 `argument`/`assignment`/`return` errors). No
+    build crashed or was killed.
+- Remaining errors is the last count the checker reported. The final local
+  session was rejected before its checker run, so the count stayed at the
+  application value.
+- T_reg failed and the full suite passed (563 tests) on both.
+
+**Preflight parity.** All 11 enabled eval repositories give the same result
+on both backends, except for two host-state differences:
+
+- jobrunr: on the host it stops at P1 `gradle_runtime_unsupported`, because
+  the local backend cannot run its Gradle on JDK 25. In Docker
+  (`runtime_jdk: 25`) it reaches P5 and stops at
+  `checker_prerequisite_failed` (`:core:npmInstall`; see Known gaps).
+- Agrona: 20,725 tests on the host against 20,728 in Docker.
+  `:agrona:bundleNativeLibrary` is skipped on macOS, so the extra three are
+  most likely Linux-only native tests.
+
+reactor-core fails P5 on both backends (Known gaps).
+
+The Docker test suites ran 1.5–2× slower; picocli ran 4× slower (33 s
+against 8 s). This was not investigated.
+
+**JSqlParser checker time** (P5, clean plus planted checker runs): 284 s on
+the host, 332 s in Docker.
+
+#### Known gaps (future work)
+
+- **reactor-core: `checkerPass` misses the project's compile conventions.**
+  P5 fails with `diagnostics_unparsed` on both backends with the current init
+  script; the Phase 0.5 `pass` was recorded before setup moved from
+  `allprojects` to `gradle.beforeProject` (deviation 75).
+  - Cause: reactor's root build applies `java-library` and its
+    `JavaConventions` plugin to every subproject from
+    `configure(subprojects)`, while the root project is evaluated. The
+    conventions add an `afterEvaluate` that sets every existing `JavaCompile`
+    task to the JDK 25 compiler, source/target 8, and a JDK 8 boot
+    classpath, using an eager `withType(JavaCompile).forEach`. Our
+    `beforeProject` hook runs later, just before each subproject is evaluated,
+    so our `afterEvaluate` (which registers `checkerPass`) runs after
+    reactor's and `checkerPass` keeps the default compiler. It then fails on
+    JDK 8 internals such as `sun.misc.SharedSecrets`. With `allprojects`, our
+    hook was installed before the root build script ran, so `checkerPass`
+    already existed when reactor's loop ran.
+  - Reproduced on the host with a minimal init script that uses the same hook
+    pattern, so Docker is not involved.
+  - A tested candidate fix: register `checkerPass` as soon as the Java plugin
+    is applied and configure it in our `afterEvaluate`. Not adopted: no
+    viable reactor-core commit has been extracted yet, and making `checkerPass`
+    visible to project conventions earlier could break a repository that
+    relies on the opposite order. Revisit if another repository fails the same
+    way, or when reactor-core commits are needed.
+- **jobrunr: the checker pulls in a resource build that needs npm.** With
+  `runtime_jdk: "25"`, jobrunr passes P1 to P4 in Docker and fails P5
+  (`checker_prerequisite_failed`): `checkerPass` puts `main.output` on its
+  classpath, so Gradle first runs `processResources`, which depends on
+  `:core:npmInstall`, and the image has no npm. Until this fix the failure was
+  misreported as `checker_silent`. Left unsupported, because its tests are
+  also predicted to need Docker (Testcontainers), which build containers do
+  not provide. Two ways to widen the envelope, neither adopted: give
+  `checkerPass` only `main.output.classesDirs` (applies to every repository),
+  or add Node.js to the image.
 
 ### Containment canary test
 
@@ -820,7 +915,7 @@ Checks, in order. The first failure ends preflight:
 | P2 Baseline compile | `compileJava` and `compileTestJava` at C-1 with no init script | `baseline_compile_failed` |
 | P3 Integration compile | The same tasks with the init script and a fixed probe lattice (`ProbeTop` / `ProbeBottom`, jar built with `--release 8`, as in production) | `qualifier_jar_version`, `module_mode`, `werror_interaction`, `foreign_compiler_plugin`, `init_script_failure` |
 | P4 Probe annotation | In a scratch worktree, add a new probe-annotated file to an existing package of the main and of the test sources; compile main and test | `qualifier_not_on_classpath` |
-| P5 Checker run | Run `checkerPass` twice: on the probe-annotated tree (must finish without a crash, with the checker invoked), then with one deliberately ill-typed assignment (must report exactly one error at the expected location) | `checker_crash`, `checker_jdk_unsupported`, `checker_silent`, `checker_misreport`, `diagnostics_unparsed` |
+| P5 Checker run | Run `checkerPass` twice: on the probe-annotated tree (must finish without a crash, with the checker invoked), then with one deliberately ill-typed assignment (must report exactly one error at the expected location) | `checker_crash`, `checker_jdk_unsupported`, `checker_silent`, `checker_prerequisite_failed`, `checker_misreport`, `diagnostics_unparsed` |
 | P6 Test harness | Run one test class with the probe jar on the classpath; JUnit XML must appear | `test_xml_missing`, `test_requires_docker` |
 | P7 Full suite | Run the full test task at clean C-1 with the init script, under the pipeline's build timeout. Application and verification both run the full suite, so a repository whose suite cannot finish or already fails cannot reach a verdict. Added in Phase 0.5; `preflight.suite_check: false` skips it | `suite_timeout`, `suite_fails_at_baseline`, `test_xml_missing`, `test_requires_docker` |
 

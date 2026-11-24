@@ -526,3 +526,102 @@ the crawler) are not listed unless the code had to interpret the plan.
     compile helper). Every checker assertion requires planted errors to be
     reported, so a checker that silently did not run fails the test. The suite
     runs under `./gradlew check`, not `./gradlew test`.
+
+## Builds in a container (Dockerization plan, Phase 1)
+
+77. **Build containers mount each harness file at its own path instead of a
+    copied `.harness/` directory.** The plan copies the init script, qualifier
+    jar, and `checker-qual.jar` into a per-run directory before each build. The
+    harness files already live at fixed host paths outside the worktree (the
+    init script next to it, the qualifier jar in its CAS bundle, the Checker
+    Framework under `vendor/`), so each is bind-mounted read-only at that path:
+    the same isolation, with no copying and no path rewriting in the
+    environment. The mounts are derived from the invocation itself (every
+    `--init-script` argument, `CHECKERFRAMEWORK_HOME`, `CUSTOM_QUAL_JAR_PATH`,
+    `CF_EXTRA_CLASSPATH`), plus the worktree (writable) and the Git
+    directories its `.git` file points to and their alternates (read-only).
+    Both backends therefore use the vendored Checker Framework; the image gets
+    its own copy in Phase 2, when agents need `/harness`.
+78. **Preflight's P1 probe gets one writable directory.** The probe init
+    script writes its report from inside Gradle, to `.preflight-harness/`
+    next to the worktree, which the plan did not cover. `GradleTaskRunner.runTasks`
+    takes `writableDirs`, and only that call passes one. It runs only the
+    repository's own C-1 build scripts.
+79. **Docker-mode cache-key fields are added in Phase 1, not Phase 3.**
+    Without them a Docker run would be served the bundles of local runs, and
+    the parity comparison would compare a run with itself. `execution_backend`,
+    `image_id`, and `runtime_jdk` enter the shared `runtime_environment` map only
+    when the backend is `docker`, so every local key, and every existing bundle,
+    is unchanged. As the plan says, this covers every stage, synthesis
+    included, although Phase 1 synthesis still runs on the host.
+80. **`runtime_jdk` is a `build:` field, and only Docker mode reads it.**
+    `build:` is shared by `benchmarks.yaml` and `repos.yaml` entries and already
+    reaches the build runner. The default is `"21"`. The local backend keeps
+    using `environment.java_home` or the inherited `JAVA_HOME`, because the host
+    has no JDK registry to select from. jobrunr sets `"25"` (its Micronaut
+    build plugin needs Gradle itself on JDK 25), so its preflight result is
+    expected to differ between backends. A `runtime_jdk` the image lacks fails
+    when the runners are created, before any run starts.
+81. **Every Docker-mode Gradle invocation uses only the image's JDKs.** It
+    passes `-Porg.gradle.java.installations.auto-detect=false`,
+    `auto-download=false`, and `paths=` listing the image's JDKs. On the host only
+    preflight disables downloads; the other stages are unchanged. The image's
+    JDK list, JDK root, Gradle home, and user home come from its labels, which
+    startup reads, so the code does not hard-code the image layout.
+82. **`ExecutionHandle` exists and builds use it; agents keep their own
+    process handling until Phase 2.** A build timeout now runs `docker rm -f`
+    on the container before killing the `docker` client. `AgentRunner` moves
+    onto the handle in Phase 2, when the agent runs in a container and the
+    handle matters.
+83. **Per-container limits, the owner label, and shutdown cleanup arrive
+    early.** Every build container gets `--memory` (`execution.build_memory`)
+    and `--cpus`, the label `lltas.owner_pid`, and a shutdown hook removes the
+    process's containers. Startup refuses a `build_memory` larger than the
+    Docker VM and warns when `concurrency.builds` times it exceeds the VM. The
+    dead-owner reconciliation, agent limits, and Linux `--user` remain Phase 3.
+84. **The image has JDKs 8, 11, 17, 21, and 25, not 26.** The Phase 0.5
+    preflight rows need 8 (reactor-core tests), 17 (JSqlParser), 21, and 25
+    (reactor-core compile, jobrunr's Gradle runtime); 11 matches a JDK the host
+    already had. caffeine, the only repository that needs 26, is disabled.
+    Base images are pinned by multi-arch digest.
+85. **The container's clock and locale are fixed**: UTC and `C.UTF-8`.
+    Host runs use the machine's time zone. Tests that depend on the zone (the
+    cmsx DTSTAMP test that already fails at C-1 on some commits) may behave
+    differently, and parity runs list such differences rather than copying the
+    host's zone into the container.
+86. **`--backend local|docker`** on `run`, `preflight`, and `init` overrides
+    `execution.backend` for one command, for parity runs. The resolved image ID
+    is written to `execution.image_id` in the run's configuration, so the
+    `evaluation_runs` config snapshot names the exact image; a configured
+    `image_id` that does not match the image refuses to start.
+87. **The image carries the tools build scripts shell out to**: git, curl,
+    and the common archive formats (xz, bzip2, zstd, zip). Agrona's build
+    bootstraps a Zig toolchain from a `.tar.xz` on Linux; without `xz` its P2
+    failed in the container while passing on the host, which has `xz` from
+    Homebrew. The list is about what any build may assume of a developer
+    machine, not about one repository.
+88. **A container that never started is an error, not a result.** `docker
+    run` exits 125 for daemon and client errors (image removed, mount source
+    missing, daemon gone). The Docker backend throws
+    `ExecutionInfrastructureException` for those, so the run fails instead of
+    being recorded as a failed build. In the first Phase 1 preflight batch,
+    rebuilding the image tag mid-batch let Docker Desktop delete the image the
+    batch was pinned to, and six repositories were recorded as `unknown`
+    before this check existed (those `preflight_results` rows carry image ID
+    `sha256:b950885a…`).
+89. **A TLS connection cut mid-handshake is a network failure.** Preflight
+    retries network failures, but its patterns did not include
+    `SSLHandshakeException` ("Remote host terminated the handshake"), so a
+    reset while the Gradle wrapper downloaded its distribution was recorded as
+    P1 `unknown` (jobrunr, first Docker run on the new image). Those messages
+    and "Connection reset" are now transient.
+90. **A task that fails before `checkerPass` runs is
+    `checker_prerequisite_failed`**, a new reason code, now in the plan's §7.3 list. P5
+    used to report any build where `checkerPass` never ran as
+    `checker_silent`, which hid jobrunr's real failure (`:core:npmInstall`,
+    reached through `main.output`). The message names the failed task.
+91. **Local parity runs used Corretto 21.0.13.1, not the image's Temurin
+    21.0.13.** The Phase 1 exit criterion pins the host `JAVA_HOME` to the
+    image's JDK 21. The host has no Temurin 21, and the two builds are the same
+    OpenJDK release, so the runs used the host's Corretto. No parity difference
+    traced to the JDK vendor.

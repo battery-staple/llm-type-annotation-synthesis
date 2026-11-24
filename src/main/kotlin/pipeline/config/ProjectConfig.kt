@@ -171,8 +171,52 @@ data class BuildSection(
     val subproject: String = "",
     @SerialName("compile_task") val compileTask: String = "compileJava",
     @SerialName("test_task") val testTask: String = "test",
-    @SerialName("checker_task") val checkerTask: String = "checkerPass"
+    @SerialName("checker_task") val checkerTask: String = "checkerPass",
+    /**
+     * Feature version of the JDK that runs Gradle in the runtime image (set as
+     * `JAVA_HOME` there). Old Gradle wrappers cannot run on JDK 21, and some
+     * build plugins need a newer one. The local backend ignores it and uses
+     * `environment.java_home` or the inherited `JAVA_HOME`.
+     */
+    @SerialName("runtime_jdk") val runtimeJdk: String = "21"
 )
+
+@Serializable
+enum class ExecutionBackendKind {
+    @SerialName("local") LOCAL,
+    @SerialName("docker") DOCKER;
+
+    val identifier: String get() = name.lowercase()
+}
+
+/**
+ * Where harness builds run (Dockerization plan, section 3.1). `local` runs
+ * Gradle on the host as before; `docker` runs each Gradle invocation in its
+ * own container from [image]. Agents still run on the host until Phase 2.
+ */
+@Serializable
+data class ExecutionSection(
+    val backend: ExecutionBackendKind = ExecutionBackendKind.LOCAL,
+    /** Image reference (tag or ID) for build containers. */
+    val image: String = "lltas-runtime:0.1",
+    /**
+     * The image's ID. Blank: resolved from [image] at startup and recorded
+     * here, so the run's config snapshot names the exact image. Set: startup
+     * refuses to run if [image] resolves to a different ID.
+     */
+    @SerialName("image_id") val imageId: String = "",
+    /** Memory limit per build container (`docker run --memory`). */
+    @SerialName("build_memory") val buildMemory: String = "6g",
+    /** CPU limit per build container (`docker run --cpus`). */
+    val cpus: Double = 4.0
+) {
+    init {
+        require(cpus > 0) { "execution.cpus must be positive" }
+        require(Regex("""\d+[bkmg]?""", RegexOption.IGNORE_CASE).matches(buildMemory)) {
+            "execution.build_memory must look like 6g or 6144m, got '$buildMemory'"
+        }
+    }
+}
 
 @Serializable
 data class CacheSection(
@@ -223,6 +267,7 @@ data class ProjectConfig(
     val cache: CacheSection = CacheSection(),
     val verification: VerificationSection = VerificationSection(),
     val preflight: PreflightSection = PreflightSection(),
+    val execution: ExecutionSection = ExecutionSection(),
     @Transient val sourceFile: File = File("project_config.yaml")
 ) {
     companion object {

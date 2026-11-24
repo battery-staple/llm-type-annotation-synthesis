@@ -181,6 +181,9 @@ interface BuildRunner {
  * [tasks] are passed to Gradle verbatim (callers qualify project paths); a
  * non-null [checker] adds the harness init script and environment exactly as
  * [BuildRunner.compile] does, and [extraEnv] overrides that environment.
+ * [writableDirs] are directories outside the worktree the build writes to (a
+ * probe report); a build container mounts them writable, and everything else
+ * outside the worktree read-only or not at all.
  */
 interface GradleTaskRunner {
     suspend fun runTasks(
@@ -188,8 +191,59 @@ interface GradleTaskRunner {
         tasks: List<String>,
         checker: CheckerConfig? = null,
         extraInitScripts: List<File> = emptyList(),
-        extraEnv: Map<String, String> = emptyMap()
+        extraEnv: Map<String, String> = emptyMap(),
+        writableDirs: List<File> = emptyList()
     ): BuildResult
+}
+
+// Port 3b: Execution backend (Dockerization plan, section 3.1)
+
+/** A host path made visible to a container at the same path. */
+data class Mount(val path: File, val readOnly: Boolean = true)
+
+/**
+ * One subprocess invocation. For the local backend, [environment] is laid over
+ * the pipeline's own environment as before; for a container backend it is the
+ * container's whole environment, so callers pass an explicit allowlist.
+ * [mounts] are ignored by the local backend, which sees the whole host.
+ */
+data class ExecSpec(
+    val command: List<String>,
+    val cwd: File,
+    val environment: Map<String, String> = emptyMap(),
+    val mounts: List<Mount> = emptyList(),
+    /** Short label for container names and labels ("build", later "agent"). */
+    val kind: String = "build",
+)
+
+/**
+ * A running invocation. A plain [Process] is not enough for containers: there
+ * the process is the `docker` client, killing it leaves the container running,
+ * and it can exit while the container still runs. [kill] stops the whole
+ * invocation, container included.
+ */
+interface ExecutionHandle {
+    val stdout: java.io.InputStream
+    val stderr: java.io.InputStream
+    val stdin: java.io.OutputStream
+    fun isAlive(): Boolean
+    fun waitFor(timeout: Long, unit: java.util.concurrent.TimeUnit): Boolean
+    fun exitValue(): Int
+    fun kill()
+}
+
+interface ExecutionBackend {
+    /** "local" or "docker"; recorded with results. */
+    val name: String
+
+    /** The runtime image's ID, or null for the local backend. */
+    val imageIdentity: String?
+
+    fun start(spec: ExecSpec): ExecutionHandle
+
+    /** Runs to completion, killing the invocation after [timeoutSeconds]. */
+    fun run(spec: ExecSpec, timeoutSeconds: Long, stdin: String? = null): pipeline.util.ProcResult =
+        pipeline.util.Processes.collect(start(spec), timeoutSeconds, stdin)
 }
 
 // Port 4: In-Process Compiler & Packaging

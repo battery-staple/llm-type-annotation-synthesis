@@ -171,6 +171,31 @@ and it runs with `--no-build-cache`, so the full suite really runs even in
 projects that enable Gradle's build cache. The other stages keep the project's
 cache setting.
 
+### Builds in Docker (optional)
+
+`execution.backend: docker` (or `--backend docker` on `run`, `preflight`, and
+`init`) runs every harness Gradle invocation in its own container from a pinned
+runtime image, instead of on the host (`docs/dockerization_plan.md`, Phase 1).
+Agents still run on the host. Build the image once:
+
+```bash
+docker build -f docker/runtime.Dockerfile -t lltas-runtime:0.1 docker
+```
+
+The image holds Temurin JDKs 8, 11, 17, 21, and 25. Gradle runs on the JDK
+named by the benchmark's `build.runtime_jdk` (default `"21"`; the local backend
+ignores it), and toolchains come only from the image, never from a download. A
+container sees the worktree (writable), the Git mirror and harness files such
+as the init script, qualifier jar, and Checker Framework (read-only, at their
+host paths), and a shared Gradle home in the Docker volume
+`lltas-gradle-home`, but not the project root, `data/`, `.cache/`, `.env`, or
+the host's `~/.gradle`. Startup stops before creating a run if the daemon or
+the image is missing, and records the image ID in the run's configuration
+snapshot (`execution.image_id`). Docker-mode results get their own cache keys.
+Each container is limited to `execution.build_memory` (default `6g`) and
+`execution.cpus` (default 4); with a Docker VM of about 8 GB, use
+`--build-jobs 1`.
+
 ### Crawler mode
 
 Crawler mode reads repositories from `repos.yaml`. `triage.depth` (default
