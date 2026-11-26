@@ -739,7 +739,23 @@ on both backends, except for two host-state differences:
 reactor-core fails P5 on both backends (Known gaps).
 
 The Docker test suites ran 1.5–2× slower; picocli ran 4× slower (33 s
-against 8 s). This was not investigated.
+against 8 s). The picocli run was an outlier and did not reproduce:
+rerun on 2026-11-25, its Docker P7 took 13 s (1.5×).
+
+- The whole preflight was slow that time: 773 s against 183 s on the
+  rerun. Its P6 took 612 s while Gradle reported a 21 s build, so the
+  time went outside the build, not into the tests.
+- The cause is unknown. In the same batch, Agrona's P2 and P6 were also
+  far slower than on the host, and shortly before, six repositories failed
+  at once with `docker run` exit 125.
+- Most of the remaining gap is fixed overhead per build. Each container
+  starts a new Gradle daemon and configures the build from scratch (about
+  3 s), and `docker run` adds about 1 s. The `:test` task itself ran about
+  1.5× slower (3.0–3.9 s against 1.9 s); 8 CPUs instead of 4 made no
+  difference.
+- This overhead matters most for small suites. The suite duration is the
+  wall time of the whole Gradle invocation, so for picocli, whose tests
+  take about 2 s, the overhead dominates the ratio.
 
 **JSqlParser checker time** (P5, clean plus planted checker runs): 284 s on
 the host, 332 s in Docker.
